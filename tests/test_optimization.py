@@ -226,6 +226,266 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             f"Energy mismatch: expected {expected_energy:.3f} Wh, got {actual_energy:.3f} Wh",
         )
 
+    def _make_legacy_deterministic_battery_df(self):
+        dates = pd.date_range(
+            start=pd.Timestamp("2024-01-01 00:00:00", tz=self.retrieve_hass_conf["time_zone"]),
+            periods=2,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df = pd.DataFrame(index=dates)
+        df["p_pv_forecast"] = 0.0
+        df["p_load_forecast"] = 0.0
+        df[self.fcst.var_load_cost] = [0.10, 0.50]
+        df[self.fcst.var_prod_price] = [0.30, 0.05]
+        return df
+
+    def _run_legacy_deterministic_battery_case(
+        self,
+        *,
+        soc_init,
+        soc_final,
+        set_nocharge_from_grid,
+        set_nodischarge_to_grid,
+        inverter_is_hybrid=False,
+    ):
+        df = self._make_legacy_deterministic_battery_df()
+        plant_conf = copy.deepcopy(self.plant_conf)
+        optim_conf = copy.deepcopy(self.optim_conf)
+        plant_conf.update(
+            {
+                "inverter_is_hybrid": inverter_is_hybrid,
+                "compute_curtailment": False,
+                "battery_nominal_energy_capacity": 1000.0,
+                "battery_discharge_power_max": 1000.0,
+                "battery_charge_power_max": 1000.0,
+                "battery_discharge_efficiency": 1.0,
+                "battery_charge_efficiency": 1.0,
+                "battery_minimum_state_of_charge": 0.0,
+                "battery_maximum_state_of_charge": 1.0,
+                "maximum_power_from_grid": 5000.0,
+                "maximum_power_to_grid": 5000.0,
+            }
+        )
+        optim_conf.update(
+            {
+                "set_use_battery": True,
+                "set_nocharge_from_grid": set_nocharge_from_grid,
+                "set_nodischarge_to_grid": set_nodischarge_to_grid,
+                "set_battery_dynamic": False,
+                "number_of_deferrable_loads": 0,
+                "weight_battery_charge": 0.0,
+                "weight_battery_discharge": 0.0,
+            }
+        )
+        opt = self.create_optimization(
+            costfun="profit",
+            optim_conf=optim_conf,
+            plant_conf=plant_conf,
+        )
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+            soc_init=soc_init,
+            soc_final=soc_final,
+        )
+        return opt, opt_res
+
+    def assert_legacy_deterministic_golden(self, opt_res, expected):
+        expected_index = pd.date_range(
+            start=pd.Timestamp("2024-01-01 00:00:00", tz=self.retrieve_hass_conf["time_zone"]),
+            periods=len(next(iter(expected.values()))),
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        expected_frame = pd.DataFrame(expected, index=expected_index)
+
+        self.assertEqual(list(opt_res.columns), list(expected_frame.columns))
+        self.assertEqual(len(opt_res), len(expected_frame))
+        pd.testing.assert_index_equal(opt_res.index, expected_frame.index)
+        pd.testing.assert_frame_equal(
+            opt_res,
+            expected_frame,
+            check_dtype=False,
+            check_freq=False,
+            rtol=0,
+            atol=1e-6,
+        )
+
+    def assert_grid_power_identity_and_signs(self, opt_res):
+        np.testing.assert_allclose(
+            opt_res["P_grid"].values,
+            opt_res["P_grid_pos"].values + opt_res["P_grid_neg"].values,
+            atol=1e-6,
+        )
+        self.assertGreaterEqual(opt_res["P_grid_pos"].min(), -1e-6)
+        self.assertLessEqual(opt_res["P_grid_neg"].max(), 1e-6)
+
+    def assert_battery_energy_matches_soc_delta(self, opt, opt_res, soc_init, soc_final):
+        timestep_hours = self.retrieve_hass_conf["optimization_time_step"].total_seconds() / 3600
+        expected_energy = (
+            (soc_init - soc_final) * opt.plant_conf["battery_nominal_energy_capacity"]
+        )
+        actual_energy = opt_res["P_batt"].sum() * timestep_hours
+        self.assertAlmostEqual(actual_energy, expected_energy, delta=1e-3)
+        self.assertAlmostEqual(opt_res["SOC_opt"].iloc[-1], soc_final, delta=1e-6)
+
+    def test_legacy_battery_result_signs_units_and_grid_balance(self):
+        charge_soc_init = 0.0
+        charge_soc_final = 0.5
+        charge_opt, charge_res = self._run_legacy_deterministic_battery_case(
+            soc_init=charge_soc_init,
+            soc_final=charge_soc_final,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=True,
+        )
+        discharge_soc_init = 0.5
+        discharge_soc_final = 0.0
+        discharge_opt, discharge_res = self._run_legacy_deterministic_battery_case(
+            soc_init=discharge_soc_init,
+            soc_final=discharge_soc_final,
+            set_nocharge_from_grid=True,
+            set_nodischarge_to_grid=False,
+        )
+
+        self.assertEqual(charge_opt.optim_status, "Optimal")
+        self.assertEqual(discharge_opt.optim_status, "Optimal")
+
+        self.assertLess(charge_res["P_batt"].min(), -1.0)
+        self.assertGreater(charge_res["P_grid_pos"].max(), 1.0)
+        self.assertGreater(discharge_res["P_batt"].max(), 1.0)
+        self.assertLess(discharge_res["P_grid_neg"].min(), -1.0)
+
+        self.assert_legacy_deterministic_golden(
+            charge_res,
+            {
+                "P_PV": [0.0, 0.0],
+                "P_Load": [0.0, 0.0],
+                "P_grid_pos": [1000.0, 0.0],
+                "P_grid_neg": [0.0, 0.0],
+                "P_grid": [1000.0, 0.0],
+                "P_batt": [-1000.0, 0.0],
+                "SOC_opt": [0.5, 0.5],
+                "soc_deficit_cost": [0.0, 0.0],
+                "soc_surplus_cost": [0.0, 0.0],
+                "unit_load_cost": [0.10, 0.50],
+                "unit_prod_price": [0.30, 0.05],
+                "maximum_power_from_grid": [5000.0, 5000.0],
+                "maximum_power_to_grid": [5000.0, 5000.0],
+                "cost_profit": [-0.05, 0.0],
+                "cost_fun_profit": [-0.05, 0.0],
+                "optim_status": ["Optimal", "Optimal"],
+            },
+        )
+        self.assert_legacy_deterministic_golden(
+            discharge_res,
+            {
+                "P_PV": [0.0, 0.0],
+                "P_Load": [0.0, 0.0],
+                "P_grid_pos": [0.0, 0.0],
+                "P_grid_neg": [-1000.0, 0.0],
+                "P_grid": [-1000.0, 0.0],
+                "P_batt": [1000.0, 0.0],
+                "SOC_opt": [0.0, 0.0],
+                "soc_deficit_cost": [0.0, 0.0],
+                "soc_surplus_cost": [0.0, 0.0],
+                "unit_load_cost": [0.10, 0.50],
+                "unit_prod_price": [0.30, 0.05],
+                "maximum_power_from_grid": [5000.0, 5000.0],
+                "maximum_power_to_grid": [5000.0, 5000.0],
+                "cost_profit": [0.15, 0.0],
+                "cost_fun_profit": [0.15, 0.0],
+                "optim_status": ["Optimal", "Optimal"],
+            },
+        )
+
+        for opt_res in (charge_res, discharge_res):
+            self.assert_grid_power_identity_and_signs(opt_res)
+            np.testing.assert_allclose(opt_res["P_grid"], -opt_res["P_batt"], atol=1e-6)
+            self.assertGreaterEqual(opt_res["SOC_opt"].min(), -1e-6)
+            self.assertLessEqual(opt_res["SOC_opt"].max(), 1.0 + 1e-6)
+        self.assertLessEqual(charge_res["P_grid_neg"].abs().max(), 1e-6)
+        self.assertLessEqual(discharge_res["P_grid_pos"].abs().max(), 1e-6)
+        self.assert_battery_energy_matches_soc_delta(
+            charge_opt,
+            charge_res,
+            charge_soc_init,
+            charge_soc_final,
+        )
+        self.assert_battery_energy_matches_soc_delta(
+            discharge_opt,
+            discharge_res,
+            discharge_soc_init,
+            discharge_soc_final,
+        )
+
+    def test_legacy_grid_charge_and_discharge_flags_block_only_forbidden_paths(self):
+        charge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.0,
+            soc_final=0.5,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=False,
+        )
+        nocharge_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.0,
+            soc_final=0.5,
+            set_nocharge_from_grid=True,
+            set_nodischarge_to_grid=False,
+        )
+        discharge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.5,
+            soc_final=0.0,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=False,
+        )
+        nodischarge_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.5,
+            soc_final=0.0,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=True,
+        )
+
+        self.assertEqual(charge_allowed_opt.optim_status, "Optimal")
+        self.assertEqual(discharge_allowed_opt.optim_status, "Optimal")
+        self.assertEqual(nocharge_opt.optim_status, "Infeasible")
+        self.assertEqual(nodischarge_opt.optim_status, "Infeasible")
+
+    def test_legacy_hybrid_grid_charge_and_discharge_flags_block_forbidden_paths(self):
+        hybrid_charge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.0,
+            soc_final=0.5,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=False,
+            inverter_is_hybrid=True,
+        )
+        hybrid_nocharge_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.0,
+            soc_final=0.5,
+            set_nocharge_from_grid=True,
+            set_nodischarge_to_grid=False,
+            inverter_is_hybrid=True,
+        )
+        hybrid_discharge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.5,
+            soc_final=0.0,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=False,
+            inverter_is_hybrid=True,
+        )
+        hybrid_nodischarge_opt, _ = self._run_legacy_deterministic_battery_case(
+            soc_init=0.5,
+            soc_final=0.0,
+            set_nocharge_from_grid=False,
+            set_nodischarge_to_grid=True,
+            inverter_is_hybrid=True,
+        )
+
+        self.assertEqual(hybrid_charge_allowed_opt.optim_status, "Optimal")
+        self.assertEqual(hybrid_discharge_allowed_opt.optim_status, "Optimal")
+        self.assertEqual(hybrid_nocharge_opt.optim_status, "Infeasible")
+        self.assertEqual(hybrid_nodischarge_opt.optim_status, "Infeasible")
+
     def run_thermal_battery_optimization(self, thermal_config, outdoor_temps=None, ghi=None):
         """Helper to run thermal battery optimization tests.
 
@@ -319,6 +579,140 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
     def test_perform_perfect_forecast_optim(self):
         self.opt_res = self.opt.perform_perfect_forecast_optim(self.df_input_data, self.days_list)
         self.assert_valid_optimization_result(self.opt_res)
+
+    def test_single_inverter_no_extra_block_matches_complete_output_golden(self):
+        dates = pd.date_range(
+            start=pd.Timestamp("2024-01-01 00:00:00", tz=self.retrieve_hass_conf["time_zone"]),
+            periods=5,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df = pd.DataFrame(
+            {
+                "p_pv_forecast": [0.0, 50.0, 100.0, 150.0, 200.0],
+                "p_load_forecast": [100.0, 100.0, 100.0, 100.0, 100.0],
+                self.fcst.var_load_cost: [0.20, 0.20, 0.20, 0.20, 0.20],
+                self.fcst.var_prod_price: [0.05, 0.05, 0.05, 0.05, 0.05],
+            },
+            index=dates,
+        )
+        optim_conf = copy.deepcopy(self.optim_conf)
+        plant_conf = copy.deepcopy(self.plant_conf)
+        optim_conf.update(
+            {
+                "number_of_deferrable_loads": 0,
+                "set_use_battery": False,
+                "set_total_pv_sell": False,
+            }
+        )
+        plant_conf["compute_curtailment"] = False
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+        expected_opt_res = pd.DataFrame(
+            {
+                "P_PV": [0.0, 50.0, 100.0, 150.0, 200.0],
+                "P_Load": [100.0, 100.0, 100.0, 100.0, 100.0],
+                "P_grid_pos": [100.0, 50.0, 0.0, 0.0, 0.0],
+                "P_grid_neg": [0.0, 0.0, 0.0, -50.0, -100.0],
+                "P_grid": [100.0, 50.0, 0.0, -50.0, -100.0],
+                "unit_load_cost": [0.20, 0.20, 0.20, 0.20, 0.20],
+                "unit_prod_price": [0.05, 0.05, 0.05, 0.05, 0.05],
+                "maximum_power_from_grid": [9000.0, 9000.0, 9000.0, 9000.0, 9000.0],
+                "maximum_power_to_grid": [9000.0, 9000.0, 9000.0, 9000.0, 9000.0],
+                "cost_profit": [-0.01, -0.005, -0.0, 0.00125, 0.0025],
+                "cost_fun_profit": [-0.01, -0.005, -0.0, 0.00125, 0.0025],
+                "optim_status": ["Optimal", "Optimal", "Optimal", "Optimal", "Optimal"],
+            },
+            index=dates,
+        )
+
+        self.assertEqual(list(opt_res.columns), list(expected_opt_res.columns))
+        self.assertEqual(len(opt_res), len(expected_opt_res))
+        pd.testing.assert_index_equal(opt_res.index, expected_opt_res.index)
+        pd.testing.assert_frame_equal(
+            opt_res,
+            expected_opt_res,
+            check_dtype=False,
+            check_freq=False,
+            rtol=0,
+            atol=1e-8,
+        )
+
+    def test_default_single_inverter_no_extra_block_matches_complete_output_golden(self):
+        self.assertEqual(self.optim_conf["number_of_deferrable_loads"], 2)
+        self.assertEqual(self.optim_conf["nominal_power_of_deferrable_loads"], [3000.0, 750.0])
+        self.assertEqual(self.optim_conf["operating_hours_of_each_deferrable_load"], [4, 0])
+        self.assertEqual(self.optim_conf["treat_deferrable_load_as_semi_cont"], [True, True])
+        self.assertEqual(self.optim_conf["set_deferrable_load_single_constant"], [False, False])
+        self.assertFalse(self.optim_conf["set_use_battery"])
+        self.assertFalse(self.optim_conf["set_total_pv_sell"])
+        self.assertTrue(self.optim_conf["set_use_pv"])
+        self.assertFalse(self.plant_conf["compute_curtailment"])
+        self.assertFalse(self.plant_conf["inverter_is_hybrid"])
+
+        # Eight 30-minute rows force the default 4-hour load to run in every slot,
+        # avoiding multiple equally optimal placements for the deferrable schedule.
+        dates = pd.date_range(
+            start=pd.Timestamp("2024-01-01 00:00:00", tz=self.retrieve_hass_conf["time_zone"]),
+            periods=8,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df = pd.DataFrame(
+            {
+                "p_pv_forecast": [0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0],
+                "p_load_forecast": [1000.0] * 8,
+                self.fcst.var_load_cost: [0.20] * 8,
+                self.fcst.var_prod_price: [0.05] * 8,
+            },
+            index=dates,
+        )
+        opt = self.create_optimization(
+            optim_conf=copy.deepcopy(self.optim_conf),
+            plant_conf=copy.deepcopy(self.plant_conf),
+        )
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+        expected_opt_res = pd.DataFrame(
+            {
+                "P_PV": [0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0],
+                "P_Load": [1000.0] * 8,
+                "P_grid_pos": [4000.0, 3900.0, 3800.0, 3700.0, 3600.0, 3500.0, 3400.0, 3300.0],
+                "P_grid_neg": [0.0] * 8,
+                "P_grid": [4000.0, 3900.0, 3800.0, 3700.0, 3600.0, 3500.0, 3400.0, 3300.0],
+                "P_deferrable0": [3000.0] * 8,
+                "P_deferrable1": [0.0] * 8,
+                "unit_load_cost": [0.20] * 8,
+                "unit_prod_price": [0.05] * 8,
+                "maximum_power_from_grid": [9000.0] * 8,
+                "maximum_power_to_grid": [9000.0] * 8,
+                "cost_profit": [-0.40, -0.39, -0.38, -0.37, -0.36, -0.35, -0.34, -0.33],
+                "cost_fun_profit": [-0.40, -0.39, -0.38, -0.37, -0.36, -0.35, -0.34, -0.33],
+                "optim_status": ["Optimal"] * 8,
+            },
+            index=dates,
+        )
+
+        self.assertEqual(list(opt_res.columns), list(expected_opt_res.columns))
+        self.assertEqual(len(opt_res), len(expected_opt_res))
+        pd.testing.assert_index_equal(opt_res.index, expected_opt_res.index)
+        pd.testing.assert_frame_equal(
+            opt_res,
+            expected_opt_res,
+            check_dtype=False,
+            check_freq=False,
+            rtol=0,
+            atol=1e-8,
+        )
 
     def test_perform_dayahead_forecast_optim(self):
         # Check formatting of output from dayahead optimization
