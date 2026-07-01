@@ -448,6 +448,68 @@ class TestWebServer(unittest.IsolatedAsyncioTestCase):
         # Compare as dictionaries to ignore whitespace differences (e.g. " : " vs ":")
         self.assertEqual(orjson.loads(actual_arg), orjson.loads(valid_json_str))
 
+    @patch("pathlib.Path.exists")
+    @patch("emhass.web_server.aiofiles.open")
+    @patch("emhass.web_server.set_input_data_dict", new_callable=AsyncMock)
+    @patch("emhass.web_server.naive_mpc_optim", new_callable=AsyncMock)
+    @patch("emhass.web_server.get_injection_dict")
+    async def test_action_naive_mpc_preserves_flat_runtime_payload(
+        self,
+        mock_get_inject,
+        mock_optim,
+        mock_set_input,
+        mock_file,
+        mock_path_exists,
+    ):
+        """The legacy REST boundary passes flat MPC runtime JSON through unchanged."""
+        mock_path_exists.return_value = True
+
+        def aiofiles_side_effect(file, mode="r", *args, **kwargs):
+            context_mock = AsyncMock()
+            file_handle = AsyncMock()
+            context_mock.__aenter__.return_value = file_handle
+            if "params.pkl" in str(file):
+                file_handle.read.return_value = pickle.dumps(
+                    (pathlib.Path("/config"), {"optim_conf": {}})
+                )
+            else:
+                file_handle.read.return_value = "INFO >> Success"
+            return context_mock
+
+        runtime_payload = {
+            "prediction_horizon": 2,
+            "soc_init": 0.42,
+            "soc_final": 0.50,
+            "battery_charge_power_max": 1200.0,
+            "battery_discharge_power_max": 1300.0,
+            "pv_power_forecast": [0.0, 0.0],
+            "load_power_forecast": [100.0, 100.0],
+            "load_cost_forecast": [0.25, 0.25],
+            "prod_price_forecast": [0.05, 0.05],
+        }
+        mock_file.side_effect = aiofiles_side_effect
+        mock_set_input.return_value = {
+            "params": {},
+            "retrieve_hass_conf": {"continual_publish": False},
+        }
+        mock_optim.return_value = MagicMock()
+        mock_get_inject.return_value = {"optim_status": "Optimal"}
+
+        response = await self.client.post("/action/naive-mpc-optim", json=runtime_payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            await response.get_data(as_text=True),
+            "EMHASS >> Action naive-mpc-optim executed... \n",
+        )
+        mock_set_input.assert_awaited_once()
+        mock_get_inject.assert_called_once_with(mock_optim.return_value)
+        call_args = mock_set_input.call_args
+        self.assertEqual(call_args[0][4], "naive-mpc-optim")
+        actual_payload = orjson.loads(call_args[0][3])
+        self.assertEqual(actual_payload, runtime_payload)
+        self.assertTrue(all(not isinstance(value, dict) for value in actual_payload.values()))
+
     @patch("os.getenv")
     async def test_setup_paths(self, mock_getenv):
         # Configure env vars

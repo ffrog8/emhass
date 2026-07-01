@@ -224,6 +224,118 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             input_data_dict["fcst"].optim_conf["production_price_forecast_method"], "list"
         )
 
+    async def test_naive_mpc_flat_runtime_payload_preserves_scalar_battery_inputs(self):
+        """Flat MPC runtime battery inputs remain scalar values in legacy config locations."""
+        runtimeparams = {
+            "prediction_horizon": 5,
+            "soc_init": 0.35,
+            "soc_final": 0.45,
+            "battery_nominal_energy_capacity": 6789.0,
+            "battery_charge_power_max": 1234.0,
+            "battery_discharge_power_max": 2345.0,
+            "pv_power_forecast": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "load_power_forecast": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "load_cost_forecast": [0.20, 0.20, 0.20, 0.20, 0.20],
+            "prod_price_forecast": [0.05, 0.05, 0.05, 0.05, 0.05],
+        }
+        params = await TestCommandLineAsyncUtils.get_test_params(set_use_pv=True)
+        params["optim_conf"]["set_use_battery"] = True
+        params_json = orjson.dumps(params).decode("utf-8")
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            params_json,
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            "naive-mpc-optim",
+            logger,
+            get_data_from_file=True,
+        )
+
+        passed_data = input_data_dict["params"]["passed_data"]
+        plant_conf = input_data_dict["plant_conf"]
+        optim_conf = input_data_dict["optim_conf"]
+        self.assertEqual(passed_data["prediction_horizon"], 5)
+        self.assertEqual(passed_data["soc_init"], 0.35)
+        self.assertEqual(passed_data["soc_final"], 0.45)
+        self.assertTrue(optim_conf["set_use_battery"])
+        self.assertIsInstance(plant_conf["battery_nominal_energy_capacity"], float)
+        self.assertIsInstance(plant_conf["battery_charge_power_max"], float)
+        self.assertIsInstance(plant_conf["battery_discharge_power_max"], float)
+        self.assertEqual(plant_conf["battery_nominal_energy_capacity"], 6789.0)
+        self.assertEqual(plant_conf["battery_charge_power_max"], 1234.0)
+        self.assertEqual(plant_conf["battery_discharge_power_max"], 2345.0)
+        for key in (
+            "battery_nominal_energy_capacity",
+            "battery_charge_power_max",
+            "battery_discharge_power_max",
+        ):
+            self.assertNotIsInstance(plant_conf[key], dict)
+        self.assertEqual(
+            input_data_dict["df_input_data_dayahead"]["p_load_forecast"].tolist(),
+            runtimeparams["load_power_forecast"],
+        )
+        self.assertEqual(
+            input_data_dict["df_input_data_dayahead"]["p_pv_forecast"].tolist(),
+            runtimeparams["pv_power_forecast"],
+        )
+
+    async def test_naive_mpc_flat_runtime_payload_matches_complete_output_golden(self):
+        """Flat MPC runtime forecast lists produce the same complete optimization output."""
+        OptimizationCache.clear()
+        runtimeparams = {
+            "prediction_horizon": 5,
+            "pv_power_forecast": [0.0, 50.0, 100.0, 150.0, 200.0],
+            "load_power_forecast": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "load_cost_forecast": [0.20, 0.20, 0.20, 0.20, 0.20],
+            "prod_price_forecast": [0.05, 0.05, 0.05, 0.05, 0.05],
+        }
+        params = await TestCommandLineAsyncUtils.get_test_params(set_use_pv=True)
+        params["optim_conf"]["number_of_deferrable_loads"] = 0
+        params_json = orjson.dumps(params).decode("utf-8")
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            params_json,
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            "naive-mpc-optim",
+            logger,
+            get_data_from_file=True,
+        )
+
+        with patch("emhass.command_line.last_run.record"):
+            opt_res = await naive_mpc_optim(input_data_dict, logger, debug=True)
+
+        expected_index = input_data_dict["df_input_data_dayahead"].index[:5]
+        expected_opt_res = pd.DataFrame(
+            {
+                "P_PV": [0.0, 50.0, 100.0, 150.0, 200.0],
+                "P_Load": [100.0, 100.0, 100.0, 100.0, 100.0],
+                "P_grid_pos": [100.0, 50.0, 0.0, 0.0, 0.0],
+                "P_grid_neg": [0.0, 0.0, 0.0, -50.0, -100.0],
+                "P_grid": [100.0, 50.0, 0.0, -50.0, -100.0],
+                "unit_load_cost": [0.20, 0.20, 0.20, 0.20, 0.20],
+                "unit_prod_price": [0.05, 0.05, 0.05, 0.05, 0.05],
+                "maximum_power_from_grid": [9000.0, 9000.0, 9000.0, 9000.0, 9000.0],
+                "maximum_power_to_grid": [9000.0, 9000.0, 9000.0, 9000.0, 9000.0],
+                "cost_profit": [-0.01, -0.005, -0.0, 0.00125, 0.0025],
+                "cost_fun_profit": [-0.01, -0.005, -0.0, 0.00125, 0.0025],
+                "optim_status": ["Optimal", "Optimal", "Optimal", "Optimal", "Optimal"],
+            },
+            index=expected_index,
+        )
+
+        self.assertEqual(list(opt_res.columns), list(expected_opt_res.columns))
+        self.assertEqual(len(opt_res), len(expected_opt_res))
+        pd.testing.assert_index_equal(opt_res.index, expected_opt_res.index)
+        pd.testing.assert_frame_equal(
+            opt_res,
+            expected_opt_res,
+            check_dtype=False,
+            check_freq=False,
+            rtol=0,
+            atol=1e-8,
+        )
+
     # Test day-ahead optimization
     async def test_webserver_get_injection_dict(self):
         costfun = "profit"
@@ -1583,6 +1695,179 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             error_logs = [str(call) for call in mock_logger.error.mock_calls]
             self.assertTrue(any("Unexpected error loading" in log for log in error_logs))
             self.assertTrue(any("Cannot recover" in log for log in error_logs))
+
+    async def test_default_publish_descriptors_keep_legacy_single_inverter_names(self):
+        """Default publish descriptors keep the legacy flat single-inverter entity names."""
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params_json = orjson.dumps(params).decode("utf-8")
+        retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params_json, logger)
+        params_out, _, _, _ = await utils.treat_runtimeparams(
+            "{}",
+            params_json,
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "publish-data",
+            logger,
+            emhass_conf,
+        )
+        passed_data = orjson.loads(params_out)["passed_data"]
+
+        self.assertEqual(
+            {
+                key: passed_data[key]["entity_id"]
+                for key in (
+                    "custom_pv_forecast_id",
+                    "custom_load_forecast_id",
+                    "custom_pv_curtailment_id",
+                    "custom_hybrid_inverter_id",
+                    "custom_batt_forecast_id",
+                    "custom_batt_soc_forecast_id",
+                    "custom_grid_forecast_id",
+                    "custom_cost_fun_id",
+                    "custom_optim_status_id",
+                    "custom_unit_load_cost_id",
+                    "custom_unit_prod_price_id",
+                )
+            },
+            {
+                "custom_pv_forecast_id": "sensor.p_pv_forecast",
+                "custom_load_forecast_id": "sensor.p_load_forecast",
+                "custom_pv_curtailment_id": "sensor.p_pv_curtailment",
+                "custom_hybrid_inverter_id": "sensor.p_hybrid_inverter",
+                "custom_batt_forecast_id": "sensor.p_batt_forecast",
+                "custom_batt_soc_forecast_id": "sensor.soc_batt_forecast",
+                "custom_grid_forecast_id": "sensor.p_grid_forecast",
+                "custom_cost_fun_id": "sensor.total_cost_fun_value",
+                "custom_optim_status_id": "sensor.optim_status",
+                "custom_unit_load_cost_id": "sensor.unit_load_cost",
+                "custom_unit_prod_price_id": "sensor.unit_prod_price",
+            },
+        )
+        self.assertEqual(
+            [item["entity_id"] for item in passed_data["custom_deferrable_forecast_id"]],
+            ["sensor.p_deferrable0", "sensor.p_deferrable1"],
+        )
+        self.assertEqual(
+            [item["entity_id"] for item in passed_data["custom_deferrable_state_id"]],
+            ["sensor.p_deferrable0_state", "sensor.p_deferrable1_state"],
+        )
+        self.assertEqual(
+            [item["entity_id"] for item in passed_data["custom_predicted_temperature_id"]],
+            ["sensor.temp_predicted0", "sensor.temp_predicted1"],
+        )
+        self.assertEqual(
+            [item["entity_id"] for item in passed_data["custom_heating_demand_id"]],
+            ["sensor.heating_demand0", "sensor.heating_demand1"],
+        )
+        self.assertEqual(passed_data["publish_prefix"], "")
+
+    async def test_publish_data_uses_legacy_single_inverter_entity_pairs(self):
+        """publish_data posts legacy entity IDs and type_var values without relying on order."""
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params["optim_conf"].update(
+            {
+                "set_use_battery": True,
+                "number_of_deferrable_loads": 2,
+                "publish_deferrable_load_states": True,
+            }
+        )
+        params["plant_conf"].update(
+            {
+                "inverter_is_hybrid": True,
+                "compute_curtailment": True,
+            }
+        )
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            orjson.dumps(params).decode("utf-8"),
+            None,
+            "publish-data",
+            logger,
+            get_data_from_file=True,
+        )
+
+        idx = pd.date_range(
+            "2024-01-01 00:00:00",
+            periods=2,
+            freq=input_data_dict["retrieve_hass_conf"]["optimization_time_step"],
+            tz=input_data_dict["retrieve_hass_conf"]["time_zone"],
+        )
+        opt_res_latest = pd.DataFrame(
+            {
+                "P_Load": [200.0, 200.0],
+                "P_PV": [100.0, 100.0],
+                "P_PV_curtailment": [0.0, 25.0],
+                "P_hybrid_inverter": [50.0, 50.0],
+                "P_deferrable0": [3000.0, 0.0],
+                "P_deferrable1": [375.0, 750.0],
+                "P_batt": [400.0, -400.0],
+                "SOC_opt": [0.55, 0.50],
+                "P_grid": [-300.0, 500.0],
+                "cost_fun_profit": [0.0, 0.0],
+                "optim_status": ["Optimal", "Optimal"],
+                "unit_load_cost": [0.20, 0.20],
+                "unit_prod_price": [0.05, 0.05],
+            },
+            index=idx,
+        )
+        input_data_dict["rh"].post_data = AsyncMock(return_value=True)
+
+        with patch("emhass.command_line._get_closest_index", return_value=0):
+            await publish_data(input_data_dict, logger, opt_res_latest=opt_res_latest)
+
+        def posted_payload(call):
+            data = call.kwargs.get("data_df")
+            if data is None and call.args:
+                data = call.args[0]
+            entity_id = call.kwargs.get("entity_id")
+            if entity_id is None and len(call.args) > 2:
+                entity_id = call.args[2]
+            type_var = call.kwargs.get("type_var")
+            if type_var is None and len(call.args) > 6:
+                type_var = call.args[6]
+            return (entity_id, type_var), data
+
+        expected_posted_data = {
+            ("sensor.p_load_forecast", "power"): opt_res_latest["P_Load"],
+            ("sensor.p_pv_forecast", "power"): opt_res_latest["P_PV"],
+            ("sensor.p_pv_curtailment", "power"): opt_res_latest["P_PV_curtailment"],
+            ("sensor.p_hybrid_inverter", "power"): opt_res_latest["P_hybrid_inverter"],
+            ("sensor.p_batt_forecast", "batt"): opt_res_latest["P_batt"],
+            ("sensor.soc_batt_forecast", "SOC"): opt_res_latest["SOC_opt"] * 100,
+            ("sensor.p_grid_forecast", "power"): opt_res_latest["P_grid"],
+            ("sensor.total_cost_fun_value", "cost_fun"): opt_res_latest["cost_fun_profit"],
+            ("sensor.optim_status", "optim_status"): opt_res_latest["optim_status"],
+            ("sensor.unit_load_cost", "unit_load_cost"): opt_res_latest["unit_load_cost"],
+            ("sensor.unit_prod_price", "unit_prod_price"): opt_res_latest["unit_prod_price"],
+            ("sensor.p_deferrable0", "deferrable"): opt_res_latest["P_deferrable0"],
+            ("sensor.p_deferrable1", "deferrable"): opt_res_latest["P_deferrable1"],
+            ("sensor.p_deferrable0_state", "categorical"): pd.Series(
+                ["on", "off"], index=idx
+            ),
+            ("sensor.p_deferrable1_state", "categorical"): pd.Series(
+                ["variable", "on"], index=idx
+            ),
+        }
+        observed_posted_data = {}
+        for call in input_data_dict["rh"].post_data.call_args_list:
+            pair, data = posted_payload(call)
+            self.assertNotIn(pair, observed_posted_data)
+            observed_posted_data[pair] = data
+
+        self.assertCountEqual(observed_posted_data, expected_posted_data)
+        for pair, expected_series in expected_posted_data.items():
+            actual_series = observed_posted_data[pair]
+            if isinstance(actual_series, pd.DataFrame):
+                self.assertEqual(actual_series.shape[1], 1)
+                actual_series = actual_series.iloc[:, 0]
+            pd.testing.assert_series_equal(
+                actual_series,
+                expected_series,
+                check_dtype=False,
+                check_names=False,
+            )
 
     async def test_publish_thermal_loads(self):
         """
@@ -4137,8 +4422,8 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opt_2.param_def_current_state[0].value, 1.0)
         self.assertEqual(opt_2.param_def_current_state[1].value, 0.0)
 
-    async def test_cache_hit_on_battery_power_limit_change(self):
-        """Test that changing battery_discharge_power_max keeps cache HIT.
+    async def test_cache_hit_updates_battery_power_limit_parameters(self):
+        """Test that changing flat battery power-limit scalars keeps cache HIT.
 
         Both battery power limits live in plant_runtime_keys and are wired
         through to cp.Parameters whose .value is updated per solve, so a
@@ -4155,10 +4440,20 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         }
 
         opt_1 = (await self._run_set_input(base_rt))["opt"]
-        opt_2 = (await self._run_set_input({**base_rt, "battery_discharge_power_max": 9999}))["opt"]
+        opt_2 = (
+            await self._run_set_input(
+                {
+                    **base_rt,
+                    "battery_charge_power_max": 8888,
+                    "battery_discharge_power_max": 9999,
+                }
+            )
+        )["opt"]
 
-        self.assertIs(opt_1, opt_2, "battery_discharge_power_max change must keep cache HIT")
-        # And the new value has been propagated to the CVXPY Parameter
+        self.assertIs(opt_1, opt_2, "battery power-limit changes must keep cache HIT")
+        self.assertEqual(opt_2.plant_conf["battery_charge_power_max"], 8888)
+        self.assertEqual(opt_2.plant_conf["battery_discharge_power_max"], 9999)
+        self.assertAlmostEqual(float(opt_2.param_battery_charge_power_max.value), 8888.0)
         self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max.value), 9999.0)
 
 
