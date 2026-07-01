@@ -11,6 +11,11 @@ import numpy as np
 import pandas as pd
 
 from emhass import utils
+from emhass.inverter_blocks import (
+    InverterBlockConfig,
+    InverterBlockRuntime,
+    InverterBlockVariables,
+)
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
 # Any other key is silently ignored, so a typo such as the singular
@@ -133,6 +138,10 @@ class Optimization:
         self.var_load_cost = var_load_cost
         self.var_prod_price = var_prod_price
         self.optim_status = None
+        self.inverter_block_config = {}
+        self.inverter_block_runtime = {}
+        self.inverter_block_variables = {}
+        self._refresh_inverter_block_config()
 
         # Prioritize config value over default arg
         if "delta_forecast_daily" in self.optim_conf:
@@ -235,6 +244,7 @@ class Optimization:
 
         # Optional intermediate SOC target parameters (issue #553)
         self._init_soc_target_params()
+        self._refresh_inverter_block_runtime()
 
         # Peak grid import already incurred this billing period (issue #623, Phase 2)
         self._init_current_period_peak_param()
@@ -301,6 +311,48 @@ class Optimization:
         """
         self.param_current_period_peak = cp.Parameter(nonneg=True, name="current_period_peak")
         self.param_current_period_peak.value = 0.0
+
+    def _refresh_inverter_block_runtime(self) -> None:
+        """Rebuild block 0 runtime aliases after CVXPY parameter recreation."""
+        self.inverter_block_runtime[0] = InverterBlockRuntime(
+            index=0,
+            soc_init=self.param_soc_init,
+            soc_final=self.param_soc_final,
+            soc_low_gap=self.param_soc_low_gap,
+            soc_high_gap=self.param_soc_high_gap,
+            soc_low_required=self.param_soc_low_required,
+            soc_high_required=self.param_soc_high_required,
+            soc_target_floor=self.param_soc_target_floor,
+            battery_charge_power_max=self.param_battery_charge_power_max,
+            battery_discharge_power_max=self.param_battery_discharge_power_max,
+        )
+
+    def _refresh_inverter_block_config(self) -> None:
+        """Rebuild block 0 config aliases after flat config dict replacement."""
+        self.inverter_block_config[0] = InverterBlockConfig(
+            index=0,
+            optim_conf=self.optim_conf,
+            plant_conf=self.plant_conf,
+        )
+
+    def _refresh_inverter_block_variables(self, vars_dict: dict | None = None) -> None:
+        """Rebuild block 0 variable aliases after CVXPY variable recreation."""
+        block_vars = vars_dict if vars_dict is not None else self.vars
+        self.inverter_block_variables[0] = InverterBlockVariables(
+            index=0,
+            p_sto_pos=block_vars.get("p_sto_pos"),
+            p_sto_neg=block_vars.get("p_sto_neg"),
+            soc_low_recovered=block_vars.get("soc_low_recovered"),
+            soc_high_recovered=block_vars.get("soc_high_recovered"),
+            soc_deficit_cost=block_vars.get("soc_deficit_cost"),
+            soc_surplus_cost=block_vars.get("soc_surplus_cost"),
+            p_hybrid_inverter=block_vars.get("p_hybrid_inverter"),
+            p_dc_ac=block_vars.get("p_dc_ac"),
+            p_ac_dc=block_vars.get("p_ac_dc"),
+            is_dc_sourcing=block_vars.get("is_dc_sourcing"),
+            batt_stress_cost=block_vars.get("batt_stress_cost"),
+            inv_stress_cost=block_vars.get("inv_stress_cost"),
+        )
 
     def _init_deferrable_load_params(self) -> None:
         """
@@ -923,12 +975,14 @@ class Optimization:
         :param plant_conf: The plant configuration containing
             battery_charge_power_max / battery_discharge_power_max
         """
+        self._refresh_inverter_block_config()
         new_charge_max = float(plant_conf.get("battery_charge_power_max", 0) or 0)
         new_discharge_max = float(plant_conf.get("battery_discharge_power_max", 0) or 0)
         if self.param_battery_charge_power_max.value != new_charge_max:
             self.param_battery_charge_power_max.value = new_charge_max
         if self.param_battery_discharge_power_max.value != new_discharge_max:
             self.param_battery_discharge_power_max.value = new_discharge_max
+        self._refresh_inverter_block_runtime()
 
     def update_thermal_start_temps(self, optim_conf: dict) -> None:
         """
@@ -1436,6 +1490,7 @@ class Optimization:
         else:
             vars_dict["p_def_sum"] = np.zeros(n)
 
+        self._refresh_inverter_block_variables(vars_dict)
         return vars_dict, constraints
 
     def _build_objective_function(
@@ -1449,10 +1504,11 @@ class Optimization:
         Returns a CVXPY expression to be Maximized.
         """
         # Retrieve variables from self.vars (populated in _initialize_decision_variables)
+        block_vars = self.inverter_block_variables[0]
         p_grid_pos = self.vars["p_grid_pos"]
         p_grid_neg = self.vars["p_grid_neg"]
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
+        p_sto_pos = block_vars.p_sto_pos
+        p_sto_neg = block_vars.p_sto_neg
         p_def_sum = self.vars["p_def_sum"]
         SC = self.vars.get("SC", None)
 
@@ -1665,13 +1721,14 @@ class Optimization:
     def _add_main_power_balance_constraints(self, constraints):
         """Add the main power balance constraints (Vectorized)."""
         # Retrieve variables
-        p_hybrid_inverter = self.vars.get("p_hybrid_inverter")
+        block_vars = self.inverter_block_variables[0]
+        p_hybrid_inverter = block_vars.p_hybrid_inverter
         p_def_sum = self.vars["p_def_sum"]
         p_grid_neg = self.vars["p_grid_neg"]
         p_grid_pos = self.vars["p_grid_pos"]
         p_pv_curtailment = self.vars["p_pv_curtailment"]
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
+        p_sto_pos = block_vars.p_sto_pos
+        p_sto_neg = block_vars.p_sto_neg
         D = self.vars["D"]
 
         # Retrieve parameters
@@ -1724,10 +1781,11 @@ class Optimization:
             return
 
         # Retrieve main interface variables
-        p_hybrid_inverter = self.vars["p_hybrid_inverter"]
+        block_vars = self.inverter_block_variables[0]
+        p_hybrid_inverter = block_vars.p_hybrid_inverter
         p_pv_curtailment = self.vars["p_pv_curtailment"]
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
+        p_sto_pos = block_vars.p_sto_pos
+        p_sto_neg = block_vars.p_sto_neg
         p_pv = self.param_pv_forecast
 
         # Determine Inverter Capacity (Configuration Logic)
@@ -1785,6 +1843,7 @@ class Optimization:
         self.vars["p_dc_ac"] = p_dc_ac
         self.vars["p_ac_dc"] = p_ac_dc
         self.vars["is_dc_sourcing"] = is_dc_sourcing
+        self._refresh_inverter_block_variables()
 
         # Power Balance Constraints (Vectorized)
 
@@ -1825,24 +1884,26 @@ class Optimization:
         if not self.optim_conf["set_use_battery"]:
             return
 
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
+        block_runtime = self.inverter_block_runtime[0]
+        block_vars = self.inverter_block_variables[0]
+        p_sto_pos = block_vars.p_sto_pos
+        p_sto_neg = block_vars.p_sto_neg
         E = self.vars["E"]  # Binary: 1=Discharge, 0=Charge
         D = self.vars["D"]  # Binary: 1=Import, 0=Export
         p_pv = self.param_pv_forecast
 
         # Parameters (Scalars)
-        soc_init = self.param_soc_init
-        soc_final = self.param_soc_final
+        soc_init = block_runtime.soc_init
+        soc_final = block_runtime.soc_final
 
         # Constants
         cap = self.plant_conf["battery_nominal_energy_capacity"]
         eff_dis = self.plant_conf["battery_discharge_efficiency"]
         eff_chg = self.plant_conf["battery_charge_efficiency"]
-        max_dis = self.param_battery_discharge_power_max
-        max_chg = self.param_battery_charge_power_max  # nonneg cp.Parameter
-        soc_low_recovered = self.vars["soc_low_recovered"]
-        soc_high_recovered = self.vars["soc_high_recovered"]
+        max_dis = block_runtime.battery_discharge_power_max
+        max_chg = block_runtime.battery_charge_power_max  # nonneg cp.Parameter
+        soc_low_recovered = block_vars.soc_low_recovered
+        soc_high_recovered = block_vars.soc_high_recovered
         min_energy = self.plant_conf["battery_minimum_state_of_charge"] * cap
         max_energy = self.plant_conf["battery_maximum_state_of_charge"] * cap
         recovery_margin = max(cap * 1e-6, 1e-3)
@@ -1917,40 +1978,44 @@ class Optimization:
         # Before recovery the trajectory stays on the initial out-of-band side.
         # After recovery the usual hard SOC limits apply and cannot be violated again.
         constraints.append(
-            current_stored_energy >= min_energy - self.param_soc_low_gap * (1 - soc_low_recovered)
+            current_stored_energy
+            >= min_energy - block_runtime.soc_low_gap * (1 - soc_low_recovered)
         )
         constraints.append(
-            current_stored_energy <= max_energy + self.param_soc_high_gap * (1 - soc_high_recovered)
+            current_stored_energy
+            <= max_energy + block_runtime.soc_high_gap * (1 - soc_high_recovered)
         )
         constraints.append(soc_low_recovered[1:] >= soc_low_recovered[:-1])
         constraints.append(soc_high_recovered[1:] >= soc_high_recovered[:-1])
-        constraints.append(soc_low_recovered <= self.param_soc_low_required)
-        constraints.append(soc_high_recovered <= self.param_soc_high_required)
-        constraints.append(soc_low_recovered[-1] == self.param_soc_low_required)
-        constraints.append(soc_high_recovered[-1] == self.param_soc_high_required)
+        constraints.append(soc_low_recovered <= block_runtime.soc_low_required)
+        constraints.append(soc_high_recovered <= block_runtime.soc_high_required)
+        constraints.append(soc_low_recovered[-1] == block_runtime.soc_low_required)
+        constraints.append(soc_high_recovered[-1] == block_runtime.soc_high_required)
         constraints.append(
             current_stored_energy[1:]
             >= current_stored_energy[:-1]
-            - recovery_big_m_low * (soc_low_recovered[:-1] + (1 - self.param_soc_low_required))
+            - recovery_big_m_low
+            * (soc_low_recovered[:-1] + (1 - block_runtime.soc_low_required))
         )
         constraints.append(
             current_stored_energy[1:]
             <= current_stored_energy[:-1]
-            + recovery_big_m_high * (soc_high_recovered[:-1] + (1 - self.param_soc_high_required))
+            + recovery_big_m_high
+            * (soc_high_recovered[:-1] + (1 - block_runtime.soc_high_required))
         )
         constraints.append(
             current_stored_energy
             <= min_energy
             - recovery_margin
             + recovery_big_m_low * soc_low_recovered
-            + recovery_big_m_low * (1 - self.param_soc_low_required)
+            + recovery_big_m_low * (1 - block_runtime.soc_low_required)
         )
         constraints.append(
             current_stored_energy
             >= max_energy
             + recovery_margin
             - recovery_big_m_high * soc_high_recovered
-            - recovery_big_m_high * (1 - self.param_soc_high_required)
+            - recovery_big_m_high * (1 - block_runtime.soc_high_required)
         )
 
         # Final SOC Constraint
@@ -1963,7 +2028,7 @@ class Optimization:
         # requested timestep, leaving the battery free to discharge afterward.
         # Single precomputed floor vector; zero = no-op, so behaviour is
         # unchanged unless a target is explicitly requested.
-        constraints.append(current_stored_energy >= self.param_soc_target_floor)
+        constraints.append(current_stored_energy >= block_runtime.soc_target_floor)
 
         # Battery-first priority (issue #834): on a flat (non time-of-use)
         # tariff, "drain the battery before importing" and "interleave grid
@@ -3794,6 +3859,7 @@ class Optimization:
 
             # Re-initialize the intermediate SOC target mask with the new horizon (#553)
             self._init_soc_target_params()
+            self._refresh_inverter_block_runtime()
 
             # NOTE: param_current_period_peak (issue #623, Phase 2) is a SCALAR
             # cp.Parameter, horizon-independent, so it is intentionally NOT
@@ -4564,6 +4630,7 @@ class Optimization:
                 )
                 if batt_stress_conf["active"]:
                     self.vars["batt_stress_cost"] = batt_stress_conf["vars"]
+                    self._refresh_inverter_block_variables()
 
             if self.plant_conf["inverter_is_hybrid"]:
                 P_nom_inverter_max = max(
@@ -4575,6 +4642,7 @@ class Optimization:
                 )
                 if inv_stress_conf["active"]:
                     self.vars["inv_stress_cost"] = inv_stress_conf["vars"]
+                    self._refresh_inverter_block_variables()
 
             # Add Constraints
             self._add_main_power_balance_constraints(constraints)
