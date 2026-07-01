@@ -4453,6 +4453,9 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIs(opt_1, opt_2, "battery power-limit changes must keep cache HIT")
         self.assertEqual(opt_2.plant_conf["battery_charge_power_max"], 8888)
         self.assertEqual(opt_2.plant_conf["battery_discharge_power_max"], 9999)
+        self.assertIs(opt_2.inverter_block_config[0].optim_conf, opt_2.optim_conf)
+        self.assertIs(opt_2.inverter_block_config[0].plant_conf, opt_2.plant_conf)
+        self.assertEqual(opt_2.inverter_block_config[0].plant_conf["battery_charge_power_max"], 8888)
         self.assertAlmostEqual(float(opt_2.param_battery_charge_power_max.value), 8888.0)
         self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max.value), 9999.0)
 

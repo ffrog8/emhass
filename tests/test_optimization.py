@@ -714,6 +714,35 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             atol=1e-8,
         )
 
+    def test_internal_inverter_block_zero_wraps_legacy_flat_state(self):
+        opt = self.create_optimization()
+
+        self.assertEqual(list(opt.inverter_block_config.keys()), [0])
+        self.assertEqual(list(opt.inverter_block_runtime.keys()), [0])
+        self.assertEqual(list(opt.inverter_block_variables.keys()), [0])
+
+        block_config = opt.inverter_block_config[0]
+        self.assertEqual(block_config.index, 0)
+        self.assertIs(block_config.optim_conf, opt.optim_conf)
+        self.assertIs(block_config.plant_conf, opt.plant_conf)
+        self.assertEqual(
+            block_config.battery_nominal_energy_capacity,
+            opt.plant_conf["battery_nominal_energy_capacity"],
+        )
+        self.assertEqual(block_config.inverter_is_hybrid, opt.plant_conf["inverter_is_hybrid"])
+
+        block_runtime = opt.inverter_block_runtime[0]
+        self.assertIs(block_runtime.soc_init, opt.param_soc_init)
+        self.assertIs(block_runtime.soc_target_floor, opt.param_soc_target_floor)
+        self.assertIs(
+            block_runtime.battery_charge_power_max,
+            opt.param_battery_charge_power_max,
+        )
+
+        block_variables = opt.inverter_block_variables[0]
+        self.assertIs(block_variables.p_sto_pos, opt.vars["p_sto_pos"])
+        self.assertIs(block_variables.p_sto_neg, opt.vars["p_sto_neg"])
+
     def test_perform_dayahead_forecast_optim(self):
         # Check formatting of output from dayahead optimization
         self.df_input_data_dayahead = self.prepare_forecast_data()
