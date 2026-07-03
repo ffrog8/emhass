@@ -96,6 +96,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+superpowers/
 
 # PyBuilder
 .pybuilder/

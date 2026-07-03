@@ -45,6 +45,10 @@ from emhass.command_line import (
     set_input_data_dict,
 )
 from emhass.forecast import Forecast
+from emhass.inverter_blocks import (
+    MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+    parse_inverter_block_configs,
+)
 
 # The root folder
 root = pathlib.Path(utils.get_root(__file__, num_parent=2))
@@ -90,6 +94,41 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.runtimeparams_json = orjson.dumps(runtimeparams).decode("utf-8")
         params["passed_data"] = runtimeparams
         self.params_json = orjson.dumps(params).decode("utf-8")
+
+    async def test_valid_extra_hybrid_block_reaches_disabled_multi_block_gate(self):
+        params = dict(orjson.loads(self.params_json))
+        params["hybrid_inverter_config_1"] = {
+            "set_use_pv": True,
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+            "inverter_ac_output_max": 5000,
+            "inverter_ac_input_max": 5000,
+            "inverter_efficiency_dc_ac": 1.0,
+            "inverter_efficiency_ac_dc": 1.0,
+        }
+
+        with patch("emhass.command_line.utils.treat_runtimeparams") as treat_runtimeparams:
+            with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
+                await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    self.runtimeparams_json,
+                    "naive-mpc-optim",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        treat_runtimeparams.assert_not_called()
 
     # Test input data for actions (using data from file)
     async def test_set_input_data_dict(self):
@@ -2523,6 +2562,7 @@ class TestOptimizationCache(unittest.TestCase):
             "optimization_time_step": pd.Timedelta(minutes=30),
         }
         self.costfun = "profit"
+        self.num_timesteps = None
 
     def tearDown(self):
         """Clear the cache after each test."""
@@ -2885,6 +2925,98 @@ class TestOptimizationCache(unittest.TestCase):
         )
 
         self.assertNotEqual(key1, key2)
+
+    def test_cache_key_same_for_flat_and_parsed_root_block_only(self):
+        flat_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        parsed_optim_conf = copy.deepcopy(self.optim_conf)
+        parsed_plant_conf = copy.deepcopy(self.plant_conf)
+        parse_inverter_block_configs({}, parsed_optim_conf, parsed_plant_conf)
+
+        parsed_key = OptimizationCache._compute_cache_key(
+            parsed_optim_conf,
+            parsed_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertEqual(flat_key, parsed_key)
+
+    def test_cache_key_changes_when_extra_inverter_block_added(self):
+        flat_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        parsed_optim_conf = copy.deepcopy(self.optim_conf)
+        parsed_plant_conf = copy.deepcopy(self.plant_conf)
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": {
+                    "set_use_pv": True,
+                    "set_use_battery": True,
+                    "inverter_is_hybrid": True,
+                    "compute_curtailment": False,
+                    "battery_discharge_power_max": 5000,
+                    "battery_charge_power_max": 4600,
+                    "battery_discharge_efficiency": 0.95,
+                    "battery_charge_efficiency": 0.95,
+                    "battery_nominal_energy_capacity": 13300,
+                    "battery_minimum_state_of_charge": 0.10,
+                    "battery_maximum_state_of_charge": 0.95,
+                    "battery_target_state_of_charge": 0.90,
+                    "inverter_ac_output_max": 5000,
+                    "inverter_ac_input_max": 5000,
+                    "inverter_efficiency_dc_ac": 1.0,
+                    "inverter_efficiency_ac_dc": 1.0,
+                }
+            },
+            parsed_optim_conf,
+            parsed_plant_conf,
+        )
+
+        parsed_key = OptimizationCache._compute_cache_key(
+            parsed_optim_conf,
+            parsed_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertNotEqual(flat_key, parsed_key)
+
+    def test_cache_key_changes_when_multi_hybrid_inverter_pv_mode_changes(self):
+        first_plant_conf = copy.deepcopy(self.plant_conf)
+        second_plant_conf = copy.deepcopy(self.plant_conf)
+        first_plant_conf["multi_hybrid_inverter_pv_mode"] = "legacy"
+        second_plant_conf["multi_hybrid_inverter_pv_mode"] = "split_pv"
+
+        first_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            first_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+        second_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            second_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertNotEqual(first_key, second_key)
 
     def test_cache_clear(self):
         """Test that clear() empties the cache."""

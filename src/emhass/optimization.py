@@ -12,9 +12,11 @@ import pandas as pd
 
 from emhass import utils
 from emhass.inverter_blocks import (
+    MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     InverterBlockConfig,
     InverterBlockRuntime,
     InverterBlockVariables,
+    has_extra_inverter_blocks,
 )
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
@@ -126,6 +128,8 @@ class Optimization:
         self.retrieve_hass_conf = retrieve_hass_conf
         self.optim_conf = optim_conf
         self.plant_conf = plant_conf
+        if has_extra_inverter_blocks(self.plant_conf):
+            raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
         self.freq = self.retrieve_hass_conf["optimization_time_step"]
         self.time_zone = self.retrieve_hass_conf["time_zone"]
         self.time_step = self.freq.seconds / 3600  # in hours

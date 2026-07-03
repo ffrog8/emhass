@@ -1,16 +1,145 @@
-"""Internal inverter-block wrappers for the legacy single-inverter model.
+"""Internal inverter-block helpers for flat and indexed inverter config.
 
-Step 1 exposes exactly one internal block, index 0, backed by the existing flat
-configuration, runtime CVXPY parameters, and variable objects. These dataclasses
-must remain dependency-light and must not parse indexed config, own cache keys,
-publish results, or become a second source of truth.
+Block 0 is backed by the existing flat configuration dictionaries. Step 2 adds
+indexed ``hybrid_inverter_config_N`` parsing and validation here so public config
+paths can share one block-local contract while multi-block solving remains
+disabled outside this module.
 """
 
+import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+HYBRID_INVERTER_CONFIG_PREFIX = "hybrid_inverter_config_"
+INVERTER_BLOCK_CONFIGS_KEY = "_inverter_block_configs"
+MULTI_BLOCK_SOLVE_DISABLED_MESSAGE = "multi-block solve not enabled"
 
-@dataclass(frozen=True)
+_BLOCK_KEY_RE = re.compile(r"^hybrid_inverter_config_(\d+)$")
+
+_OPTIM_CONF_BLOCK_KEYS = frozenset(
+    {
+        "set_use_pv",
+        "set_use_battery",
+        "set_battery_dynamic",
+        "battery_dynamic_max",
+        "battery_dynamic_min",
+        "weight_battery_discharge",
+        "weight_battery_charge",
+        "battery_stress_cost",
+        "battery_stress_segments",
+        "battery_soc_deficit_threshold",
+        "battery_soc_deficit_cost",
+        "battery_soc_surplus_threshold",
+        "battery_soc_surplus_cost",
+    }
+)
+
+_PLANT_CONF_BLOCK_KEYS = frozenset(
+    {
+        "inverter_is_hybrid",
+        "compute_curtailment",
+        "battery_discharge_power_max",
+        "battery_charge_power_max",
+        "battery_discharge_efficiency",
+        "battery_charge_efficiency",
+        "battery_nominal_energy_capacity",
+        "battery_minimum_state_of_charge",
+        "battery_maximum_state_of_charge",
+        "battery_target_state_of_charge",
+        "inverter_ac_output_max",
+        "inverter_ac_input_max",
+        "inverter_efficiency_dc_ac",
+        "inverter_efficiency_ac_dc",
+        "inverter_stress_cost",
+        "inverter_stress_segments",
+    }
+)
+
+_REQUIRED_BATTERY_KEYS = frozenset(
+    {
+        "battery_discharge_power_max",
+        "battery_charge_power_max",
+        "battery_discharge_efficiency",
+        "battery_charge_efficiency",
+        "battery_nominal_energy_capacity",
+        "battery_minimum_state_of_charge",
+        "battery_maximum_state_of_charge",
+        "battery_target_state_of_charge",
+    }
+)
+
+_RESERVED_PV_SOURCE_KEYS = frozenset(
+    {
+        "sensor_power_photovoltaics",
+        "sensor_power_photovoltaics_forecast",
+        "pv_module_model",
+        "pv_inverter_model",
+        "surface_tilt",
+        "surface_azimuth",
+        "modules_per_string",
+        "strings_per_inverter",
+        "set_use_adjusted_pv",
+        "adjusted_pv_regression_model",
+        "adjusted_pv_solar_elevation_threshold",
+        "adjusted_pv_model_max_age",
+    }
+)
+
+_SITE_LEVEL_FORBIDDEN_KEYS = frozenset(
+    {
+        "sensor_power_load_no_var_loads",
+        "maximum_power_from_grid",
+        "maximum_power_to_grid",
+        "load_forecast_method",
+        "load_cost_forecast_method",
+        "production_price_forecast_method",
+        "photovoltaic_production_sell_price",
+        "set_total_pv_sell",
+        "capacity_cost_per_kw",
+        "costfun",
+        "delta_forecast_daily",
+        "optimization_time_step",
+        "number_of_deferrable_loads",
+        "nominal_power_of_deferrable_loads",
+        "minimum_power_of_deferrable_loads",
+        "def_load_config",
+        "heat_topology",
+        "deferrable_load_groups",
+        "set_nocharge_from_grid",
+        "set_nodischarge_to_grid",
+        "set_battery_first_priority",
+        "hass_url",
+        "long_lived_token",
+        "influxdb_host",
+        "influxdb_username",
+        "influxdb_password",
+        "continual_publish",
+        "publish_prefix",
+    }
+)
+
+_POSITIVE_PLANT_KEYS = frozenset(
+    {
+        "battery_discharge_power_max",
+        "battery_charge_power_max",
+        "battery_nominal_energy_capacity",
+        "inverter_ac_output_max",
+        "inverter_ac_input_max",
+    }
+)
+
+_EFFICIENCY_PLANT_KEYS = frozenset(
+    {
+        "battery_discharge_efficiency",
+        "battery_charge_efficiency",
+        "inverter_efficiency_dc_ac",
+        "inverter_efficiency_ac_dc",
+    }
+)
+
+
 class InverterBlockConfig:
     """Read-only block 0 view over the legacy flat config dictionaries.
 
@@ -19,9 +148,10 @@ class InverterBlockConfig:
     block config cannot drift from the legacy flat state.
     """
 
-    index: int
-    optim_conf: dict
-    plant_conf: dict
+    def __init__(self, index: int, optim_conf: dict, plant_conf: dict) -> None:
+        self.index = index
+        self.optim_conf = optim_conf
+        self.plant_conf = plant_conf
 
     @property
     def set_use_battery(self) -> bool:
@@ -34,6 +164,179 @@ class InverterBlockConfig:
     @property
     def battery_nominal_energy_capacity(self) -> float:
         return self.plant_conf["battery_nominal_energy_capacity"]
+
+
+def _as_finite_float(value: object, block_index: int, key: str) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be numeric") from err
+    if not math.isfinite(numeric):
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be finite")
+    return numeric
+
+
+def _validate_positive(value: object, block_index: int, key: str) -> None:
+    numeric = _as_finite_float(value, block_index, key)
+    if numeric <= 0:
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be > 0")
+
+
+def _validate_efficiency(value: object, block_index: int, key: str) -> None:
+    numeric = _as_finite_float(value, block_index, key)
+    if numeric <= 0 or numeric > 1:
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must satisfy 0 < value <= 1")
+
+
+def _validate_soc(value: object, block_index: int, key: str) -> float:
+    numeric = _as_finite_float(value, block_index, key)
+    if numeric < 0 or numeric > 1:
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be in [0, 1]")
+    return numeric
+
+
+def _extract_block_indexes(input_conf: Mapping[str, object]) -> list[int]:
+    indexes: list[int] = []
+    for key in input_conf:
+        if not key.startswith(HYBRID_INVERTER_CONFIG_PREFIX):
+            continue
+        match = _BLOCK_KEY_RE.match(key)
+        if match is None:
+            raise ValueError(f"{key} must be named hybrid_inverter_config_<positive integer>")
+        index = int(match.group(1))
+        if index == 0:
+            raise ValueError("hybrid_inverter_config_0 is invalid; block 0 is the flat root config")
+        if key != f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}":
+            raise ValueError(f"{key} must be named hybrid_inverter_config_<positive integer>")
+        indexes.append(index)
+    indexes.sort()
+    expected = list(range(1, len(indexes) + 1))
+    if indexes != expected:
+        raise ValueError(f"hybrid_inverter_config indexes must be contiguous from 1; got {indexes}")
+    return indexes
+
+
+def _validate_block_values(index: int, raw_block: Mapping[str, object], plant_conf: dict[str, object]) -> None:
+    for key in _POSITIVE_PLANT_KEYS & raw_block.keys():
+        _validate_positive(plant_conf[key], index, key)
+    for key in _EFFICIENCY_PLANT_KEYS & raw_block.keys():
+        _validate_efficiency(plant_conf[key], index, key)
+
+
+def _validate_battery_block(index: int, raw_block: Mapping[str, object], plant_conf: dict[str, object]) -> None:
+    missing = sorted(_REQUIRED_BATTERY_KEYS - raw_block.keys())
+    if missing:
+        raise ValueError(f"hybrid_inverter_config_{index} missing required battery keys: {missing}")
+
+    soc_min = _validate_soc(
+        plant_conf["battery_minimum_state_of_charge"],
+        index,
+        "battery_minimum_state_of_charge",
+    )
+    soc_max = _validate_soc(
+        plant_conf["battery_maximum_state_of_charge"],
+        index,
+        "battery_maximum_state_of_charge",
+    )
+    soc_target = _validate_soc(
+        plant_conf["battery_target_state_of_charge"],
+        index,
+        "battery_target_state_of_charge",
+    )
+    if soc_min >= soc_max:
+        raise ValueError(f"hybrid_inverter_config_{index} battery minimum SOC must be less than maximum SOC")
+    if soc_target < soc_min or soc_target > soc_max:
+        raise ValueError(
+            f"hybrid_inverter_config_{index}.battery_target_state_of_charge must be within min/max SOC"
+        )
+
+
+def _split_block_config(index: int, raw_block: Mapping[str, object]) -> InverterBlockConfig:
+    optim_conf: dict[str, object] = {}
+    plant_conf: dict[str, object] = {}
+    allowed_keys = _OPTIM_CONF_BLOCK_KEYS | _PLANT_CONF_BLOCK_KEYS
+    forbidden_keys = _SITE_LEVEL_FORBIDDEN_KEYS | _RESERVED_PV_SOURCE_KEYS
+
+    for key, value in raw_block.items():
+        if key in forbidden_keys:
+            raise ValueError(f"hybrid_inverter_config_{index}.{key} is not block-local in Step 2")
+        if key not in allowed_keys:
+            raise ValueError(f"hybrid_inverter_config_{index}.{key} is not a valid block key")
+        if key in _OPTIM_CONF_BLOCK_KEYS:
+            optim_conf[key] = value
+        else:
+            plant_conf[key] = value
+
+    _validate_block_values(index, raw_block, plant_conf)
+    set_use_battery = bool(optim_conf.get("set_use_battery", False))
+    present_battery_keys = _REQUIRED_BATTERY_KEYS & raw_block.keys()
+    if not set_use_battery and present_battery_keys:
+        raise ValueError(f"hybrid_inverter_config_{index} contains battery keys but set_use_battery is not true")
+    if set_use_battery:
+        _validate_battery_block(index, raw_block, plant_conf)
+
+    return InverterBlockConfig(index=index, optim_conf=optim_conf, plant_conf=plant_conf)
+
+
+def parse_inverter_block_configs(
+    input_conf: Mapping[str, object],
+    optim_conf: dict,
+    plant_conf: dict,
+) -> dict[int, InverterBlockConfig]:
+    blocks: dict[int, InverterBlockConfig] = {
+        0: InverterBlockConfig(index=0, optim_conf=optim_conf, plant_conf=plant_conf)
+    }
+    for index in _extract_block_indexes(input_conf):
+        block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
+        raw_block = input_conf[block_key]
+        if not isinstance(raw_block, Mapping):
+            raise ValueError(f"{block_key} must be a dictionary")
+        blocks[index] = _split_block_config(index, raw_block)
+    plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = blocks
+    return blocks
+
+
+def has_extra_inverter_blocks(plant_conf: Mapping[str, object]) -> bool:
+    """Return whether parsed config includes any non-root inverter blocks."""
+    blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if not isinstance(blocks, Mapping):
+        return False
+    return any(index != 0 for index in blocks)
+
+
+def _freeze_for_signature(value: object) -> object:
+    if isinstance(value, Mapping):
+        return tuple(
+            (key, _freeze_for_signature(nested_value))
+            for key, nested_value in sorted(value.items(), key=lambda item: str(item[0]))
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_for_signature(item) for item in value)
+    return value
+
+
+def inverter_block_structure_signature(plant_conf: Mapping[str, object]) -> tuple:
+    """Return the structural cache signature for parsed non-root blocks.
+
+    Block 0 is the legacy flat config. Skipping it keeps a parsed root-only
+    config cache-equivalent to the same flat config before parsing.
+    """
+    blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if not isinstance(blocks, Mapping):
+        return ()
+
+    signature = []
+    for index, block in sorted(blocks.items()):
+        if index == 0:
+            continue
+        signature.append(
+            (
+                index,
+                _freeze_for_signature(block.optim_conf),
+                _freeze_for_signature(block.plant_conf),
+            )
+        )
+    return tuple(signature)
 
 
 @dataclass(frozen=True)
