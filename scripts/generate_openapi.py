@@ -86,6 +86,27 @@ def build_config_component(param_defs: dict) -> dict:
     return {"type": "object", "properties": props}
 
 
+def build_runtime_params_component(runtime_defs: dict) -> dict:
+    """Flatten runtime_params sections into the permissive action request schema."""
+    props: dict = {}
+    pattern_props: dict = {}
+    for params in runtime_defs.values():
+        for key, param in params.items():
+            if key in props or (key == _RUNTIME_BLOCK_DESCRIPTOR and pattern_props):
+                raise SystemExit(f"generate_openapi: duplicate runtime param key {key!r}")
+            schema = _input_to_schema(param["input"], param)
+            if key == _RUNTIME_BLOCK_DESCRIPTOR:
+                schema["additionalProperties"] = True
+                pattern_props[_RUNTIME_BLOCK_PATTERN] = schema
+                continue
+            props[key] = schema
+
+    component = {"type": "object", "properties": props, "additionalProperties": True}
+    if pattern_props:
+        component["patternProperties"] = pattern_props
+    return component
+
+
 def _normalise_path(rule: str) -> str:
     """Convert a Werkzeug rule to OpenAPI path style: ``<x>`` / ``<conv:x>`` -> ``{x}``."""
     return re.sub(r"<(?:[^:<>]+:)?([^<>]+)>", r"{\1}", rule)
@@ -117,11 +138,14 @@ def assert_no_undocumented(routes: set, curated: dict, skip: set) -> None:
 
 _REPO = Path(__file__).resolve().parents[1]
 _PARAM_DEFS = _REPO / "src" / "emhass" / "static" / "data" / "param_definitions.json"
+_RUNTIME_PARAMS = _REPO / "src" / "emhass" / "static" / "data" / "runtime_params.json"
 _LAST_RUN_SCHEMA = _REPO / "docs" / "api" / "v1" / "last-run.schema.json"
 _HEALTHZ_SCHEMA = _REPO / "docs" / "api" / "healthz.schema.json"
 _OUT = _REPO / "src" / "emhass" / "static" / "openapi.json"
 
 _PLAN_OUTPUT_DOC = "https://github.com/davidusb-geek/emhass/blob/master/docs/plan_output_schema.md"
+_RUNTIME_BLOCK_DESCRIPTOR = "hybrid_inverter_config_<N>"
+_RUNTIME_BLOCK_PATTERN = "^hybrid_inverter_config_[1-9][0-9]*$"
 
 
 def _load_json(path: Path) -> dict:
@@ -143,12 +167,15 @@ def build_spec(routes: set | None = None) -> dict:
     if routes is None:
         routes = discovered_routes()
     param_defs = json.loads(_PARAM_DEFS.read_text(encoding="utf-8"))
+    runtime_defs = json.loads(_RUNTIME_PARAMS.read_text(encoding="utf-8"))
     components = {
         "Config": build_config_component(param_defs),
+        "RuntimeParams": build_runtime_params_component(runtime_defs),
         "LastRun": _load_json(_LAST_RUN_SCHEMA),
         "Healthz": _load_json(_HEALTHZ_SCHEMA),
     }
     config_ref = {"$ref": "#/components/schemas/Config"}
+    runtime_params_ref = {"$ref": "#/components/schemas/RuntimeParams"}
 
     def json_ct(schema: dict) -> dict:
         return {"content": {"application/json": {"schema": schema}}}
@@ -205,7 +232,7 @@ def build_spec(routes: set | None = None) -> dict:
                         "schema": {"type": "string"},
                     }
                 ],
-                "requestBody": json_ct({"type": "object", "additionalProperties": True}),
+                "requestBody": json_ct(runtime_params_ref),
                 "responses": {
                     "200": {
                         "description": "Optimization plan",

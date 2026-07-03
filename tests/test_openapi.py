@@ -10,6 +10,17 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import generate_openapi as gen  # noqa: E402
 
 
+def _resolve_schema_ref(openapi_doc, schema):
+    if "$ref" not in schema:
+        return schema
+    ref = schema["$ref"]
+    assert ref.startswith("#/")
+    resolved = openapi_doc
+    for part in ref.removeprefix("#/").split("/"):
+        resolved = resolved[part]
+    return resolved
+
+
 class TestInputToSchema(unittest.TestCase):
     def test_select_becomes_string_enum(self):
         p = {
@@ -173,6 +184,7 @@ class TestBuildSpec(unittest.TestCase):
             self.assertNotIn(p, spec["paths"])
         # config + inlined response components present
         self.assertIn("Config", spec["components"]["schemas"])
+        self.assertIn("RuntimeParams", spec["components"]["schemas"])
         self.assertIn("LastRun", spec["components"]["schemas"])
         self.assertIn("Healthz", spec["components"]["schemas"])
 
@@ -188,8 +200,39 @@ class TestBuildSpec(unittest.TestCase):
         spec = gen.build_spec()
         body = spec["paths"]["/action/{action_name}"]["post"]["requestBody"]
         schema = body["content"]["application/json"]["schema"]
+        schema = _resolve_schema_ref(spec, schema)
         self.assertEqual(schema["type"], "object")
         self.assertTrue(schema["additionalProperties"])
+
+    def test_action_request_uses_pattern_based_runtime_params_component(self):
+        spec = gen.build_spec()
+        body = spec["paths"]["/action/{action_name}"]["post"]["requestBody"]
+        request_schema = body["content"]["application/json"]["schema"]
+        runtime_schema = _resolve_schema_ref(spec, request_schema)
+
+        self.assertIs(runtime_schema, spec["components"]["schemas"]["RuntimeParams"])
+        self.assertNotIn("hybrid_inverter_config_<N>", runtime_schema.get("properties", {}))
+        self.assertNotIn("hybrid_inverter_config_1", runtime_schema.get("properties", {}))
+        self.assertIn(
+            "^hybrid_inverter_config_[1-9][0-9]*$",
+            runtime_schema.get("patternProperties", {}),
+        )
+        self.assertTrue(runtime_schema["additionalProperties"])
+
+    def test_runtime_params_component_has_no_config_scalar_duplicates(self):
+        spec = gen.build_spec()
+        runtime_schema = spec["components"]["schemas"]["RuntimeParams"]
+        runtime_properties = set(runtime_schema.get("properties", {}))
+
+        self.assertFalse(
+            runtime_properties
+            & {
+                "battery_charge_power_max",
+                "battery_discharge_power_max",
+                "battery_minimum_state_of_charge",
+                "battery_maximum_state_of_charge",
+            }
+        )
 
 
 class TestOpenapiArtifact(unittest.TestCase):

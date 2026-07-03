@@ -43,6 +43,7 @@ from emhass.command_line import (
     regressor_model_predict,
     retrieve_home_assistant_data,
     set_input_data_dict,
+    weather_forecast_cache,
 )
 from emhass.forecast import Forecast
 from emhass.inverter_blocks import (
@@ -95,7 +96,9 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         params["passed_data"] = runtimeparams
         self.params_json = orjson.dumps(params).decode("utf-8")
 
-    async def test_valid_extra_hybrid_block_reaches_disabled_multi_block_gate(self):
+    async def test_valid_extra_hybrid_block_merges_runtime_then_reaches_disabled_multi_block_gate(
+        self,
+    ):
         params = dict(orjson.loads(self.params_json))
         params["hybrid_inverter_config_1"] = {
             "set_use_pv": True,
@@ -115,20 +118,87 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             "inverter_efficiency_dc_ac": 1.0,
             "inverter_efficiency_ac_dc": 1.0,
         }
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "soc_init": 0.50,
+                "battery_charge_power_max": 4200,
+            }
+        }
 
-        with patch("emhass.command_line.utils.treat_runtimeparams") as treat_runtimeparams:
-            with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
-                await set_input_data_dict(
-                    emhass_conf,
-                    "profit",
-                    orjson.dumps(params).decode("utf-8"),
-                    self.runtimeparams_json,
-                    "naive-mpc-optim",
-                    logger,
-                    get_data_from_file=True,
+        with patch(
+            "emhass.command_line.utils.treat_runtimeparams",
+            wraps=utils.treat_runtimeparams,
+        ) as treat_runtimeparams:
+            with patch("emhass.command_line.RetrieveHass") as retrieve_hass:
+                with patch("emhass.command_line.Forecast") as forecast:
+                    with patch("emhass.command_line.Optimization") as optimization:
+                        with self.assertRaisesRegex(
+                            NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE
+                        ):
+                            await set_input_data_dict(
+                                emhass_conf,
+                                "profit",
+                                orjson.dumps(params).decode("utf-8"),
+                                orjson.dumps(runtimeparams).decode("utf-8"),
+                                "naive-mpc-optim",
+                                logger,
+                                get_data_from_file=True,
+                            )
+
+        treat_runtimeparams.assert_awaited_once()
+        retrieve_hass.assert_not_called()
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_weather_forecast_cache_merges_runtime_then_reaches_disabled_multi_block_gate(
+        self,
+    ):
+        params = dict(orjson.loads(self.params_json))
+        params["hybrid_inverter_config_1"] = {
+            "set_use_pv": True,
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+            "inverter_ac_output_max": 5000,
+            "inverter_ac_input_max": 5000,
+            "inverter_efficiency_dc_ac": 1.0,
+            "inverter_efficiency_ac_dc": 1.0,
+        }
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "soc_init": 0.50,
+                "battery_charge_power_max": 4200,
+            }
+        }
+
+        with patch(
+            "emhass.command_line.utils.treat_runtimeparams",
+            wraps=utils.treat_runtimeparams,
+        ) as treat_runtimeparams:
+            with patch("emhass.command_line.Forecast") as forecast:
+                forecast.side_effect = AssertionError(
+                    "Forecast constructed before disabled multi-block gate"
                 )
+                with self.assertRaisesRegex(
+                    NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE
+                ):
+                    await weather_forecast_cache(
+                        emhass_conf,
+                        orjson.dumps(params).decode("utf-8"),
+                        orjson.dumps(runtimeparams).decode("utf-8"),
+                        logger,
+                    )
 
-        treat_runtimeparams.assert_not_called()
+        treat_runtimeparams.assert_awaited_once()
+        forecast.assert_not_called()
 
     # Test input data for actions (using data from file)
     async def test_set_input_data_dict(self):

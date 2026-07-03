@@ -118,8 +118,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": true
+                "$ref": "#/components/schemas/RuntimeParams"
               }
             }
           }
@@ -995,6 +994,141 @@
             "default": false,
             "title": "Ignore PV feedback during curtailment",
             "description": "When set to true, prevents PV forecast from being updated with real PV data, avoiding flip-flop behavior during curtailment operations"
+          }
+        }
+      },
+      "RuntimeParams": {
+        "type": "object",
+        "properties": {
+          "prediction_horizon": {
+            "type": "integer",
+            "default": 10,
+            "title": "Prediction horizon",
+            "x-unit": "timesteps",
+            "description": "Number of timesteps the naive-MPC optimization looks ahead. Defaults to 10. Only used by the naive-mpc-optim action. See passing_data.md / study_cases/mpc.md. (unit: timesteps)"
+          },
+          "soc_init": {
+            "type": "number",
+            "title": "Initial battery state of charge",
+            "x-unit": "fraction",
+            "description": "Battery state of charge at the start of the horizon, as a fraction in [0,1] (NOT percent). Defaults to battery_target_state_of_charge when omitted. If passed outside [battery_minimum_state_of_charge, battery_maximum_state_of_charge] a warning is logged and the real SOC is kept for optimization recovery. Only used by naive-mpc-optim. See passing_data.md. (unit: fraction)"
+          },
+          "soc_final": {
+            "type": "number",
+            "title": "Final battery state of charge",
+            "x-unit": "fraction",
+            "description": "Target battery state of charge at the end of the horizon, as a fraction in [0,1] (NOT percent). Defaults to battery_target_state_of_charge when omitted; clamped to [battery_minimum_state_of_charge, battery_maximum_state_of_charge] if out of range. Independent of soc_init. Only used by naive-mpc-optim. See passing_data.md. (unit: fraction)"
+          },
+          "soc_target": {
+            "type": "number",
+            "title": "Intermediate battery state of charge target",
+            "x-unit": "fraction",
+            "description": "Optional minimum battery state of charge, as a fraction in [0,1] (NOT percent), that must be reached by soc_target_timestep, after which the battery is free to discharge again. Defaults to no intermediate target (None) so behaviour is unchanged when omitted. Clamped to [battery_minimum_state_of_charge, battery_maximum_state_of_charge] if out of range. An unreachable target by its timestep makes the problem infeasible. Only used by naive-mpc-optim. See issue #553 and passing_data.md. (unit: fraction)"
+          },
+          "soc_target_timestep": {
+            "type": "integer",
+            "title": "Intermediate SOC target timestep",
+            "x-unit": "timesteps",
+            "description": "The 0-based horizon timestep by which soc_target must be met. Defaults to the last timestep when soc_target is given but this is omitted; clamped to [0, prediction_horizon-1]. Ignored when soc_target is not set. Only used by naive-mpc-optim. See issue #553 and passing_data.md. (unit: timesteps)"
+          },
+          "current_period_peak": {
+            "type": "number",
+            "title": "Current billing-period peak grid import",
+            "x-unit": "W",
+            "description": "Optional peak grid import already incurred during the current billing period, in Watts, used to floor the demand/capacity charge so the optimisation does not chase a new peak below one already locked in this period. Only the import above this value is worth shaving. Only effective when capacity_cost_per_kw > 0; ignored otherwise. Defaults to no floor (None -> 0.0) so behaviour is unchanged when omitted (the full horizon peak is priced, identical to Phase 1). A negative, non-finite (NaN/inf) or non-numeric value is ignored with a warning. Only used by naive-mpc-optim. See issue #623 and passing_data.md. (unit: W)"
+          },
+          "operating_timesteps_of_each_deferrable_load": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Operating timesteps of each deferrable load",
+            "x-unit": "timesteps",
+            "description": "Per-deferrable-load total number of operating timesteps over the horizon (the timestep-based alternative to operating_hours_of_each_deferrable_load, preferred for sub-hour steps). One int per deferrable load. Only used by naive-mpc-optim. See passing_data.md. (unit: timesteps)"
+          },
+          "alpha": {
+            "type": "number",
+            "default": 0.5,
+            "title": "Alpha (forecast weight)",
+            "x-unit": "fraction",
+            "description": "Weight applied to the forecast term when mixing forecast and measured load in the now/current model. Defaults to 0.5. Used together with beta. See forecasts.md. (unit: fraction)"
+          },
+          "beta": {
+            "type": "number",
+            "default": 0.5,
+            "title": "Beta (measured weight)",
+            "x-unit": "fraction",
+            "description": "Weight applied to the measured/persistence term when mixing forecast and measured load in the now/current model. Defaults to 0.5. Complement to alpha. See forecasts.md. (unit: fraction)"
+          },
+          "weather_forecast_cache": {
+            "type": "boolean",
+            "default": false,
+            "title": "Weather forecast cache (write)",
+            "description": "If true, save the computed weather/PV forecast to a cache file for later reuse (e.g. Solcast) so subsequent calls avoid re-hitting the forecast API. Defaults to false. See forecasts.md."
+          },
+          "weather_forecast_cache_only": {
+            "type": "boolean",
+            "default": false,
+            "title": "Weather forecast cache only",
+            "description": "If true, only use cached weather/PV forecast data and raise an error if the cache is missing (prevents accidental API calls). Defaults to false. See forecasts.md."
+          },
+          "def_current_state": {
+            "type": "array",
+            "items": {
+              "type": "boolean"
+            },
+            "title": "Deferrable current state",
+            "description": "Per-deferrable-load boolean list indicating whether each load is currently running at t0, so the optimizer does not penalize a startup for a load that is already on. One boolean per deferrable load. See passing_data.md."
+          },
+          "def_current_on_timesteps": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Deferrable elapsed ON timesteps",
+            "x-unit": "timesteps",
+            "description": "Per-load integer list: how many consecutive optimization timesteps each load has already been ON at the start of this horizon. Used together with minimum_on_time_of_each_deferrable_load (def_minimum_on_time) to force the remaining on-time from an in-progress minimum-ON window. Example: if N=3 and the load has already been on for 2 timesteps, remaining=1 step is forced ON from t=0. Only meaningful when def_current_state[k]=true and minimum_on_time_of_each_deferrable_load[k]>0. When absent, no initial-run forcing is applied (NOT assumed zero). Related to issue #605 (rolling-window tracking). One non-negative integer per deferrable load. (unit: timesteps)"
+          },
+          "def_current_off_timesteps": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Deferrable elapsed OFF timesteps",
+            "x-unit": "timesteps",
+            "description": "Per-load integer list: how many consecutive optimization timesteps each load has already been OFF at the start of this horizon. Used together with def_minimum_off_time to enforce the remaining off-time from an in-progress minimum-OFF window. Example: if N=3 and the load has already been off for 1 timestep, remaining=2 steps are forced OFF from t=0. Only meaningful when def_current_state[k]=false and def_minimum_off_time[k]>0. When absent, no initial-run forcing is applied (NOT assumed zero). One non-negative integer per deferrable load. (unit: timesteps)"
+          },
+          "def_current_power": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "title": "Current power of deferrable loads",
+            "x-unit": "W",
+            "description": "Per-load actual power (watts) each deferrable load is drawing right now, at the start of the optimization horizon. When greater than 0, the optimizer pins P_deferrable[k] at the first timestep to this value, forces the load ON at that timestep, and suppresses the phantom startup penalty for it. One non-negative float per deferrable load, in the same order as nominal_power_of_deferrable_loads; default null (absent key) is an exact no-op so today's behaviour is preserved. This is a separate runtime input rather than an extension of def_current_state, so the binary on/off decision stays strict and fractional watt values cannot weaken it. For treat_deferrable_load_as_semi_cont loads the power is fixed at nominal, so the supplied wattage acts only as an on/off signal (the load is forced ON at nominal; the value pin is omitted). For loads with minimum_power_of_deferrable_loads > 0 the supplied value should be >= the configured minimum, and for all loads it should be <= nominal_power_of_deferrable_loads; values outside those bounds make the solve infeasible (the value is never silently clamped). Single-constant, sequence (list-valued nominal power) and thermal loads ignore this input; use def_current_state for a currently-running single-constant load. Runtime-overridable on every optimization tick without a cache rebuild. Related to issue #605. (unit: W)"
+          },
+          "def_current_operating_timesteps": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Completed operating timesteps of deferrable loads",
+            "x-unit": "timesteps",
+            "description": "Per-load integer list: how many operating timesteps each must-run deferrable load has already completed today at the start of this optimization horizon. The optimizer schedules only the REMAINDER: required_timesteps and target_energy are each decremented by the elapsed amount, clamped at 0. Applies to both standard and single_constant must-run loads. Default null (absent key) is an exact no-op -- today's plan is unchanged. Example: if a load requires 6 timesteps total and has already run for 2, only 4 remain for this solve. One non-negative integer per deferrable load, in the same order as nominal_power_of_deferrable_loads. The daily reset boundary is the caller's responsibility (EMHASS does not track wall-clock day rollover). Runtime-overridable on every optimization tick without a cache rebuild. Related to issue #983. (unit: timesteps)"
+          },
+          "def_load_config": {
+            "type": "object",
+            "title": "Deferrable load special config",
+            "description": "Per-deferrable-load special configuration carrying the thermal_config / thermal_battery models. Deep, evolving nested schema; not inlined here. See the linked documentation for the full structure."
+          }
+        },
+        "additionalProperties": true,
+        "patternProperties": {
+          "^hybrid_inverter_config_[1-9][0-9]*$": {
+            "type": "object",
+            "title": "Nested hybrid inverter runtime block",
+            "description": "Runtime-only nested object for an already configured hybrid_inverter_config_N block where N >= 1. Flat top-level runtime keys continue to address block 0. Supports runtime-only SOC keys such as soc_init, soc_final, soc_target, and soc_target_timestep plus scalar block-local config overrides. Runtime cannot create blocks. PV forecasts are Step 4 scope.",
+            "additionalProperties": true
           }
         }
       },

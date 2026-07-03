@@ -453,6 +453,88 @@ class TestWebServer(unittest.IsolatedAsyncioTestCase):
     @patch("emhass.web_server.set_input_data_dict", new_callable=AsyncMock)
     @patch("emhass.web_server.naive_mpc_optim", new_callable=AsyncMock)
     @patch("emhass.web_server.get_injection_dict")
+    @patch("emhass.web_server.app.logger")
+    async def test_action_runtime_logging_redacts_flat_and_nested_secret_values(
+        self,
+        mock_logger,
+        mock_get_inject,
+        mock_optim,
+        mock_set_input,
+        mock_file,
+        mock_path_exists,
+    ):
+        secret = "super-secret-token"
+        nested_secret = "nested-secret-token"
+        neutral_token_like_value = "eyJhbGciOiJIUzI1NiJ9.payload.signature"
+        runtime_payload = {
+            "solcast_api_key": secret,
+            "perform_backtest": False,
+            "hybrid_inverter_config_1": {
+                "long_lived_token": nested_secret,
+                "soc_init": 0.5,
+                "battery_charge_power_max": 4200,
+                "neutral_name": neutral_token_like_value,
+            },
+            "pv_power_forecast": [0, 100, 200],
+        }
+
+        mock_path_exists.return_value = True
+
+        def aiofiles_side_effect(file, mode="r", *args, **kwargs):
+            context_mock = AsyncMock()
+            file_handle = AsyncMock()
+            context_mock.__aenter__.return_value = file_handle
+            if "params.pkl" in str(file):
+                file_handle.read.return_value = pickle.dumps(
+                    (pathlib.Path("/config"), {"optim_conf": {}})
+                )
+            else:
+                file_handle.read.return_value = "INFO >> Success"
+            return context_mock
+
+        mock_file.side_effect = aiofiles_side_effect
+        mock_set_input.return_value = {
+            "params": {},
+            "retrieve_hass_conf": {"continual_publish": False},
+        }
+        mock_optim.return_value = MagicMock()
+        mock_get_inject.return_value = {"optim_status": "Optimal"}
+
+        response = await self.client.post(
+            "/action/naive-mpc-optim",
+            json=runtime_payload,
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        actual_payload = orjson.loads(mock_set_input.call_args[0][3])
+        self.assertEqual(actual_payload, runtime_payload)
+
+        logged = " ".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_logger.info.call_args_list
+        )
+        self.assertNotIn(secret, logged)
+        self.assertNotIn(nested_secret, logged)
+        self.assertNotIn(neutral_token_like_value, logged)
+        self.assertNotIn("solcast_api_key", logged)
+        self.assertNotIn("long_lived_token", logged)
+        self.assertNotIn("0.5", logged)
+        self.assertNotIn("4200", logged)
+        self.assertNotIn("False", logged)
+        self.assertNotIn("[0, 100, 200]", logged)
+        self.assertIn("<bool>", logged)
+        self.assertIn("<float>", logged)
+        self.assertIn("<int>", logged)
+        self.assertIn("<list len=3>", logged)
+        self.assertIn("hybrid_inverter_config_1", logged)
+        self.assertIn("pv_power_forecast", logged)
+
+    @patch("pathlib.Path.exists")
+    @patch("emhass.web_server.aiofiles.open")
+    @patch("emhass.web_server.set_input_data_dict", new_callable=AsyncMock)
+    @patch("emhass.web_server.naive_mpc_optim", new_callable=AsyncMock)
+    @patch("emhass.web_server.get_injection_dict")
     async def test_action_naive_mpc_preserves_flat_runtime_payload(
         self,
         mock_get_inject,
