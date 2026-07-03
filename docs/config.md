@@ -295,10 +295,11 @@ The existing top-level battery and hybrid inverter configuration remains block
 `0`. Additional static blocks can be declared with contiguous keys such as
 `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
 
-Step 2 validates these blocks but does not solve a multi-block optimisation
-model yet. A valid extra block currently raises `multi-block solve not enabled`
-before forecast or optimisation setup. This prevents EMHASS from silently
-ignoring extra inverter blocks and running a single-block plan.
+Step 3 validates static blocks and matching nested runtime block values, but
+does not solve a multi-block optimisation model yet. A valid extra block
+currently raises `multi-block solve not enabled` before forecast or optimisation
+setup. This prevents EMHASS from silently ignoring extra inverter blocks and
+running a single-block plan.
 
 Block `0` must stay in the existing flat top-level config. Do not define
 `hybrid_inverter_config_0`.
@@ -311,8 +312,9 @@ Allowed extra-block keys in this step are the block-local battery, hybrid
 inverter, curtailment, and enablement keys. Site-level load sensors, tariffs,
 grid import/export limits, deferrable-load settings, secrets, publishing
 settings, and config-time PV source/model keys are rejected. Runtime nested
-block values and per-block PV acquisition are handled by later implementation
-steps.
+blocks may override configured block-local scalar values and runtime-only SOC
+keys for existing blocks only. Nested PV forecast keys and per-block PV
+acquisition remain Step 4 scope.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 

@@ -26,6 +26,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from emhass.inverter_blocks import (
     HYBRID_INVERTER_CONFIG_PREFIX,
     INVERTER_BLOCK_CONFIGS_KEY,
+    merge_inverter_block_runtime_overrides,
     parse_inverter_block_configs,
 )
 
@@ -1277,8 +1278,7 @@ async def treat_runtimeparams(
     # Merge current config categories to params
     params["retrieve_hass_conf"].update(retrieve_hass_conf)
     params["optim_conf"].update(optim_conf)
-    params["plant_conf"].pop(INVERTER_BLOCK_CONFIGS_KEY, None)
-    params["plant_conf"].update(_public_plant_conf_items(plant_conf))
+    params["plant_conf"] = _public_plant_conf_items(plant_conf)
 
     # Check defaults on HA retrieved config
     default_currency_unit = "€"
@@ -1407,10 +1407,13 @@ async def treat_runtimeparams(
         "maximum_power_to_grid": params["plant_conf"].get("maximum_power_to_grid"),
     }
 
+    block_runtime_conf: dict[int, dict[str, object]] = {}
+
     # If any runtime parameters where passed in action call
     if runtimeparams is not None:
         if type(runtimeparams) is str:
             runtimeparams = orjson.loads(runtimeparams)
+        block_runtime_conf = merge_inverter_block_runtime_overrides(params, runtimeparams)
 
         # Loop though parameters stored in association file, Check to see if any stored in runtime
         # If true, set runtime parameter to params
@@ -2169,6 +2172,13 @@ async def treat_runtimeparams(
     retrieve_hass_conf = params["retrieve_hass_conf"]
     optim_conf = params["optim_conf"]
     plant_conf = params["plant_conf"]
+    parse_inverter_block_configs(params, optim_conf, plant_conf, block_runtime_conf)
+    if block_runtime_conf:
+        blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
+        for index in sorted(block_runtime_conf):
+            params["passed_data"][f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"] = dict(
+                blocks[index].runtime_conf
+            )
 
     # If heat_topology is present (static config or runtime override), compile
     # it down to flat optim_conf primitives. Runtime override wins over static
@@ -2227,9 +2237,11 @@ async def treat_runtimeparams(
             heat_topology,
         )
 
-    # Serialize the final params
-    params = orjson.dumps(params, default=str).decode()
-    return params, retrieve_hass_conf, optim_conf, plant_conf
+    # Serialize the final params without the private parsed block state.
+    params_for_serialization = dict(params)
+    params_for_serialization["plant_conf"] = _public_plant_conf_items(plant_conf)
+    params_json = orjson.dumps(params_for_serialization, default=str).decode()
+    return params_json, retrieve_hass_conf, optim_conf, plant_conf
 
 
 def get_yaml_parse(params: str | dict, logger: logging.Logger) -> tuple[dict, dict, dict]:

@@ -115,6 +115,48 @@ Here is the list of the other additional dictionary keys that can be passed at r
 
 - `current_period_peak` the peak grid import (in Watts) already incurred during the current billing period. Only used by `naive-mpc-optim`, and only when a capacity/demand charge (`capacity_cost_per_kw`) is configured. See the dedicated section below.
 
+### Nested hybrid inverter runtime blocks
+
+The existing flat runtime payload continues to address hybrid inverter block
+`0`. Do not send `hybrid_inverter_config_0`; block `0` uses the top-level keys.
+
+```json
+{
+  "soc_init": 0.42,
+  "soc_final": 0.90,
+  "battery_charge_power_max": 4600,
+  "battery_discharge_power_max": 5000
+}
+```
+
+Extra hybrid inverter blocks use nested runtime objects named
+`hybrid_inverter_config_N`, where `N >= 1`. A nested runtime block is valid only
+when the matching static config block already exists; runtime payloads cannot
+create new blocks.
+
+```json
+{
+  "soc_init": 0.42,
+  "soc_final": 0.90,
+  "battery_charge_power_max": 4600,
+  "battery_discharge_power_max": 5000,
+  "hybrid_inverter_config_1": {
+    "soc_init": 0.51,
+    "soc_final": 0.90,
+    "soc_target": 0.86,
+    "soc_target_timestep": 12,
+    "battery_charge_power_max": 4200,
+    "battery_discharge_power_max": 4500
+  }
+}
+```
+
+Step 3 validates this nested runtime shape and scalar block-local overrides, but
+still does not solve multi-block plans. A valid payload with extra blocks raises
+`multi-block solve not enabled` after validation. Nested
+`hybrid_inverter_config_N.pv_power_forecast` and other nested PV source/model
+keys are future Step 4 scope and are rejected in Step 3.
+
 ### Requiring an intermediate battery SOC target (naive-mpc-optim)
 
 By default the battery SOC is only pinned at the start (`soc_init`) and end (`soc_final`) of the horizon, leaving the optimizer free to choose the trajectory in between. Sometimes you want to *guarantee* the battery reaches a given charge level **partway through** the horizon — for example, "make sure the battery is full by the time the cheap window ends, even though it's fine to discharge it afterwards". This is the request in [issue #553](https://github.com/davidusb-geek/emhass/issues/553).

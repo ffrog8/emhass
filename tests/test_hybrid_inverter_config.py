@@ -1,8 +1,26 @@
 import pytest
 
 from emhass.inverter_blocks import (
+    _RESERVED_PV_SOURCE_KEYS,
     INVERTER_BLOCK_CONFIGS_KEY,
     parse_inverter_block_configs,
+)
+
+_EXPECTED_RESERVED_PV_SOURCE_KEYS = frozenset(
+    {
+        "sensor_power_photovoltaics",
+        "sensor_power_photovoltaics_forecast",
+        "pv_module_model",
+        "pv_inverter_model",
+        "surface_tilt",
+        "surface_azimuth",
+        "modules_per_string",
+        "strings_per_inverter",
+        "set_use_adjusted_pv",
+        "adjusted_pv_regression_model",
+        "adjusted_pv_solar_elevation_threshold",
+        "adjusted_pv_model_max_age",
+    }
 )
 
 
@@ -130,14 +148,13 @@ def test_extra_block_rejects_site_level_keys(forbidden_key):
         _parse({"hybrid_inverter_config_1": block})
 
 
+def test_reserved_pv_source_keys_match_expected_contract():
+    assert _RESERVED_PV_SOURCE_KEYS == _EXPECTED_RESERVED_PV_SOURCE_KEYS
+
+
 @pytest.mark.parametrize(
     "reserved_pv_key",
-    [
-        "sensor_power_photovoltaics",
-        "sensor_power_photovoltaics_forecast",
-        "pv_module_model",
-        "surface_tilt",
-    ],
+    sorted(_EXPECTED_RESERVED_PV_SOURCE_KEYS),
 )
 def test_extra_block_rejects_reserved_pv_source_keys_for_step_2(reserved_pv_key):
     block = _valid_block()

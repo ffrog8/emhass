@@ -187,6 +187,36 @@ def test_indexed_hybrid_inverter_blocks_are_not_static_defaults():
     assert not {key for key in default_keys if pattern.match(key)}
 
 
+def _resolve_openapi_schema_ref(openapi_doc: dict, schema: dict) -> dict:
+    if "$ref" not in schema:
+        return schema
+    ref = schema["$ref"]
+    assert ref.startswith("#/")
+    resolved = openapi_doc
+    for part in ref.removeprefix("#/").split("/"):
+        resolved = resolved[part]
+    return resolved
+
+
+def test_openapi_runtime_params_contract_is_pattern_based():
+    openapi_doc = json.loads(Path("src/emhass/static/openapi.json").read_text(encoding="utf-8"))
+    action_post = openapi_doc["paths"]["/action/{action_name}"]["post"]
+    request_schema = action_post["requestBody"]["content"]["application/json"]["schema"]
+    runtime_schema = _resolve_openapi_schema_ref(openapi_doc, request_schema)
+
+    assert runtime_schema is openapi_doc["components"]["schemas"]["RuntimeParams"]
+    assert runtime_schema["type"] == "object"
+    assert runtime_schema["additionalProperties"] is True
+    assert "hybrid_inverter_config_<N>" not in runtime_schema.get("properties", {})
+    assert not {
+        key
+        for key in runtime_schema.get("properties", {})
+        if re.match(r"^hybrid_inverter_config_\d+$", key)
+    }
+    assert "^hybrid_inverter_config_[1-9][0-9]*$" in runtime_schema.get("patternProperties", {})
+    assert "battery_charge_power_max" not in runtime_schema.get("properties", {})
+
+
 # ---------------------------------------------------------------------------
 # #880 / #904 regression tests
 # ---------------------------------------------------------------------------

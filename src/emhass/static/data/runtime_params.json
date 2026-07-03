@@ -50,6 +50,15 @@
       "unit": "timesteps"
     }
   },
+  "Hybrid inverter runtime blocks": {
+    "hybrid_inverter_config_<N>": {
+      "friendly_name": "Nested hybrid inverter runtime block",
+      "Description": "Runtime-only nested object for an already configured hybrid_inverter_config_N block where N >= 1. Flat top-level runtime keys continue to address block 0. Supports runtime-only SOC keys such as soc_init, soc_final, soc_target, and soc_target_timestep plus scalar block-local config overrides. Runtime cannot create blocks. PV forecasts are Step 4 scope.",
+      "input": "object",
+      "default_value": null,
+      "unit": "none"
+    }
+  },
   "Cost function": {
     "alpha": {
       "friendly_name": "Alpha (forecast weight)",

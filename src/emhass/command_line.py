@@ -1390,9 +1390,7 @@ async def set_input_data_dict(
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
-    if has_extra_inverter_blocks(plant_conf):
-        raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
-    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+    has_configured_extra_inverter_blocks = has_extra_inverter_blocks(plant_conf)
     (
         params,
         retrieve_hass_conf,
@@ -1408,9 +1406,12 @@ async def set_input_data_dict(
         logger,
         emhass_conf,
     )
-    log_runtime_banner(logger, optim_conf=optim_conf)
     if isinstance(params, str):
         params = dict(orjson.loads(params))
+    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
+        raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+    log_runtime_banner(logger, optim_conf=optim_conf)
     # Initialize Core Objects
     rh = RetrieveHass(
         retrieve_hass_conf["hass_url"],
@@ -1629,6 +1630,7 @@ async def weather_forecast_cache(
     """
     # Parsing yaml
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
+    has_configured_extra_inverter_blocks = has_extra_inverter_blocks(plant_conf)
     # Treat runtimeparams
     (
         params,
@@ -1645,6 +1647,8 @@ async def weather_forecast_cache(
         logger,
         emhass_conf,
     )
+    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
+        raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
     # Make sure weather_forecast_cache is true
     if (params is not None) and (params != "null"):
         params = orjson.loads(params)

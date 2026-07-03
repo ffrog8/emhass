@@ -14,7 +14,7 @@ import pandas as pd
 import pytz
 
 from emhass import utils
-from emhass.inverter_blocks import INVERTER_BLOCK_CONFIGS_KEY
+from emhass.inverter_blocks import _RESERVED_PV_SOURCE_KEYS, INVERTER_BLOCK_CONFIGS_KEY
 from emhass.utils import treat_runtimeparams
 
 # The root folder
@@ -34,6 +34,40 @@ emhass_conf["associations_path"] = emhass_conf["root_path"] / "data/associations
 
 # Create logger
 logger, ch = utils.get_logger(__name__, emhass_conf, save_to_file=False)
+
+
+def _configured_extra_block() -> dict:
+    return {
+        "set_use_pv": True,
+        "set_use_battery": True,
+        "inverter_is_hybrid": True,
+        "compute_curtailment": False,
+        "battery_discharge_power_max": 5000,
+        "battery_charge_power_max": 4600,
+        "battery_discharge_efficiency": 0.95,
+        "battery_charge_efficiency": 0.95,
+        "battery_nominal_energy_capacity": 13300,
+        "battery_minimum_state_of_charge": 0.10,
+        "battery_maximum_state_of_charge": 0.95,
+        "battery_target_state_of_charge": 0.90,
+        "inverter_ac_output_max": 5000,
+        "inverter_ac_input_max": 5000,
+        "inverter_efficiency_dc_ac": 1.0,
+        "inverter_efficiency_ac_dc": 1.0,
+    }
+
+
+def _configured_extra_pv_only_block() -> dict:
+    return {
+        "set_use_pv": True,
+        "set_use_battery": False,
+        "inverter_is_hybrid": False,
+        "compute_curtailment": False,
+        "inverter_ac_output_max": 5000,
+        "inverter_ac_input_max": 5000,
+        "inverter_efficiency_dc_ac": 1.0,
+        "inverter_efficiency_ac_dc": 1.0,
+    }
 
 
 class TestUtils(unittest.IsolatedAsyncioTestCase):
@@ -559,6 +593,218 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(prod_price[idx], 0.0)
         for idx in range(8, 12):
             self.assertAlmostEqual(prod_price[idx], 0.1)
+    async def test_treat_runtimeparams_rejects_nested_hybrid_inverter_config_0(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        runtimeparams = {
+            "hybrid_inverter_config_0": {
+                "soc_init": 0.4,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "hybrid_inverter_config_0"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_rejects_runtime_block_without_config_block(self):
+        params = orjson.loads(self.params_json)
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "soc_init": 0.4,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "without matching configured block"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_rejects_invalid_nested_runtime_keys_for_configured_block(
+        self,
+    ):
+        invalid_keys = tuple(
+            dict.fromkeys(
+                (
+                    "maximum_power_from_grid",
+                    "long_lived_token",
+                    "influxdb_password",
+                    "continual_publish",
+                    "number_of_deferrable_loads",
+                    "set_total_pv_sell",
+                    "compute_curtailment",
+                    "not_a_real_block_key",
+                    "pv_power_forecast",
+                )
+                + tuple(_RESERVED_PV_SOURCE_KEYS)
+            )
+        )
+        required_invalid_keys = (
+            "sensor_power_photovoltaics",
+            "set_total_pv_sell",
+            "compute_curtailment",
+        )
+        for required_key in required_invalid_keys:
+            assert required_key in invalid_keys
+
+        for invalid_key in invalid_keys:
+            params = orjson.loads(self.params_json)
+            params["hybrid_inverter_config_1"] = _configured_extra_block()
+            runtimeparams = {
+                "hybrid_inverter_config_1": {
+                    invalid_key: 1234,
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, invalid_key):
+                await utils.treat_runtimeparams(
+                    orjson.dumps(runtimeparams).decode("utf-8"),
+                    params,
+                    *utils.get_yaml_parse(params, logger),
+                    "naive-mpc-optim",
+                    logger,
+                    emhass_conf,
+                )
+
+    async def test_treat_runtimeparams_rejects_non_dict_nested_runtime_block(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        runtimeparams = {"hybrid_inverter_config_1": "bad"}
+
+        with self.assertRaisesRegex(ValueError, "dictionary"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_merges_nested_scalar_runtime_into_existing_block_only(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        original_block0_charge_limit = params["plant_conf"]["battery_charge_power_max"]
+        runtimeparams = {
+            "soc_init": 0.42,
+            "battery_charge_power_max": 4100,
+            "hybrid_inverter_config_1": {
+                "soc_init": 0.51,
+                "soc_final": 0.90,
+                "soc_target": 0.86,
+                "soc_target_timestep": 12,
+                "battery_charge_power_max": 4200,
+                "battery_discharge_power_max": 4500,
+            },
+        }
+
+        params_json, _, _, plant_conf = await utils.treat_runtimeparams(
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+        params_out = orjson.loads(params_json)
+        blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
+
+        assert params_out["plant_conf"]["battery_charge_power_max"] == 4100
+        assert original_block0_charge_limit != 4100
+        assert blocks[1].plant_conf["battery_charge_power_max"] == 4200
+        assert blocks[1].plant_conf["battery_discharge_power_max"] == 4500
+        assert blocks[1].runtime_conf == {
+            "soc_init": 0.51,
+            "soc_final": 0.90,
+            "soc_target": 0.86,
+            "soc_target_timestep": 12,
+        }
+        assert params_out["passed_data"]["hybrid_inverter_config_1"] == blocks[1].runtime_conf
+        assert 1 in plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
+        assert "_inverter_block_configs" not in params_out["plant_conf"]
+
+    async def test_treat_runtimeparams_failed_nested_scalar_runtime_leaves_configured_block_unchanged(
+        self,
+    ):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        original_static_block = deepcopy(params["hybrid_inverter_config_1"])
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "battery_charge_power_max": -1,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "battery_charge_power_max"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+        assert params["hybrid_inverter_config_1"] == original_static_block
+
+    async def test_treat_runtimeparams_rejects_soc_runtime_keys_for_configured_non_battery_block(
+        self,
+    ):
+        runtime_soc_values = {
+            "soc_init": 0.51,
+            "soc_final": 0.90,
+            "soc_target": 0.86,
+            "soc_target_timestep": 12,
+        }
+        for soc_key, value in runtime_soc_values.items():
+            params = orjson.loads(self.params_json)
+            params["hybrid_inverter_config_1"] = _configured_extra_pv_only_block()
+            runtimeparams = {
+                "hybrid_inverter_config_1": {
+                    soc_key: value,
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, f"{soc_key}.*set_use_battery"):
+                await utils.treat_runtimeparams(
+                    orjson.dumps(runtimeparams).decode("utf-8"),
+                    params,
+                    *utils.get_yaml_parse(params, logger),
+                    "naive-mpc-optim",
+                    logger,
+                    emhass_conf,
+                )
+
+    async def test_treat_runtimeparams_rejects_invalid_nested_soc_target_timestep(self):
+        for bad_value in [1.5, True, -1]:
+            params = orjson.loads(self.params_json)
+            params["hybrid_inverter_config_1"] = _configured_extra_block()
+            runtimeparams = {
+                "hybrid_inverter_config_1": {
+                    "soc_init": 0.51,
+                    "soc_target_timestep": bad_value,
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "soc_target_timestep"):
+                await utils.treat_runtimeparams(
+                    orjson.dumps(runtimeparams).decode("utf-8"),
+                    params,
+                    *utils.get_yaml_parse(params, logger),
+                    "naive-mpc-optim",
+                    logger,
+                    emhass_conf,
+                )
 
     async def test_treat_runtimeparams_failed(self):
         # Test treatment of nan values

@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -62,6 +63,7 @@ EXPECTED_KEYS = {
     "def_current_operating_timesteps",
     "def_load_config",
 }
+RUNTIME_BLOCK_DESCRIPTOR = "hybrid_inverter_config_<N>"
 
 
 def _entries():
@@ -97,6 +99,36 @@ class TestRuntimeParams(unittest.TestCase):
         }
         missing = EXPECTED_KEYS - keys
         self.assertEqual(missing, set(), f"missing expected keys: {missing}")
+
+    def test_hybrid_inverter_runtime_block_descriptor_present(self):
+        keys = {
+            k for _s, params in json.loads(RP.read_text(encoding="utf-8")).items() for k in params
+        }
+
+        self.assertIn(RUNTIME_BLOCK_DESCRIPTOR, keys)
+
+    def test_no_literal_numbered_hybrid_inverter_runtime_keys(self):
+        runtime_keys = {
+            k for _s, params in json.loads(RP.read_text(encoding="utf-8")).items() for k in params
+        }
+        numbered_keys = sorted(
+            key for key in runtime_keys if re.match(r"^hybrid_inverter_config_\d+$", key)
+        )
+
+        self.assertEqual(numbered_keys, [])
+
+    def test_config_keys_not_duplicated_as_runtime_only_metadata(self):
+        runtime_keys = {
+            k for _s, params in json.loads(RP.read_text(encoding="utf-8")).items() for k in params
+        }
+        duplicated_config_keys = runtime_keys & {
+            "battery_charge_power_max",
+            "battery_discharge_power_max",
+            "battery_minimum_state_of_charge",
+            "battery_maximum_state_of_charge",
+        }
+
+        self.assertEqual(duplicated_config_keys, set())
 
     def test_keys_disjoint_from_config(self):
         # Runtime-only contract: a runtime_params.json key must appear in NEITHER
