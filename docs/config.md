@@ -280,6 +280,31 @@ Then the additional technical parameters:
 - `inverter_stress_cost`: The virtual penalty cost (in currency/kWh) applied if the inverter runs at its maximum nominal power (Recommended: 0.05 - 0.20).
 - `inverter_stress_segments`: The number of linear segments used to approximate the quadratic curve. Higher values are more accurate but increase computation slightly (Recommended: 10).
 
+### Indexed hybrid inverter blocks
+
+The existing top-level battery and hybrid inverter configuration remains block
+`0`. Additional static blocks can be declared with contiguous keys such as
+`hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
+
+Step 2 validates these blocks but does not solve a multi-block optimisation
+model yet. A valid extra block currently raises `multi-block solve not enabled`
+before forecast or optimisation setup. This prevents EMHASS from silently
+ignoring extra inverter blocks and running a single-block plan.
+
+Block `0` must stay in the existing flat top-level config. Do not define
+`hybrid_inverter_config_0`.
+
+`multi_hybrid_inverter_pv_mode` controls how PV is interpreted when indexed
+hybrid inverter blocks are configured. Accepted values are `legacy`, `site_pv`,
+and `split_pv`. The default is `legacy`.
+
+Allowed extra-block keys in this step are the block-local battery, hybrid
+inverter, curtailment, and enablement keys. Site-level load sensors, tariffs,
+grid import/export limits, deferrable-load settings, secrets, publishing
+settings, and config-time PV source/model keys are rejected. Runtime nested
+block values and per-block PV acquisition are handled by later implementation
+steps.
+
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 
 - `battery_discharge_power_max`: The maximum discharge power in Watts. Defaults to 1000.

@@ -20,6 +20,12 @@ import pandas as pd
 
 from emhass import last_run, utils
 from emhass.forecast import Forecast
+from emhass.inverter_blocks import (
+    INVERTER_BLOCK_CONFIGS_KEY,
+    MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+    has_extra_inverter_blocks,
+    inverter_block_structure_signature,
+)
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.optimization import Optimization
@@ -160,6 +166,7 @@ class OptimizationCacheKey:
     deferrable_load_groups: tuple
     shared_thermal_tanks: tuple  # shared-tank multi-source topology structure
     is_electric_load: tuple  # per-load electric-bus membership flag
+    inverter_block_structure: tuple
     inverter_is_hybrid: bool
     compute_curtailment: bool
     optimization_time_step_s: float | None
@@ -257,6 +264,7 @@ class OptimizationCache:
             "battery_target_state_of_charge",
             "battery_charge_power_max",
             "battery_discharge_power_max",
+            INVERTER_BLOCK_CONFIGS_KEY,
         }
         # Optim conf parameters that don't affect problem structure
         # (parameterized via CVXPY Parameters, solver options, or forecast method selection)
@@ -369,6 +377,7 @@ class OptimizationCache:
             # is_electric_load changes p_def_sum membership, hence the electric
             # power balance shape, hence structural.
             is_electric_load=to_tuple(optim_conf.get("is_electric_load", [])),
+            inverter_block_structure=inverter_block_structure_signature(plant_conf),
             inverter_is_hybrid=plant_conf.get("inverter_is_hybrid", False),
             compute_curtailment=plant_conf.get("compute_curtailment", False),
             optimization_time_step_s=to_seconds(retrieve_hass_conf.get("optimization_time_step")),
@@ -1087,6 +1096,9 @@ async def set_input_data_dict(
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
+    if has_extra_inverter_blocks(plant_conf):
+        raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
     (
         params,
         retrieve_hass_conf,

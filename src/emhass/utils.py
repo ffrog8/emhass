@@ -8,7 +8,7 @@ import os
 import pathlib
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -22,6 +22,12 @@ import plotly.express as px
 import pytz
 import yaml
 
+from emhass.inverter_blocks import (
+    HYBRID_INVERTER_CONFIG_PREFIX,
+    INVERTER_BLOCK_CONFIGS_KEY,
+    parse_inverter_block_configs,
+)
+
 if TYPE_CHECKING:
     from emhass.machine_learning_forecaster import MLForecaster
 
@@ -29,6 +35,12 @@ pd.options.plotting.backend = "plotly"
 
 # Unit conversion constants
 W_TO_KW = 1000  # Watts to kilowatts conversion factor
+
+
+def _public_plant_conf_items(plant_conf: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: value for key, value in plant_conf.items() if key != INVERTER_BLOCK_CONFIGS_KEY
+    }
 
 
 def get_root(file: str, num_parent: int = 3) -> str:
@@ -1264,7 +1276,8 @@ async def treat_runtimeparams(
     # Merge current config categories to params
     params["retrieve_hass_conf"].update(retrieve_hass_conf)
     params["optim_conf"].update(optim_conf)
-    params["plant_conf"].update(plant_conf)
+    params["plant_conf"].pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+    params["plant_conf"].update(_public_plant_conf_items(plant_conf))
 
     # Check defaults on HA retrieved config
     default_currency_unit = "€"
@@ -2207,6 +2220,7 @@ def get_yaml_parse(params: str | dict, logger: logging.Logger) -> tuple[dict, di
     optim_conf = input_conf.get("optim_conf", {})
     retrieve_hass_conf = input_conf.get("retrieve_hass_conf", {})
     plant_conf = input_conf.get("plant_conf", {})
+    parse_inverter_block_configs(input_conf, optim_conf, plant_conf)
 
     # Format time parameters
     if optim_conf.get("delta_forecast_daily", None) is not None:
@@ -2554,6 +2568,14 @@ def get_keys_to_mask() -> list[str]:
     ]
 
 
+def _indexed_inverter_config_items(config: Mapping[str, object]) -> dict[str, object]:
+    return {
+        str(key): value
+        for key, value in config.items()
+        if str(key).startswith(HYBRID_INVERTER_CONFIG_PREFIX)
+    }
+
+
 def param_to_config(param: dict[str, dict], logger: logging.Logger) -> dict[str, str]:
     """
     A function that extracts the parameters from param back to the config.json format.
@@ -2577,9 +2599,13 @@ def param_to_config(param: dict[str, dict], logger: logging.Logger) -> dict[str,
     # Loop through config catagories that contain config params, and extract
     for config in config_categories:
         for parameter in param[config]:
+            if parameter == INVERTER_BLOCK_CONFIGS_KEY:
+                continue
             # If parameter is not a secret, append to return_config
             if parameter not in secret_params:
                 return_config[str(parameter)] = param[config][parameter]
+
+    return_config.update(_indexed_inverter_config_items(param))
 
     return return_config
 
@@ -3172,6 +3198,8 @@ async def build_params(
         "alpha": None,
         "beta": None,
     }
+
+    params.update(_indexed_inverter_config_items(config))
 
     return params
 

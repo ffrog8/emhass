@@ -573,6 +573,17 @@
             "title": "Enable PV system",
             "description": "Set to True if we should consider an solar PV system. Defaults to False"
           },
+          "multi_hybrid_inverter_pv_mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "site_pv",
+              "split_pv"
+            ],
+            "default": "legacy",
+            "title": "Multi hybrid inverter PV mode",
+            "description": "Controls how PV is interpreted when indexed hybrid inverter blocks are configured. Use legacy for existing single-inverter behaviour. Multi-block solving remains disabled until the indexed optimizer model is implemented."
+          },
           "set_use_adjusted_pv": {
             "type": "boolean",
             "default": false,

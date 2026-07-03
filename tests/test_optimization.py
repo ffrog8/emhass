@@ -16,6 +16,10 @@ from pandas.testing import assert_series_equal
 
 from emhass import utils
 from emhass.forecast import Forecast
+from emhass.inverter_blocks import (
+    MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+    parse_inverter_block_configs,
+)
 from emhass.optimization import Optimization
 from emhass.retrieve_hass import RetrieveHass
 from emhass.utils import (
@@ -742,6 +746,37 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         block_variables = opt.inverter_block_variables[0]
         self.assertIs(block_variables.p_sto_pos, opt.vars["p_sto_pos"])
         self.assertIs(block_variables.p_sto_neg, opt.vars["p_sto_neg"])
+
+    def test_extra_hybrid_block_rejected_before_optimizer_setup(self):
+        optim_conf = copy.deepcopy(self.optim_conf)
+        plant_conf = copy.deepcopy(self.plant_conf)
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": {
+                    "set_use_pv": True,
+                    "set_use_battery": True,
+                    "inverter_is_hybrid": True,
+                    "compute_curtailment": False,
+                    "battery_discharge_power_max": 5000,
+                    "battery_charge_power_max": 4600,
+                    "battery_discharge_efficiency": 0.95,
+                    "battery_charge_efficiency": 0.95,
+                    "battery_nominal_energy_capacity": 13300,
+                    "battery_minimum_state_of_charge": 0.10,
+                    "battery_maximum_state_of_charge": 0.95,
+                    "battery_target_state_of_charge": 0.90,
+                    "inverter_ac_output_max": 5000,
+                    "inverter_ac_input_max": 5000,
+                    "inverter_efficiency_dc_ac": 1.0,
+                    "inverter_efficiency_ac_dc": 1.0,
+                }
+            },
+            optim_conf,
+            plant_conf,
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
+            self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
 
     def test_perform_dayahead_forecast_optim(self):
         # Check formatting of output from dayahead optimization

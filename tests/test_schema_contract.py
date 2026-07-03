@@ -171,6 +171,22 @@ def test_config_defaults_keys_match_param_definitions():
     )
 
 
+def test_indexed_hybrid_inverter_blocks_are_not_static_defaults():
+    pattern = re.compile(r"^hybrid_inverter_config_\d+$")
+    pd = json.loads(
+        Path("src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
+    )
+    cd = json.loads(Path("src/emhass/data/config_defaults.json").read_text(encoding="utf-8"))
+
+    param_keys = {key for section in pd.values() for key in section}
+    default_keys = set(cd)
+
+    assert "hybrid_inverter_config_0" not in param_keys
+    assert "hybrid_inverter_config_0" not in default_keys
+    assert not {key for key in param_keys if pattern.match(key)}
+    assert not {key for key in default_keys if pattern.match(key)}
+
+
 # ---------------------------------------------------------------------------
 # #880 / #904 regression tests
 # ---------------------------------------------------------------------------

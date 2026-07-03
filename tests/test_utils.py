@@ -14,6 +14,7 @@ import pandas as pd
 import pytz
 
 from emhass import utils
+from emhass.inverter_blocks import INVERTER_BLOCK_CONFIGS_KEY
 from emhass.utils import treat_runtimeparams
 
 # The root folder
@@ -140,6 +141,50 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         # Test get_yaml_parse with built params in get_test_params
         retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(self.params_json, logger)
         self.assertEqual(retrieve_hass_conf["Altitude"], 8000.0)
+
+    async def test_get_yaml_parse_attaches_indexed_inverter_blocks(self):
+        params = orjson.loads(self.params_json)
+        block = {
+            "set_use_pv": True,
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+        }
+        params["hybrid_inverter_config_1"] = block
+
+        _, _, plant_conf = utils.get_yaml_parse(params, logger)
+
+        blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
+        self.assertEqual(list(blocks), [0, 1])
+        self.assertEqual(blocks[1].plant_conf["battery_nominal_energy_capacity"], 13300)
+
+    async def test_build_params_preserves_indexed_inverter_config_blocks(self):
+        config = await utils.build_config(emhass_conf, logger, emhass_conf["defaults_path"])
+        block = {
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+        }
+        config["hybrid_inverter_config_1"] = block
+
+        built = await utils.build_params(emhass_conf, {}, config, logger)
+
+        self.assertEqual(built["hybrid_inverter_config_1"], block)
 
     @patch("emhass.utils._get_now")
     def test_get_forecast_dates_standard_day(self, mock_ts_now):
@@ -1496,6 +1541,29 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         # Verify values transferred correctly
         self.assertEqual(result_config["costfun"], "profit")
         self.assertTrue(result_config["set_use_battery"])
+
+    async def test_param_to_config_preserves_indexed_inverter_config_blocks(self):
+        params = orjson.loads(self.params_json)
+        block = {
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+        }
+        params["hybrid_inverter_config_1"] = block
+        _, _, plant_conf = utils.get_yaml_parse(params, logger)
+        params["plant_conf"] = plant_conf
+
+        config = utils.param_to_config(params, logger)
+
+        self.assertEqual(config["hybrid_inverter_config_1"], block)
+        self.assertNotIn(INVERTER_BLOCK_CONFIGS_KEY, config)
 
     def test_check_def_loads(self):
         """Test padding of deferrable load parameter lists."""

@@ -384,6 +384,14 @@
       "default_value": false,
       "unit": "none"
     },
+    "multi_hybrid_inverter_pv_mode": {
+      "friendly_name": "Multi hybrid inverter PV mode",
+      "Description": "Controls how PV is interpreted when indexed hybrid inverter blocks are configured. Use legacy for existing single-inverter behaviour. Multi-block solving remains disabled until the indexed optimizer model is implemented.",
+      "input": "select",
+      "select_options": ["legacy", "site_pv", "split_pv"],
+      "default_value": "legacy",
+      "unit": "none"
+    },
     "set_use_adjusted_pv": {
       "friendly_name": "Enable adjusted PV system",
       "Description": "Set to True if we should consider an adjusted solar PV system. Defaults to False",
