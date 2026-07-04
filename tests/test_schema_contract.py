@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import re
@@ -52,6 +53,36 @@ _INPUT_TYPE_TO_PY_TYPES: dict[str, tuple[type, ...]] = {
     "array.array.float": (list, type(None)),
     "object": (dict, type(None)),
 }
+
+
+def test_config_defaults_include_battery_mode_lock_site():
+    config_defaults = json.loads(
+        Path("src/emhass/data/config_defaults.json").read_text(encoding="utf-8")
+    )
+
+    assert config_defaults["battery_mode_lock"] == "site"
+
+
+def test_param_definitions_expose_only_site_battery_mode_lock():
+    param_definitions = json.loads(
+        Path("src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
+    )
+
+    field = param_definitions["Battery"]["battery_mode_lock"]
+
+    assert field["input"] == "select"
+    assert field["default_value"] == "site"
+    assert field["select_options"] == ["site"]
+
+
+def test_associations_map_battery_mode_lock_to_optim_conf():
+    with Path("src/emhass/data/associations.csv").open(newline="", encoding="utf-8") as f:
+        associations = {
+            (row["config_categorie"], row["legacy_parameter_name"], row["parameter"])
+            for row in csv.DictReader(f)
+        }
+
+    assert ("optim_conf", "battery_mode_lock", "battery_mode_lock") in associations
 
 
 def _extract_switch_body(js_src: str, fn_name: str) -> str:

@@ -83,6 +83,50 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             )
         return params
 
+    @staticmethod
+    def _battery_only_extra_block():
+        return {
+            "set_use_pv": False,
+            "set_use_battery": True,
+            "inverter_is_hybrid": False,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+            "inverter_ac_output_max": 5000,
+            "inverter_ac_input_max": 5000,
+            "inverter_efficiency_dc_ac": 1.0,
+            "inverter_efficiency_ac_dc": 1.0,
+        }
+
+    @staticmethod
+    def _battery_only_runtimeparams():
+        return {
+            "load_power_forecast": [200.0] * 10,
+            "load_cost_forecast": [0.20] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+        }
+
+    @staticmethod
+    def _make_battery_only_multi_block_params(params, battery_mode_lock="site"):
+        params["optim_conf"]["battery_mode_lock"] = battery_mode_lock
+        params["optim_conf"]["set_use_pv"] = False
+        params["optim_conf"]["set_use_battery"] = True
+        params["optim_conf"]["set_nocharge_from_grid"] = False
+        params["optim_conf"]["set_nodischarge_to_grid"] = False
+        params["plant_conf"]["inverter_is_hybrid"] = False
+        params["plant_conf"]["compute_curtailment"] = False
+        params["hybrid_inverter_config_1"] = (
+            TestCommandLineAsyncUtils._battery_only_extra_block()
+        )
+        return params
+
     async def asyncSetUp(self):
         params = await TestCommandLineAsyncUtils.get_test_params(set_use_pv=True)
         # Add runtime parameters for forecast lists
@@ -95,6 +139,131 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.runtimeparams_json = orjson.dumps(runtimeparams).decode("utf-8")
         params["passed_data"] = runtimeparams
         self.params_json = orjson.dumps(params).decode("utf-8")
+
+    async def test_battery_only_extra_block_reaches_public_optimization_with_site_lock(
+        self,
+    ):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(
+            params,
+            battery_mode_lock="site",
+        )
+        runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
+        params["passed_data"] = runtimeparams
+        forecast_instance = MagicMock()
+        forecast_instance.forecast_dates = pd.date_range(
+            "2024-01-01",
+            periods=10,
+            freq="30min",
+        )
+        forecast_instance.var_load_cost = "unit_load_cost"
+        forecast_instance.var_prod_price = "unit_prod_price"
+        optimization_instance = MagicMock()
+        prepared_data = {
+            "df_input_data": None,
+            "days_list": [],
+            "df_input_data_dayahead": pd.DataFrame(),
+            "df_weather": None,
+            "p_pv_forecast": None,
+            "p_load_forecast": None,
+        }
+
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+            with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                with patch("emhass.command_line.OptimizationCache.put") as cache_put:
+                    with patch(
+                        "emhass.command_line.Optimization",
+                        return_value=optimization_instance,
+                    ) as optimization:
+                        with patch(
+                            "emhass.command_line._prepare_naive_mpc_optim",
+                            new=AsyncMock(return_value=prepared_data),
+                        ):
+                            input_data_dict = await set_input_data_dict(
+                                emhass_conf,
+                                "profit",
+                                orjson.dumps(params).decode("utf-8"),
+                                orjson.dumps(runtimeparams).decode("utf-8"),
+                                "naive-mpc-optim",
+                                logger,
+                                get_data_from_file=True,
+                            )
+
+        optimization.assert_called_once()
+        self.assertNotIn(
+            "_allow_internal_multi_block_battery_model",
+            optimization.call_args.kwargs,
+        )
+        cache_put.assert_called_once()
+        self.assertIs(input_data_dict["opt"], optimization_instance)
+        self.assertEqual(input_data_dict["optim_conf"]["battery_mode_lock"], "site")
+
+    async def test_battery_only_extra_block_rejects_none_mode_lock_with_clear_error(
+        self,
+    ):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(
+            params,
+            battery_mode_lock="none",
+        )
+        runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
+        params["passed_data"] = runtimeparams
+
+        with patch("emhass.command_line.RetrieveHass") as retrieve_hass:
+            with patch("emhass.command_line.Forecast") as forecast:
+                with patch("emhass.command_line.Optimization") as optimization:
+                    with self.assertRaisesRegex(
+                        NotImplementedError,
+                        "battery_mode_lock.*none",
+                    ):
+                        await set_input_data_dict(
+                            emhass_conf,
+                            "profit",
+                            orjson.dumps(params).decode("utf-8"),
+                            orjson.dumps(runtimeparams).decode("utf-8"),
+                            "naive-mpc-optim",
+                            logger,
+                            get_data_from_file=True,
+                        )
+
+        retrieve_hass.assert_not_called()
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_battery_only_extra_block_topology_flags_still_reach_disabled_gate(
+        self,
+    ):
+        for flag in ("set_nocharge_from_grid", "set_nodischarge_to_grid"):
+            with self.subTest(flag=flag):
+                params = await TestCommandLineAsyncUtils.get_test_params()
+                params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(
+                    params,
+                    battery_mode_lock="site",
+                )
+                params["optim_conf"][flag] = True
+                runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
+                params["passed_data"] = runtimeparams
+
+                with patch("emhass.command_line.RetrieveHass") as retrieve_hass:
+                    with patch("emhass.command_line.Forecast") as forecast:
+                        with patch("emhass.command_line.Optimization") as optimization:
+                            with self.assertRaisesRegex(
+                                NotImplementedError,
+                                MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+                            ):
+                                await set_input_data_dict(
+                                    emhass_conf,
+                                    "profit",
+                                    orjson.dumps(params).decode("utf-8"),
+                                    orjson.dumps(runtimeparams).decode("utf-8"),
+                                    "naive-mpc-optim",
+                                    logger,
+                                    get_data_from_file=True,
+                                )
+
+                retrieve_hass.assert_not_called()
+                forecast.assert_not_called()
+                optimization.assert_not_called()
 
     async def test_valid_extra_hybrid_block_merges_runtime_then_reaches_disabled_multi_block_gate(
         self,
@@ -155,7 +324,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
     ):
         params = dict(orjson.loads(self.params_json))
         params["hybrid_inverter_config_1"] = {
-            "set_use_pv": True,
+            "set_use_pv": False,
             "set_use_battery": True,
             "inverter_is_hybrid": True,
             "compute_curtailment": False,
@@ -3195,6 +3364,33 @@ class TestOptimizationCache(unittest.TestCase):
         )
 
         self.assertNotEqual(first_key, second_key)
+
+    def test_cache_key_changes_when_battery_mode_lock_changes(self):
+        self.assertIn("battery_mode_lock", OptimizationCacheKey.__dataclass_fields__)
+
+        site_optim_conf = copy.deepcopy(self.optim_conf)
+        none_optim_conf = copy.deepcopy(self.optim_conf)
+        site_optim_conf["battery_mode_lock"] = "site"
+        none_optim_conf["battery_mode_lock"] = "none"
+
+        site_key = OptimizationCache._compute_cache_key(
+            site_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+        none_key = OptimizationCache._compute_cache_key(
+            none_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertEqual(site_key.battery_mode_lock, "site")
+        self.assertEqual(none_key.battery_mode_lock, "none")
+        self.assertNotEqual(site_key, none_key)
 
     def test_cache_clear(self):
         """Test that clear() empties the cache."""

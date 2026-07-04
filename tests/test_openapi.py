@@ -188,6 +188,13 @@ class TestBuildSpec(unittest.TestCase):
         self.assertIn("LastRun", spec["components"]["schemas"])
         self.assertIn("Healthz", spec["components"]["schemas"])
 
+    def test_config_includes_battery_mode_lock_site_enum(self):
+        spec = gen.build_spec()
+        schema = spec["components"]["schemas"]["Config"]["properties"]["battery_mode_lock"]
+
+        self.assertEqual(schema["default"], "site")
+        self.assertEqual(schema["enum"], ["site"])
+
     def test_action_operation_links_plan_output_doc(self):
         # externalDocs must sit on the Operation Object (valid in OpenAPI 3.1),
         # not on a Response Object (invalid — strict validators reject it).

@@ -151,10 +151,12 @@ create new blocks.
 }
 ```
 
-Step 4 validates this nested runtime shape, scalar block-local overrides, and
-the limited nested PV forecast surface for `split_pv` mode, but still does not
-solve multi-block plans. A valid payload with extra blocks raises
-`multi-block solve not enabled` after validation.
+Step 6 supports battery-only multi-block plans when the static config uses
+`battery_mode_lock: site` and the configured blocks fit the battery-only scope.
+`battery_mode_lock` is static config, not a runtime parameter. Runtime payloads
+may override block SOC and scalar battery caps as before, but they cannot switch
+the site lock mode. Unsupported hybrid, PV, curtailment, and topology cases
+still raise `multi-block solve not enabled` after validation.
 
 In `split_pv` mode, the top-level `pv_power_forecast` remains the PV forecast
 for block `0` only. Each extra block with `set_use_pv: true` must receive its

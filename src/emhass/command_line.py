@@ -34,6 +34,7 @@ from emhass.inverter_blocks import (
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     has_extra_inverter_blocks,
     inverter_block_structure_signature,
+    is_public_safe_multi_block_battery_model,
 )
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
@@ -179,6 +180,7 @@ class OptimizationCacheKey:
     number_of_deferrable_loads: int
     set_use_battery: bool
     set_use_pv: bool
+    battery_mode_lock: str
     treat_deferrable_load_as_semi_cont: tuple
     set_deferrable_load_single_constant: tuple
     set_deferrable_startup_penalty: tuple
@@ -357,6 +359,7 @@ class OptimizationCache:
             number_of_deferrable_loads=optim_conf.get("number_of_deferrable_loads", 0),
             set_use_battery=optim_conf.get("set_use_battery", False),
             set_use_pv=optim_conf.get("set_use_pv", True),
+            battery_mode_lock=optim_conf.get("battery_mode_lock", "site"),
             treat_deferrable_load_as_semi_cont=to_tuple(
                 optim_conf.get("treat_deferrable_load_as_semi_cont", [])
             ),
@@ -1409,8 +1412,16 @@ async def set_input_data_dict(
     if isinstance(params, str):
         params = dict(orjson.loads(params))
     if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
-        raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
-    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+        battery_mode_lock = optim_conf.get("battery_mode_lock", "site")
+        if battery_mode_lock != "site":
+            raise NotImplementedError(
+                f"battery_mode_lock {battery_mode_lock!r} is not supported "
+                "for multi-block battery solves"
+            )
+        if not is_public_safe_multi_block_battery_model(optim_conf, plant_conf):
+            raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+    else:
+        plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
     log_runtime_banner(logger, optim_conf=optim_conf)
     # Initialize Core Objects
     rh = RetrieveHass(

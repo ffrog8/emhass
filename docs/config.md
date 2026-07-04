@@ -295,12 +295,14 @@ The existing top-level battery and hybrid inverter configuration remains block
 `0`. Additional static blocks can be declared with contiguous keys such as
 `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
 
-Step 4 validates static blocks and matching nested runtime block values,
-including per-block runtime PV lists for the limited `split_pv` case described
-below. It still does not solve a multi-block optimisation model. A valid extra
-block currently raises `multi-block solve not enabled` before forecast or
-optimisation setup. This prevents EMHASS from silently ignoring extra inverter
-blocks and running a single-block plan.
+Step 6 supports battery-only indexed blocks only when `battery_mode_lock: site`
+is active, block `0` and all extra blocks are battery-only, non-hybrid,
+no-PV, and no-curtailment blocks, and `set_nocharge_from_grid: false` and
+`set_nodischarge_to_grid: false`. Extra blocks that use PV, hybrid inverter
+AC/DC modelling, curtailment, or topology features still validate and then
+raise `multi-block solve not enabled` until later implementation steps. This
+prevents EMHASS from silently ignoring unsupported extra inverter blocks and
+running a single-block plan.
 
 Block `0` must stay in the existing flat top-level config. Do not define
 `hybrid_inverter_config_0`.
@@ -308,6 +310,15 @@ Block `0` must stay in the existing flat top-level config. Do not define
 `multi_hybrid_inverter_pv_mode` controls how PV is interpreted when indexed
 hybrid inverter blocks are configured. Accepted values are `legacy`, `site_pv`,
 and `split_pv`. The default is `legacy`.
+
+`battery_mode_lock` is top-level static config only. The only supported value in
+this release is `site`, which prevents one configured battery block from
+charging while another configured battery block discharges in the same
+timestep. `none` is reserved and rejected for configured extra blocks.
+
+For Step 6 multi-block battery solves, `set_nocharge_from_grid` and
+`set_nodischarge_to_grid` must both be `false`. Those topology constraints
+remain disabled for multi-block solves until Step 8.
 
 Allowed extra-block keys in this step are the block-local battery, hybrid
 inverter, curtailment, and enablement keys. Site-level load sensors, tariffs,

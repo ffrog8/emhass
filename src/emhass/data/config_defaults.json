@@ -13,6 +13,7 @@
   "ssl_no_verify": false,
   "set_nocharge_from_grid": false,
   "set_nodischarge_to_grid": true,
+  "battery_mode_lock": "site",
   "set_battery_first_priority": false,
   "set_battery_dynamic": false,
   "battery_dynamic_max": 0.9,

@@ -634,6 +634,16 @@
       "default_value": false,
       "unit": "none"
     },
+    "battery_mode_lock": {
+      "friendly_name": "Battery mode lock",
+      "Description": "Controls the battery charge/discharge direction lock. Use site to prevent mixed charge and discharge across indexed battery blocks. Only site is supported in this release.",
+      "input": "select",
+      "select_options": [
+        "site"
+      ],
+      "default_value": "site",
+      "unit": "none"
+    },
     "set_nocharge_from_grid": {
       "friendly_name": "Forbid charging battery from grid",
       "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV",
