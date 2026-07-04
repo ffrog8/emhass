@@ -4,6 +4,7 @@ import logging
 import os
 import pickle
 import time
+from collections.abc import Mapping
 from math import ceil, isfinite
 
 import cvxpy as cp
@@ -12,6 +13,7 @@ import pandas as pd
 
 from emhass import utils
 from emhass.inverter_blocks import (
+    INVERTER_BLOCK_CONFIGS_KEY,
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     InverterBlockConfig,
     InverterBlockRuntime,
@@ -97,6 +99,8 @@ class Optimization:
         logger: logging.Logger,
         opt_time_delta: int | None = 24,
         num_timesteps: int | None = None,
+        *,
+        _allow_internal_multi_block_battery_model: bool = False,
     ) -> None:
         r"""
         Define constructor for Optimization class.
@@ -128,7 +132,13 @@ class Optimization:
         self.retrieve_hass_conf = retrieve_hass_conf
         self.optim_conf = optim_conf
         self.plant_conf = plant_conf
-        if has_extra_inverter_blocks(self.plant_conf):
+        self._allow_internal_multi_block_battery_model = (
+            _allow_internal_multi_block_battery_model
+        )
+        if (
+            has_extra_inverter_blocks(self.plant_conf)
+            and not self._allow_internal_multi_block_battery_model
+        ):
             raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
         self.freq = self.retrieve_hass_conf["optimization_time_step"]
         self.time_zone = self.retrieve_hass_conf["time_zone"]
@@ -145,7 +155,10 @@ class Optimization:
         self.inverter_block_config = {}
         self.inverter_block_runtime = {}
         self.inverter_block_variables = {}
+        self._battery_block_diagnostics = {}
+        self._battery_block_expressions = {}
         self._refresh_inverter_block_config()
+        self._validate_internal_multi_block_battery_model_scope()
 
         # Prioritize config value over default arg
         if "delta_forecast_daily" in self.optim_conf:
@@ -248,6 +261,7 @@ class Optimization:
 
         # Optional intermediate SOC target parameters (issue #553)
         self._init_soc_target_params()
+        self._init_extra_inverter_block_battery_params()
         self._refresh_inverter_block_runtime()
 
         # Peak grid import already incurred this billing period (issue #623, Phase 2)
@@ -318,6 +332,7 @@ class Optimization:
 
     def _refresh_inverter_block_runtime(self) -> None:
         """Rebuild block 0 runtime aliases after CVXPY parameter recreation."""
+        self.inverter_block_runtime = {}
         self.inverter_block_runtime[0] = InverterBlockRuntime(
             index=0,
             soc_init=self.param_soc_init,
@@ -330,18 +345,42 @@ class Optimization:
             battery_charge_power_max=self.param_battery_charge_power_max,
             battery_discharge_power_max=self.param_battery_discharge_power_max,
         )
+        if not self._allow_internal_multi_block_battery_model:
+            return
+        for index, params in sorted(getattr(self, "param_extra_block_battery", {}).items()):
+            self.inverter_block_runtime[index] = InverterBlockRuntime(
+                index=index,
+                soc_init=params["soc_init"],
+                soc_final=params["soc_final"],
+                soc_low_gap=None,
+                soc_high_gap=None,
+                soc_low_required=None,
+                soc_high_required=None,
+                soc_target_floor=params["soc_target_floor"],
+                battery_charge_power_max=params["battery_charge_power_max"],
+                battery_discharge_power_max=params["battery_discharge_power_max"],
+            )
 
     def _refresh_inverter_block_config(self) -> None:
-        """Rebuild block 0 config aliases after flat config dict replacement."""
+        """Rebuild inverter block config aliases after flat config dict replacement."""
+        self.inverter_block_config = {}
         self.inverter_block_config[0] = InverterBlockConfig(
             index=0,
             optim_conf=self.optim_conf,
             plant_conf=self.plant_conf,
         )
+        parsed_blocks = self.plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+        if not isinstance(parsed_blocks, Mapping):
+            return
+        for index, block in sorted(parsed_blocks.items()):
+            if index == 0:
+                continue
+            self.inverter_block_config[index] = block
 
     def _refresh_inverter_block_variables(self, vars_dict: dict | None = None) -> None:
-        """Rebuild block 0 variable aliases after CVXPY variable recreation."""
+        """Rebuild inverter block variable aliases after CVXPY variable recreation."""
         block_vars = vars_dict if vars_dict is not None else self.vars
+        self.inverter_block_variables = {}
         self.inverter_block_variables[0] = InverterBlockVariables(
             index=0,
             p_sto_pos=block_vars.get("p_sto_pos"),
@@ -356,7 +395,215 @@ class Optimization:
             is_dc_sourcing=block_vars.get("is_dc_sourcing"),
             batt_stress_cost=block_vars.get("batt_stress_cost"),
             inv_stress_cost=block_vars.get("inv_stress_cost"),
+            battery_mode=block_vars.get("E"),
         )
+        if not self._allow_internal_multi_block_battery_model:
+            return
+        for index, _block in self._extra_battery_block_configs():
+            self.inverter_block_variables[index] = InverterBlockVariables(
+                index=index,
+                p_sto_pos=block_vars.get(f"p_sto_pos_{index}"),
+                p_sto_neg=block_vars.get(f"p_sto_neg_{index}"),
+                soc_low_recovered=None,
+                soc_high_recovered=None,
+                soc_deficit_cost=None,
+                soc_surplus_cost=None,
+                battery_mode=block_vars.get(f"E_{index}"),
+            )
+
+    @staticmethod
+    def _is_default_scalar_or_vector(value: object, default: float) -> bool:
+        try:
+            values = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return value == default
+        return bool(np.allclose(values, default))
+
+    def _unsupported_internal_multi_block_feature(self, index: int, feature: str) -> None:
+        raise NotImplementedError(
+            f"hybrid_inverter_config_{index}.{feature} is not supported by "
+            "the internal multi-block battery model"
+        )
+
+    def _validate_internal_multi_block_battery_model_scope(self) -> None:
+        """Limit the private Step 5 path to non-hybrid battery-only extra blocks."""
+        if (
+            not self._allow_internal_multi_block_battery_model
+            or not has_extra_inverter_blocks(self.plant_conf)
+        ):
+            return
+
+        if not self.optim_conf.get("set_use_battery", False):
+            self._unsupported_internal_multi_block_feature(0, "set_use_battery=false")
+        if self.plant_conf.get("inverter_is_hybrid", False):
+            self._unsupported_internal_multi_block_feature(0, "inverter_is_hybrid=true")
+
+        dynamic_defaults = {
+            "battery_dynamic_max": 0.9,
+            "battery_dynamic_min": -0.9,
+        }
+        weight_defaults = {
+            "weight_battery_charge": 0.0,
+            "weight_battery_discharge": 0.0,
+        }
+        stress_defaults = {
+            "battery_stress_cost": 0.0,
+            "battery_stress_segments": 10.0,
+        }
+        soc_penalty_keys = {
+            "battery_soc_deficit_threshold",
+            "battery_soc_deficit_cost",
+            "battery_soc_surplus_threshold",
+            "battery_soc_surplus_cost",
+        }
+
+        for index, block in sorted(self.inverter_block_config.items()):
+            if index == 0:
+                continue
+            if not block.optim_conf.get("set_use_battery", False):
+                self._unsupported_internal_multi_block_feature(index, "set_use_battery=false")
+            if block.optim_conf.get("set_use_pv", False):
+                self._unsupported_internal_multi_block_feature(index, "set_use_pv=true")
+            if block.plant_conf.get("inverter_is_hybrid", False):
+                self._unsupported_internal_multi_block_feature(index, "inverter_is_hybrid=true")
+            if block.plant_conf.get("compute_curtailment", False):
+                self._unsupported_internal_multi_block_feature(index, "compute_curtailment=true")
+            if block.optim_conf.get("set_battery_dynamic", False):
+                self._unsupported_internal_multi_block_feature(index, "set_battery_dynamic=true")
+            for key, default in dynamic_defaults.items():
+                if key in block.optim_conf and not self._is_default_scalar_or_vector(
+                    block.optim_conf[key],
+                    default,
+                ):
+                    self._unsupported_internal_multi_block_feature(index, key)
+            for key, default in weight_defaults.items():
+                if key in block.optim_conf and not self._is_default_scalar_or_vector(
+                    block.optim_conf[key],
+                    default,
+                ):
+                    self._unsupported_internal_multi_block_feature(index, key)
+            for key, default in stress_defaults.items():
+                if key in block.optim_conf and not self._is_default_scalar_or_vector(
+                    block.optim_conf[key],
+                    default,
+                ):
+                    self._unsupported_internal_multi_block_feature(index, key)
+            for key in sorted(soc_penalty_keys & block.optim_conf.keys()):
+                self._unsupported_internal_multi_block_feature(index, key)
+
+    def _extra_battery_block_configs(self):
+        if not self._allow_internal_multi_block_battery_model:
+            return
+        for index, block in sorted(self.inverter_block_config.items()):
+            if index == 0 or not block.set_use_battery:
+                continue
+            yield index, block
+
+    def _init_extra_inverter_block_battery_params(self) -> None:
+        """Create private CVXPY parameters for Step 5 extra battery blocks."""
+        self.param_extra_block_battery = {}
+        if not self._allow_internal_multi_block_battery_model:
+            return
+        for index, block in self._extra_battery_block_configs():
+            params = {
+                "soc_init": cp.Parameter(nonneg=True, name=f"soc_init_{index}"),
+                "soc_final": cp.Parameter(nonneg=True, name=f"soc_final_{index}"),
+                "soc_target_floor": cp.Parameter(
+                    self.num_timesteps,
+                    nonneg=True,
+                    name=f"soc_target_floor_{index}",
+                ),
+                "battery_charge_power_max": cp.Parameter(
+                    nonneg=True,
+                    name=f"battery_charge_power_max_{index}",
+                ),
+                "battery_discharge_power_max": cp.Parameter(
+                    nonneg=True,
+                    name=f"battery_discharge_power_max_{index}",
+                ),
+            }
+            soc_init = float(
+                block.runtime_conf.get(
+                    "soc_init",
+                    block.plant_conf["battery_target_state_of_charge"],
+                )
+            )
+            params["soc_init"].value = soc_init
+            params["soc_final"].value = float(block.runtime_conf.get("soc_final", soc_init))
+            params["soc_target_floor"].value = np.zeros(self.num_timesteps)
+            params["battery_charge_power_max"].value = float(
+                block.plant_conf["battery_charge_power_max"]
+            )
+            params["battery_discharge_power_max"].value = float(
+                block.plant_conf["battery_discharge_power_max"]
+            )
+            self.param_extra_block_battery[index] = params
+
+    def _build_battery_soc_expressions(
+        self,
+        *,
+        block_config,
+        block_runtime,
+        block_variables,
+    ):
+        p_sto_pos = block_variables.p_sto_pos
+        p_sto_neg = block_variables.p_sto_neg
+        cap = block_config.plant_conf["battery_nominal_energy_capacity"]
+        eff_dis = block_config.plant_conf["battery_discharge_efficiency"]
+        eff_chg = block_config.plant_conf["battery_charge_efficiency"]
+        power_flow = (p_sto_pos * (1 / eff_dis)) + (p_sto_neg * eff_chg)
+        energy_change = power_flow * self.time_step
+        cumulative_energy = cp.cumsum(energy_change)
+        stored_energy = (block_runtime.soc_init * cap) - cumulative_energy
+        soc = stored_energy / cap
+        p_batt = p_sto_pos + p_sto_neg
+        return p_batt, stored_energy, soc
+
+    def _private_battery_total_power_expression(self):
+        block_vars = self.inverter_block_variables[0]
+        p_batt_total = block_vars.p_sto_pos + block_vars.p_sto_neg
+        if not self._allow_internal_multi_block_battery_model:
+            return p_batt_total
+        for index, _block in self._extra_battery_block_configs():
+            extra_vars = self.inverter_block_variables[index]
+            p_batt_total = p_batt_total + extra_vars.p_sto_pos + extra_vars.p_sto_neg
+        return p_batt_total
+
+    def _update_extra_inverter_block_battery_params(self) -> None:
+        if not self._allow_internal_multi_block_battery_model:
+            return
+        for index, block in self._extra_battery_block_configs():
+            params = self.param_extra_block_battery[index]
+            cap = block.plant_conf["battery_nominal_energy_capacity"]
+            runtime_conf = block.runtime_conf
+            soc_init = float(
+                runtime_conf.get(
+                    "soc_init",
+                    block.plant_conf["battery_target_state_of_charge"],
+                )
+            )
+            soc_final = float(runtime_conf.get("soc_final", soc_init))
+            soc_target_floor = np.zeros(self.num_timesteps)
+            if "soc_target" in runtime_conf:
+                target_timestep = runtime_conf.get(
+                    "soc_target_timestep",
+                    self.num_timesteps - 1,
+                )
+                target_timestep = min(
+                    max(int(target_timestep), 0),
+                    self.num_timesteps - 1,
+                )
+                soc_target_floor[target_timestep] = float(runtime_conf["soc_target"]) * cap
+
+            params["soc_init"].value = soc_init
+            params["soc_final"].value = soc_final
+            params["soc_target_floor"].value = soc_target_floor
+            params["battery_charge_power_max"].value = float(
+                block.plant_conf["battery_charge_power_max"]
+            )
+            params["battery_discharge_power_max"].value = float(
+                block.plant_conf["battery_discharge_power_max"]
+            )
 
     def _init_deferrable_load_params(self) -> None:
         """
@@ -1444,6 +1691,28 @@ class Optimization:
             vars_dict["soc_surplus_cost"] = cp.Variable(n, name="soc_surplus_cost_dummy")
             constraints.append(vars_dict["soc_surplus_cost"] == 0)
 
+        for index, _block in self._extra_battery_block_configs():
+            params = self.param_extra_block_battery[index]
+            vars_dict[f"p_sto_pos_{index}"] = cp.Variable(
+                n,
+                nonneg=True,
+                name=f"p_sto_pos_{index}",
+            )
+            constraints.append(
+                vars_dict[f"p_sto_pos_{index}"]
+                <= params["battery_discharge_power_max"]
+            )
+            vars_dict[f"p_sto_neg_{index}"] = cp.Variable(
+                n,
+                nonpos=True,
+                name=f"p_sto_neg_{index}",
+            )
+            constraints.append(
+                vars_dict[f"p_sto_neg_{index}"]
+                >= -params["battery_charge_power_max"]
+            )
+            vars_dict[f"E_{index}"] = cp.Variable(n, boolean=True, name=f"E_{index}")
+
         # Self-consumption variable
         if self.costfun == "self-consumption":
             vars_dict["SC"] = cp.Variable(n, nonneg=True, name="SC")
@@ -1733,6 +2002,9 @@ class Optimization:
         p_pv_curtailment = self.vars["p_pv_curtailment"]
         p_sto_pos = block_vars.p_sto_pos
         p_sto_neg = block_vars.p_sto_neg
+        battery_power = p_sto_pos + p_sto_neg
+        if self._allow_internal_multi_block_battery_model:
+            battery_power = self._private_battery_total_power_expression()
         D = self.vars["D"]
 
         # Retrieve parameters
@@ -1763,13 +2035,12 @@ class Optimization:
                     - p_load
                     + p_grid_neg
                     + p_grid_pos
-                    + p_sto_pos
-                    + p_sto_neg
+                    + battery_power
                     == 0
                 )
             else:
                 constraints.append(
-                    p_pv - p_def_sum - p_load + p_grid_neg + p_grid_pos + p_sto_pos + p_sto_neg == 0
+                    p_pv - p_def_sum - p_load + p_grid_neg + p_grid_pos + battery_power == 0
                 )
 
         # Grid Constraints (Vectorized with Time-Varying Limits)
@@ -1885,6 +2156,7 @@ class Optimization:
 
     def _add_battery_constraints(self, constraints, batt_stress_conf):
         """Add all battery-related constraints (Vectorized)."""
+        self._battery_block_expressions = {}
         if not self.optim_conf["set_use_battery"]:
             return
 
@@ -1977,6 +2249,11 @@ class Optimization:
         # SOC_t = SOC_init - Cumulative_Change
         # (Subtracting because positive flow is Discharge/Depletion)
         current_stored_energy = (soc_init * cap) - cumulative_energy
+        self._battery_block_expressions[0] = {
+            "p_batt": p_sto_pos + p_sto_neg,
+            "stored_energy": current_stored_energy,
+            "soc": current_stored_energy / cap,
+        }
 
         # Min/Max SOC bounds with a single recovery transition.
         # Before recovery the trajectory stays on the initial out-of-band side.
@@ -2033,6 +2310,46 @@ class Optimization:
         # Single precomputed floor vector; zero = no-op, so behaviour is
         # unchanged unless a target is explicitly requested.
         constraints.append(current_stored_energy >= block_runtime.soc_target_floor)
+
+        for index, block_config in self._extra_battery_block_configs():
+            extra_runtime = self.inverter_block_runtime[index]
+            extra_vars = self.inverter_block_variables[index]
+            p_batt, stored_energy, soc = self._build_battery_soc_expressions(
+                block_config=block_config,
+                block_runtime=extra_runtime,
+                block_variables=extra_vars,
+            )
+            extra_cap = block_config.plant_conf["battery_nominal_energy_capacity"]
+            extra_eff_dis = block_config.plant_conf["battery_discharge_efficiency"]
+            extra_eff_chg = block_config.plant_conf["battery_charge_efficiency"]
+            extra_min_energy = (
+                block_config.plant_conf["battery_minimum_state_of_charge"] * extra_cap
+            )
+            extra_max_energy = (
+                block_config.plant_conf["battery_maximum_state_of_charge"] * extra_cap
+            )
+
+            constraints.append(
+                extra_vars.p_sto_pos
+                <= extra_eff_dis
+                * extra_runtime.battery_discharge_power_max
+                * extra_vars.battery_mode
+            )
+            constraints.append(
+                extra_vars.p_sto_neg
+                >= -(1 / extra_eff_chg)
+                * extra_runtime.battery_charge_power_max
+                * (1 - extra_vars.battery_mode)
+            )
+            constraints.append(stored_energy >= extra_min_energy)
+            constraints.append(stored_energy <= extra_max_energy)
+            constraints.append(stored_energy[-1] == extra_runtime.soc_final * extra_cap)
+            constraints.append(stored_energy >= extra_runtime.soc_target_floor)
+            self._battery_block_expressions[index] = {
+                "p_batt": p_batt,
+                "stored_energy": stored_energy,
+                "soc": soc,
+            }
 
         # Battery-first priority (issue #834): on a flat (non time-of-use)
         # tariff, "drain the battery before importing" and "interleave grid
@@ -3806,6 +4123,56 @@ class Optimization:
 
         return opt_tp
 
+    def _solver_value_array(self, expression) -> np.ndarray:
+        solver_zero_tol = 1e-9
+        if expression is None:
+            return np.zeros(self.num_timesteps)
+        value = getattr(expression, "value", expression)
+        if value is None:
+            return np.zeros(self.num_timesteps)
+        values = np.array(value, dtype=float, copy=True)
+        values[np.isclose(values, 0.0, atol=solver_zero_tol, rtol=0.0)] = 0.0
+        return values
+
+    @staticmethod
+    def _solver_value_scalar(expression) -> float:
+        value = getattr(expression, "value", expression)
+        return float(np.asarray(value, dtype=float).item())
+
+    def _build_private_battery_block_diagnostics(self) -> None:
+        if not self._allow_internal_multi_block_battery_model:
+            return
+
+        block_diagnostics = {}
+        p_batt_total = np.zeros(self.num_timesteps)
+        for index in sorted(self.inverter_block_variables):
+            block_config = self.inverter_block_config[index]
+            block_runtime = self.inverter_block_runtime[index]
+            block_variables = self.inverter_block_variables[index]
+            p_sto_pos = self._solver_value_array(block_variables.p_sto_pos)
+            p_sto_neg = self._solver_value_array(block_variables.p_sto_neg)
+            p_batt = p_sto_pos + p_sto_neg
+            cap = block_config.plant_conf["battery_nominal_energy_capacity"]
+            eff_dis = block_config.plant_conf["battery_discharge_efficiency"]
+            eff_chg = block_config.plant_conf["battery_charge_efficiency"]
+            soc_init = self._solver_value_scalar(block_runtime.soc_init)
+            power_flow = (p_sto_pos * (1 / eff_dis)) + (p_sto_neg * eff_chg)
+            stored_energy = (soc_init * cap) - np.cumsum(power_flow * self.time_step)
+            soc = stored_energy / cap
+            block_diagnostics[index] = {
+                "p_sto_pos": p_sto_pos,
+                "p_sto_neg": p_sto_neg,
+                "p_batt": p_batt,
+                "soc": soc,
+                "stored_energy": stored_energy,
+            }
+            p_batt_total += p_batt
+
+        self._battery_block_diagnostics = {
+            "blocks": block_diagnostics,
+            "p_batt_total": p_batt_total,
+        }
+
     def perform_optimization(
         self,
         data_opt: pd.DataFrame,
@@ -3837,6 +4204,7 @@ class Optimization:
         the existing ``optim_solve`` parent timer in ``command_line.py`` and
         sum to it within a few milliseconds.
         """
+        self._battery_block_diagnostics = {}
         _build_start_perf = time.perf_counter() if stage_times is not None else 0.0
         # Dynamic Resizing
         # If the input data length differs from the initialized N, we must rebuild the problem.
@@ -3863,6 +4231,7 @@ class Optimization:
 
             # Re-initialize the intermediate SOC target mask with the new horizon (#553)
             self._init_soc_target_params()
+            self._init_extra_inverter_block_battery_params()
             self._refresh_inverter_block_runtime()
 
             # NOTE: param_current_period_peak (issue #623, Phase 2) is a SCALAR
@@ -4100,6 +4469,7 @@ class Optimization:
             self.param_soc_high_gap.value = high_gap_wh
             self.param_soc_low_required.value = 1.0 if low_gap_wh > 0 else 0.0
             self.param_soc_high_required.value = 1.0 if high_gap_wh > 0 else 0.0
+            self._update_extra_inverter_block_battery_params()
 
         # Update Window Mask Parameters for Deferrable Loads
         # This allows warm-starting even when time windows change
@@ -4913,6 +5283,7 @@ class Optimization:
             debug,
             q_inputs=self.q_inputs,
         )
+        self._build_private_battery_block_diagnostics()
         if stage_times is not None:
             stage_times["optim_solve.extract"] = time.perf_counter() - _extract_start_perf
         return results_df

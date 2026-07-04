@@ -573,3 +573,7 @@ class InverterBlockVariables:
     is_dc_sourcing: Any | None = None
     batt_stress_cost: Any | None = None
     inv_stress_cost: Any | None = None
+    p_batt: Any | None = None
+    stored_energy: Any | None = None
+    soc: Any | None = None
+    battery_mode: Any | None = None
