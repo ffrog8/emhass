@@ -101,7 +101,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
     ):
         params = dict(orjson.loads(self.params_json))
         params["hybrid_inverter_config_1"] = {
-            "set_use_pv": True,
+            "set_use_pv": False,
             "set_use_battery": True,
             "inverter_is_hybrid": True,
             "compute_curtailment": False,
