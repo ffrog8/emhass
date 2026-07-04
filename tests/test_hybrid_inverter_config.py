@@ -3,6 +3,7 @@ import pytest
 from emhass.inverter_blocks import (
     _RESERVED_PV_SOURCE_KEYS,
     INVERTER_BLOCK_CONFIGS_KEY,
+    merge_inverter_block_runtime_overrides,
     parse_inverter_block_configs,
 )
 
@@ -72,6 +73,25 @@ def _parse(input_conf: dict):
     optim_conf = _root_optim_conf()
     plant_conf = _root_plant_conf()
     return parse_inverter_block_configs(input_conf, optim_conf, plant_conf)
+
+
+def _base_params_with_extra_block(set_use_pv: bool = True, set_use_battery: bool = True) -> dict:
+    block = _valid_block()
+    block["set_use_pv"] = set_use_pv
+    block["set_use_battery"] = set_use_battery
+    if not set_use_battery:
+        for key in [
+            "battery_discharge_power_max",
+            "battery_charge_power_max",
+            "battery_discharge_efficiency",
+            "battery_charge_efficiency",
+            "battery_nominal_energy_capacity",
+            "battery_minimum_state_of_charge",
+            "battery_maximum_state_of_charge",
+            "battery_target_state_of_charge",
+        ]:
+            del block[key]
+    return {"hybrid_inverter_config_1": block}
 
 
 def test_no_extra_blocks_returns_only_root_block():
@@ -226,3 +246,51 @@ def test_extra_block_rejects_battery_keys_when_battery_disabled():
 
     with pytest.raises(ValueError, match="set_use_battery"):
         _parse({"hybrid_inverter_config_1": block})
+
+
+def test_merge_runtime_accepts_nested_pv_forecast_for_configured_pv_block():
+    params = _base_params_with_extra_block(set_use_pv=True)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "pv_power_forecast": [0, 100, 250],
+        }
+    }
+
+    runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1]["pv_power_forecast"] == [0, 100, 250]
+
+
+def test_merge_runtime_accepts_nested_pv_forecast_without_battery_soc_bounds():
+    params = _base_params_with_extra_block(set_use_pv=True, set_use_battery=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "pv_power_forecast": [0, 100, 250],
+        }
+    }
+
+    runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1]["pv_power_forecast"] == [0, 100, 250]
+
+
+def test_merge_runtime_rejects_nested_pv_forecast_for_non_pv_block():
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "pv_power_forecast": [0, 100, 250],
+        }
+    }
+
+    with pytest.raises(ValueError, match="pv_power_forecast.*requires set_use_pv true"):
+        merge_inverter_block_runtime_overrides(params, runtime)
+
+
+def test_merge_runtime_rejects_nested_compute_curtailment():
+    params = _base_params_with_extra_block()
+
+    with pytest.raises(ValueError, match="compute_curtailment"):
+        merge_inverter_block_runtime_overrides(
+            params,
+            {"hybrid_inverter_config_1": {"compute_curtailment": True}},
+        )

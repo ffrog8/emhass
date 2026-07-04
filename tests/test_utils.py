@@ -644,7 +644,6 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
                     "set_total_pv_sell",
                     "compute_curtailment",
                     "not_a_real_block_key",
-                    "pv_power_forecast",
                 )
                 + tuple(_RESERVED_PV_SOURCE_KEYS)
             )
@@ -802,6 +801,192 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
                     params,
                     *utils.get_yaml_parse(params, logger),
                     "naive-mpc-optim",
+                    logger,
+                    emhass_conf,
+                )
+
+    async def test_treat_runtimeparams_split_pv_accepts_nested_pv_forecast_for_configured_block(
+        self,
+    ):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        nested_forecast = [0.0] * 48
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": nested_forecast,
+            }
+        }
+
+        params_json, _, _, plant_conf = await utils.treat_runtimeparams(
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+
+        params_out = orjson.loads(params_json)
+        assert (
+            params_out["passed_data"]["hybrid_inverter_config_1"]["pv_power_forecast"]
+            == nested_forecast
+        )
+        assert (
+            plant_conf[INVERTER_BLOCK_CONFIGS_KEY][1].runtime_conf["pv_power_forecast"]
+            == nested_forecast
+        )
+
+    async def test_treat_runtimeparams_legacy_rejects_extra_block_pv_enabled(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+
+        with self.assertRaisesRegex(ValueError, "legacy.*split_pv"):
+            await utils.treat_runtimeparams(
+                orjson.dumps({}).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_none_legacy_rejects_extra_block_pv_enabled(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+
+        with self.assertRaisesRegex(ValueError, "legacy.*split_pv"):
+            await utils.treat_runtimeparams(
+                None,
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_site_pv_rejects_extra_block_pv_enabled(self):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "site_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+
+        with self.assertRaisesRegex(ValueError, "site_pv.*split_pv"):
+            await utils.treat_runtimeparams(
+                orjson.dumps({}).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_site_pv_rejects_nested_pv_forecast(self):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "site_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_pv_only_block()
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 48,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "site_pv.*split_pv"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_split_pv_requires_nested_pv_forecast_for_extra_pv_block(
+        self,
+    ):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+
+        with self.assertRaisesRegex(ValueError, "hybrid_inverter_config_1.pv_power_forecast"):
+            await utils.treat_runtimeparams(
+                orjson.dumps({}).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_split_pv_allows_battery_only_extra_block_without_pv_forecast(
+        self,
+    ):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        params["hybrid_inverter_config_1"]["set_use_pv"] = False
+
+        params_json, _, _, plant_conf = await utils.treat_runtimeparams(
+            orjson.dumps({}).decode("utf-8"),
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+
+        params_out = orjson.loads(params_json)
+        assert plant_conf[INVERTER_BLOCK_CONFIGS_KEY][1].runtime_conf == {}
+        assert "hybrid_inverter_config_1" not in params_out["passed_data"]
+
+    async def test_treat_runtimeparams_split_pv_rejects_nested_pv_for_non_pv_block(self):
+        params = orjson.loads(self.params_json)
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        params["hybrid_inverter_config_1"]["set_use_pv"] = False
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 48,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "pv_power_forecast.*set_use_pv"):
+            await utils.treat_runtimeparams(
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                params,
+                *utils.get_yaml_parse(params, logger),
+                "naive-mpc-optim",
+                logger,
+                emhass_conf,
+            )
+
+    async def test_treat_runtimeparams_rejects_invalid_nested_pv_forecast_shape(self):
+        invalid_forecast_cases = [
+            (123, "must be a list"),
+            ({0: 1}, "must be a list"),
+            ([], "length"),
+            ([0.0] * 47, "length"),
+            ([0.0] * 47 + ["bad"], "finite numeric"),
+            ([0.0] * 48 + ["bad"], "finite numeric"),
+            ([0.0] * 47 + [float("nan")], "finite numeric"),
+            ([0.0] * 47 + [float("inf")], "finite numeric"),
+            ([0.0] * 47 + [-1.0], "non-negative"),
+        ]
+        for bad_forecast, message in invalid_forecast_cases:
+            params = orjson.loads(self.params_json)
+            params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+            params["hybrid_inverter_config_1"] = _configured_extra_block()
+            runtimeparams = {
+                "hybrid_inverter_config_1": {
+                    "pv_power_forecast": bad_forecast,
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, message):
+                await utils.treat_runtimeparams(
+                    runtimeparams,
+                    params,
+                    *utils.get_yaml_parse(params, logger),
+                    "dayahead-optim",
                     logger,
                     emhass_conf,
                 )

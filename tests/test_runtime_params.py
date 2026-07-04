@@ -107,6 +107,22 @@ class TestRuntimeParams(unittest.TestCase):
 
         self.assertIn(RUNTIME_BLOCK_DESCRIPTOR, keys)
 
+    def test_runtime_block_descriptor_documents_nested_pv_forecast(self):
+        data = json.loads(RP.read_text(encoding="utf-8"))
+        descriptor = data["Hybrid inverter runtime blocks"][RUNTIME_BLOCK_DESCRIPTOR]
+        description = descriptor["Description"]
+
+        for expected in (
+            "already configured hybrid_inverter_config_N block where N >= 1",
+            "split_pv",
+            "pv_power_forecast",
+            "numeric non-negative JSON list",
+            "length at least the optimization horizon",
+            "Flat top-level runtime keys continue to address block 0",
+            "Runtime cannot create blocks",
+        ):
+            self.assertIn(expected, description)
+
     def test_no_literal_numbered_hybrid_inverter_runtime_keys(self):
         runtime_keys = {
             k for _s, params in json.loads(RP.read_text(encoding="utf-8")).items() for k in params

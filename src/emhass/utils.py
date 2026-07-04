@@ -165,6 +165,78 @@ def get_forecast_dates(
     return [ts.isoformat() for ts in forecast_dates]
 
 
+def _extra_inverter_block_indexes(params: Mapping[str, object]) -> list[int]:
+    indexes: list[int] = []
+    for key in params:
+        if not key.startswith(HYBRID_INVERTER_CONFIG_PREFIX):
+            continue
+        suffix = key.removeprefix(HYBRID_INVERTER_CONFIG_PREFIX)
+        if not suffix.isdigit():
+            continue
+        index = int(suffix)
+        if index > 0:
+            indexes.append(index)
+    return sorted(indexes)
+
+
+def _validate_nested_inverter_block_pv_runtime(
+    params: dict[str, dict],
+    block_runtime_conf: dict[int, dict[str, object]],
+    forecast_dates: list[str],
+) -> None:
+    horizon_length = len(forecast_dates)
+    for index, runtime_conf in block_runtime_conf.items():
+        if "pv_power_forecast" not in runtime_conf:
+            continue
+        block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
+        field_name = f"{block_key}.pv_power_forecast"
+        forecast_input = runtime_conf["pv_power_forecast"]
+        if not isinstance(forecast_input, list):
+            raise ValueError(f"{field_name} must be a list")
+        if len(forecast_input) < horizon_length:
+            raise ValueError(f"{field_name} length must be at least {horizon_length}")
+        for value in forecast_input:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                raise ValueError(f"{field_name} must contain finite numeric values")
+            if not np.isfinite(value):
+                raise ValueError(f"{field_name} must contain finite numeric values")
+            if value < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+
+
+def _validate_inverter_block_pv_mode(
+    params: dict[str, dict],
+    block_runtime_conf: dict[int, dict[str, object]],
+) -> None:
+    block_indexes = _extra_inverter_block_indexes(params)
+    if not block_indexes:
+        return
+
+    pv_mode = params["plant_conf"].get("multi_hybrid_inverter_pv_mode", "legacy")
+    for index in block_indexes:
+        block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
+        block_conf = params.get(block_key)
+        if not isinstance(block_conf, Mapping):
+            continue
+
+        set_use_pv = bool(block_conf.get("set_use_pv", False))
+        runtime_conf = block_runtime_conf.get(index, {})
+        has_nested_pv = "pv_power_forecast" in runtime_conf
+
+        if pv_mode != "split_pv":
+            if set_use_pv:
+                raise ValueError(f"{pv_mode} mode requires extra PV blocks to use split_pv")
+            if has_nested_pv:
+                raise ValueError(
+                    f"{pv_mode} mode does not allow nested pv_power_forecast; use split_pv"
+                )
+            continue
+
+        field_name = f"{block_key}.pv_power_forecast"
+        if set_use_pv and not has_nested_pv:
+            raise ValueError(f"{field_name} is required when set_use_pv true in split_pv mode")
+
+
 def normalize_heat_cool_mode(
     value: str,
     *,
@@ -1804,6 +1876,12 @@ async def treat_runtimeparams(
             else:
                 params["passed_data"][forecast_key] = None
 
+        _validate_nested_inverter_block_pv_runtime(
+            params=params,
+            block_runtime_conf=block_runtime_conf,
+            forecast_dates=forecast_dates,
+        )
+
         # Explicitly handle historic_days_to_retrieve from runtimeparams BEFORE validation
         if "historic_days_to_retrieve" in runtimeparams:
             params["retrieve_hass_conf"]["historic_days_to_retrieve"] = int(
@@ -2172,6 +2250,7 @@ async def treat_runtimeparams(
     retrieve_hass_conf = params["retrieve_hass_conf"]
     optim_conf = params["optim_conf"]
     plant_conf = params["plant_conf"]
+    _validate_inverter_block_pv_mode(params, block_runtime_conf)
     parse_inverter_block_configs(params, optim_conf, plant_conf, block_runtime_conf)
     if block_runtime_conf:
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]

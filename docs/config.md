@@ -295,11 +295,12 @@ The existing top-level battery and hybrid inverter configuration remains block
 `0`. Additional static blocks can be declared with contiguous keys such as
 `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
 
-Step 3 validates static blocks and matching nested runtime block values, but
-does not solve a multi-block optimisation model yet. A valid extra block
-currently raises `multi-block solve not enabled` before forecast or optimisation
-setup. This prevents EMHASS from silently ignoring extra inverter blocks and
-running a single-block plan.
+Step 4 validates static blocks and matching nested runtime block values,
+including per-block runtime PV lists for the limited `split_pv` case described
+below. It still does not solve a multi-block optimisation model. A valid extra
+block currently raises `multi-block solve not enabled` before forecast or
+optimisation setup. This prevents EMHASS from silently ignoring extra inverter
+blocks and running a single-block plan.
 
 Block `0` must stay in the existing flat top-level config. Do not define
 `hybrid_inverter_config_0`.
@@ -313,8 +314,22 @@ inverter, curtailment, and enablement keys. Site-level load sensors, tariffs,
 grid import/export limits, deferrable-load settings, secrets, publishing
 settings, and config-time PV source/model keys are rejected. Runtime nested
 blocks may override configured block-local scalar values and runtime-only SOC
-keys for existing blocks only. Nested PV forecast keys and per-block PV
-acquisition remain Step 4 scope.
+keys for existing blocks only.
+
+In `split_pv` mode, the top-level `pv_power_forecast` is the forecast for block
+`0` only. Each extra block with `set_use_pv: true` must receive its own nested
+runtime `pv_power_forecast` list under `hybrid_inverter_config_N`, where
+`N >= 1`. Extra blocks with `set_use_pv: false` remain battery-only and do not
+need a nested PV forecast.
+
+In `site_pv` mode, and in `legacy` mode or when
+`multi_hybrid_inverter_pv_mode` is unset, extra blocks are battery-only in this
+initial v1 surface. Extra blocks with `set_use_pv: true` are rejected, and
+nested extra-block PV forecasts are rejected.
+
+Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
+modelling, block-local CSV loading, adjusted-PV models, and per-block
+curtailment remain future work.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 

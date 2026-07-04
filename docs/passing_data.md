@@ -151,11 +151,35 @@ create new blocks.
 }
 ```
 
-Step 3 validates this nested runtime shape and scalar block-local overrides, but
-still does not solve multi-block plans. A valid payload with extra blocks raises
-`multi-block solve not enabled` after validation. Nested
-`hybrid_inverter_config_N.pv_power_forecast` and other nested PV source/model
-keys are future Step 4 scope and are rejected in Step 3.
+Step 4 validates this nested runtime shape, scalar block-local overrides, and
+the limited nested PV forecast surface for `split_pv` mode, but still does not
+solve multi-block plans. A valid payload with extra blocks raises
+`multi-block solve not enabled` after validation.
+
+In `split_pv` mode, the top-level `pv_power_forecast` remains the PV forecast
+for block `0` only. Each extra block with `set_use_pv: true` must receive its
+own nested `pv_power_forecast` under `hybrid_inverter_config_N`, where
+`N >= 1`. The nested forecast must be a numeric non-negative JSON list with
+length at least the optimization horizon. Extra blocks with `set_use_pv: false`
+are battery-only and do not need a nested PV forecast.
+
+```json
+{
+  "pv_power_forecast": [0, 50, 100, 150],
+  "hybrid_inverter_config_1": {
+    "pv_power_forecast": [0, 25, 60, 80]
+  }
+}
+```
+
+In `site_pv` mode, and in `legacy` mode or when
+`multi_hybrid_inverter_pv_mode` is unset, extra blocks are battery-only in this
+initial v1 surface. Extra blocks with `set_use_pv: true` are rejected, and
+nested extra-block PV forecasts are rejected.
+
+Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
+modelling, block-local CSV loading, adjusted-PV models, and per-block
+curtailment remain future work.
 
 ### Requiring an intermediate battery SOC target (naive-mpc-optim)
 
