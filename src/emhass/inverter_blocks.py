@@ -180,7 +180,11 @@ class InverterBlockConfig:
 
     @property
     def set_use_battery(self) -> bool:
-        return bool(self.optim_conf["set_use_battery"])
+        return bool(self.optim_conf.get("set_use_battery", False))
+
+    @property
+    def set_use_pv(self) -> bool:
+        return bool(self.optim_conf.get("set_use_pv", False))
 
     @property
     def inverter_is_hybrid(self) -> bool:
@@ -493,6 +497,46 @@ def has_extra_inverter_blocks(plant_conf: Mapping[str, object]) -> bool:
     if not isinstance(blocks, Mapping):
         return False
     return any(index != 0 for index in blocks)
+
+
+def is_public_safe_multi_block_battery_model(
+    optim_conf: Mapping[str, object],
+    plant_conf: Mapping[str, object],
+) -> bool:
+    """Return whether parsed extra blocks match the public Step 6 battery scope."""
+    if not has_extra_inverter_blocks(plant_conf):
+        return False
+    if not optim_conf.get("set_use_battery"):
+        return False
+    if optim_conf.get("set_use_pv"):
+        return False
+    if optim_conf.get("battery_mode_lock", "site") != "site":
+        return False
+    if optim_conf.get("set_nocharge_from_grid"):
+        return False
+    if optim_conf.get("set_nodischarge_to_grid"):
+        return False
+    if plant_conf.get("inverter_is_hybrid"):
+        return False
+    if plant_conf.get("compute_curtailment"):
+        return False
+
+    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if not isinstance(parsed_blocks, Mapping):
+        return False
+
+    for index, block in parsed_blocks.items():
+        if index == 0:
+            continue
+        if not block.set_use_battery:
+            return False
+        if block.set_use_pv:
+            return False
+        if block.plant_conf.get("inverter_is_hybrid"):
+            return False
+        if block.plant_conf.get("compute_curtailment"):
+            return False
+    return True
 
 
 def _freeze_for_signature(value: object) -> object:

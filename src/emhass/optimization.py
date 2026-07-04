@@ -19,6 +19,7 @@ from emhass.inverter_blocks import (
     InverterBlockRuntime,
     InverterBlockVariables,
     has_extra_inverter_blocks,
+    is_public_safe_multi_block_battery_model,
 )
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
@@ -124,10 +125,24 @@ class Optimization:
         self._allow_internal_multi_block_battery_model = (
             _allow_internal_multi_block_battery_model
         )
-        if (
-            has_extra_inverter_blocks(self.plant_conf)
-            and not self._allow_internal_multi_block_battery_model
-        ):
+        self._has_extra_inverter_blocks = has_extra_inverter_blocks(self.plant_conf)
+        self._battery_mode_lock = self.optim_conf.get("battery_mode_lock", "site")
+        self._site_battery_mode_lock_active = (
+            not self._allow_internal_multi_block_battery_model
+            and is_public_safe_multi_block_battery_model(
+                self.optim_conf,
+                self.plant_conf,
+            )
+        )
+        self._multi_block_battery_model_enabled = (
+            self._allow_internal_multi_block_battery_model
+            or self._site_battery_mode_lock_active
+        )
+        if self._has_extra_inverter_blocks and self._battery_mode_lock != "site":
+            raise NotImplementedError(
+                "battery_mode_lock: only site is supported for multi-block battery solves"
+            )
+        if self._has_extra_inverter_blocks and not self._multi_block_battery_model_enabled:
             raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
         self.freq = self.retrieve_hass_conf["optimization_time_step"]
         self.time_zone = self.retrieve_hass_conf["time_zone"]
@@ -147,7 +162,7 @@ class Optimization:
         self._battery_block_diagnostics = {}
         self._battery_block_expressions = {}
         self._refresh_inverter_block_config()
-        self._validate_internal_multi_block_battery_model_scope()
+        self._validate_multi_block_battery_model_scope()
 
         # Prioritize config value over default arg
         if "delta_forecast_daily" in self.optim_conf:
@@ -325,7 +340,7 @@ class Optimization:
             battery_charge_power_max=self.param_battery_charge_power_max,
             battery_discharge_power_max=self.param_battery_discharge_power_max,
         )
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
         for index, params in sorted(getattr(self, "param_extra_block_battery", {}).items()):
             self.inverter_block_runtime[index] = InverterBlockRuntime(
@@ -377,7 +392,7 @@ class Optimization:
             inv_stress_cost=block_vars.get("inv_stress_cost"),
             battery_mode=block_vars.get("E"),
         )
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
         for index, _block in self._extra_battery_block_configs():
             self.inverter_block_variables[index] = InverterBlockVariables(
@@ -399,24 +414,32 @@ class Optimization:
             return value == default
         return bool(np.allclose(values, default))
 
-    def _unsupported_internal_multi_block_feature(self, index: int, feature: str) -> None:
+    def _unsupported_multi_block_battery_feature(self, index: int, feature: str) -> None:
         raise NotImplementedError(
             f"hybrid_inverter_config_{index}.{feature} is not supported by "
-            "the internal multi-block battery model"
+            "the multi-block battery model"
         )
 
-    def _validate_internal_multi_block_battery_model_scope(self) -> None:
-        """Limit the private Step 5 path to non-hybrid battery-only extra blocks."""
+    def _validate_multi_block_battery_model_scope(self) -> None:
+        """Limit Step 5/6 multi-block solving to battery-only extra blocks."""
         if (
-            not self._allow_internal_multi_block_battery_model
-            or not has_extra_inverter_blocks(self.plant_conf)
+            not self._multi_block_battery_model_enabled
+            or not self._has_extra_inverter_blocks
         ):
             return
 
         if not self.optim_conf.get("set_use_battery", False):
-            self._unsupported_internal_multi_block_feature(0, "set_use_battery=false")
+            self._unsupported_multi_block_battery_feature(0, "set_use_battery=false")
+        if self.optim_conf.get("set_use_pv", False):
+            self._unsupported_multi_block_battery_feature(0, "set_use_pv=true")
+        if self.optim_conf.get("set_nocharge_from_grid", False):
+            self._unsupported_multi_block_battery_feature(0, "set_nocharge_from_grid=true")
+        if self.optim_conf.get("set_nodischarge_to_grid", False):
+            self._unsupported_multi_block_battery_feature(0, "set_nodischarge_to_grid=true")
         if self.plant_conf.get("inverter_is_hybrid", False):
-            self._unsupported_internal_multi_block_feature(0, "inverter_is_hybrid=true")
+            self._unsupported_multi_block_battery_feature(0, "inverter_is_hybrid=true")
+        if self.plant_conf.get("compute_curtailment", False):
+            self._unsupported_multi_block_battery_feature(0, "compute_curtailment=true")
 
         dynamic_defaults = {
             "battery_dynamic_max": 0.9,
@@ -441,38 +464,38 @@ class Optimization:
             if index == 0:
                 continue
             if not block.optim_conf.get("set_use_battery", False):
-                self._unsupported_internal_multi_block_feature(index, "set_use_battery=false")
+                self._unsupported_multi_block_battery_feature(index, "set_use_battery=false")
             if block.optim_conf.get("set_use_pv", False):
-                self._unsupported_internal_multi_block_feature(index, "set_use_pv=true")
+                self._unsupported_multi_block_battery_feature(index, "set_use_pv=true")
             if block.plant_conf.get("inverter_is_hybrid", False):
-                self._unsupported_internal_multi_block_feature(index, "inverter_is_hybrid=true")
+                self._unsupported_multi_block_battery_feature(index, "inverter_is_hybrid=true")
             if block.plant_conf.get("compute_curtailment", False):
-                self._unsupported_internal_multi_block_feature(index, "compute_curtailment=true")
+                self._unsupported_multi_block_battery_feature(index, "compute_curtailment=true")
             if block.optim_conf.get("set_battery_dynamic", False):
-                self._unsupported_internal_multi_block_feature(index, "set_battery_dynamic=true")
+                self._unsupported_multi_block_battery_feature(index, "set_battery_dynamic=true")
             for key, default in dynamic_defaults.items():
                 if key in block.optim_conf and not self._is_default_scalar_or_vector(
                     block.optim_conf[key],
                     default,
                 ):
-                    self._unsupported_internal_multi_block_feature(index, key)
+                    self._unsupported_multi_block_battery_feature(index, key)
             for key, default in weight_defaults.items():
                 if key in block.optim_conf and not self._is_default_scalar_or_vector(
                     block.optim_conf[key],
                     default,
                 ):
-                    self._unsupported_internal_multi_block_feature(index, key)
+                    self._unsupported_multi_block_battery_feature(index, key)
             for key, default in stress_defaults.items():
                 if key in block.optim_conf and not self._is_default_scalar_or_vector(
                     block.optim_conf[key],
                     default,
                 ):
-                    self._unsupported_internal_multi_block_feature(index, key)
+                    self._unsupported_multi_block_battery_feature(index, key)
             for key in sorted(soc_penalty_keys & block.optim_conf.keys()):
-                self._unsupported_internal_multi_block_feature(index, key)
+                self._unsupported_multi_block_battery_feature(index, key)
 
     def _extra_battery_block_configs(self):
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
         for index, block in sorted(self.inverter_block_config.items()):
             if index == 0 or not block.set_use_battery:
@@ -482,7 +505,7 @@ class Optimization:
     def _init_extra_inverter_block_battery_params(self) -> None:
         """Create private CVXPY parameters for Step 5 extra battery blocks."""
         self.param_extra_block_battery = {}
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
         for index, block in self._extra_battery_block_configs():
             params = {
@@ -542,7 +565,7 @@ class Optimization:
     def _private_battery_total_power_expression(self):
         block_vars = self.inverter_block_variables[0]
         p_batt_total = block_vars.p_sto_pos + block_vars.p_sto_neg
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return p_batt_total
         for index, _block in self._extra_battery_block_configs():
             extra_vars = self.inverter_block_variables[index]
@@ -550,7 +573,7 @@ class Optimization:
         return p_batt_total
 
     def _update_extra_inverter_block_battery_params(self) -> None:
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
         for index, block in self._extra_battery_block_configs():
             params = self.param_extra_block_battery[index]
@@ -1628,6 +1651,8 @@ class Optimization:
         # Binary indicators for Grid and Battery direction
         vars_dict["D"] = cp.Variable(n, boolean=True, name="D")
         vars_dict["E"] = cp.Variable(n, boolean=True, name="E")
+        if self._site_battery_mode_lock_active:
+            vars_dict["E_site"] = cp.Variable(n, boolean=True, name="E_site")
 
         # Battery power variables
         if self.optim_conf["set_use_battery"]:
@@ -1959,7 +1984,7 @@ class Optimization:
         p_sto_pos = block_vars.p_sto_pos
         p_sto_neg = block_vars.p_sto_neg
         battery_power = p_sto_pos + p_sto_neg
-        if self._allow_internal_multi_block_battery_model:
+        if self._multi_block_battery_model_enabled:
             battery_power = self._private_battery_total_power_expression()
         D = self.vars["D"]
 
@@ -2306,6 +2331,12 @@ class Optimization:
                 "stored_energy": stored_energy,
                 "soc": soc,
             }
+
+        if self._site_battery_mode_lock_active:
+            site_mode = self.vars["E_site"]
+            constraints.append(self.vars["E"] == site_mode)
+            for index, _block in self._extra_battery_block_configs():
+                constraints.append(self.vars[f"E_{index}"] == site_mode)
 
         # Battery-first priority (issue #834): on a flat (non time-of-use)
         # tariff, "drain the battery before importing" and "interleave grid
@@ -4086,7 +4117,7 @@ class Optimization:
         return float(np.asarray(value, dtype=float).item())
 
     def _build_private_battery_block_diagnostics(self) -> None:
-        if not self._allow_internal_multi_block_battery_model:
+        if not self._multi_block_battery_model_enabled:
             return
 
         block_diagnostics = {}

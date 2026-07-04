@@ -48,6 +48,69 @@ logger, ch = get_logger(__name__, emhass_conf, save_to_file=False)
 VALID_OPTIMAL_STATUSES = ["Optimal", "Optimal (Relaxed)"]
 
 
+def _run_step6_site_lock_solver_worker(queue, payload):
+    try:
+        queue.put(("ok", _solve_step6_site_lock_case(payload)))
+    except Exception as err:
+        queue.put(("error", repr(err)))
+
+
+def _solve_step6_site_lock_case(payload):
+    retrieve_hass_conf = payload["retrieve_hass_conf"]
+    optim_conf = payload["optim_conf"]
+    plant_conf = payload["plant_conf"]
+    var_load_cost = payload["var_load_cost"]
+    var_prod_price = payload["var_prod_price"]
+    dates = pd.date_range(
+        start=pd.Timestamp("2024-01-01 00:00:00", tz=retrieve_hass_conf["time_zone"]),
+        periods=payload["periods"],
+        freq=retrieve_hass_conf["optimization_time_step"],
+    )
+    df = pd.DataFrame(index=dates)
+    df["p_pv_forecast"] = 0.0
+    df["p_load_forecast"] = 0.0
+    df[var_load_cost] = 0.25
+    df[var_prod_price] = 0.05
+    parse_inverter_block_configs(
+        payload["extra_blocks"],
+        optim_conf,
+        plant_conf,
+        payload["extra_runtime_params"],
+    )
+    opt = Optimization(
+        retrieve_hass_conf,
+        optim_conf,
+        plant_conf,
+        var_load_cost,
+        var_prod_price,
+        "profit",
+        emhass_conf,
+        logger,
+    )
+    opt.perform_optimization(
+        df,
+        df["p_pv_forecast"].values,
+        df["p_load_forecast"].values,
+        df[var_load_cost].values,
+        df[var_prod_price].values,
+        soc_init=payload["soc_init"],
+        soc_final=payload["soc_final"],
+    )
+
+    no_mixed_direction = False
+    diagnostics = opt._battery_block_diagnostics
+    if "blocks" in diagnostics:
+        aggregate_discharge = np.zeros(opt.num_timesteps)
+        aggregate_charge = np.zeros(opt.num_timesteps)
+        for block in diagnostics["blocks"].values():
+            aggregate_discharge += block["p_sto_pos"]
+            aggregate_charge += -block["p_sto_neg"]
+        no_mixed_direction = bool(
+            np.all((aggregate_discharge <= 1e-6) | (aggregate_charge <= 1e-6))
+        )
+    return opt.optim_status, no_mixed_direction
+
+
 class TestOptimization(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         get_data_from_file = True
@@ -330,6 +393,40 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
     def _block_charge(self, opt, index):
         diagnostics = opt._battery_block_diagnostics
         return diagnostics["blocks"][index]["p_sto_neg"]
+
+    def _assert_no_mixed_site_battery_direction(self, opt):
+        diagnostics = opt._battery_block_diagnostics
+        aggregate_discharge = np.zeros(opt.num_timesteps)
+        aggregate_charge = np.zeros(opt.num_timesteps)
+        for block in diagnostics["blocks"].values():
+            aggregate_discharge += block["p_sto_pos"]
+            aggregate_charge += -block["p_sto_neg"]
+        self.assertTrue(
+            np.all((aggregate_discharge <= 1e-6) | (aggregate_charge <= 1e-6))
+        )
+
+    def _run_in_clean_solver_process(self, payload, timeout=60):
+        import multiprocessing
+
+        # HiGHS can retain process-local state across small MILP solves. Use
+        # spawn so the child interpreter does not inherit previous solver state.
+        context = multiprocessing.get_context("spawn")
+        queue = context.Queue()
+        process = context.Process(
+            target=_run_step6_site_lock_solver_worker,
+            args=(queue, payload),
+        )
+        process.start()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+        self.assertFalse(process.is_alive())
+        self.assertEqual(process.exitcode, 0)
+        kind, payload = queue.get(timeout=1)
+        self.assertEqual(kind, "ok", payload)
+        return payload
 
     def _run_legacy_deterministic_battery_case(
         self,
@@ -866,24 +963,86 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
             self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
 
-    def test_internal_multi_block_battery_model_requires_private_flag(self):
+    def test_battery_mode_lock_none_rejected_when_extra_blocks_configured(self):
         optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "none"
         parse_inverter_block_configs(
             {"hybrid_inverter_config_1": self._extra_battery_block()},
             optim_conf,
             plant_conf,
         )
 
-        with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
+        with self.assertRaisesRegex(NotImplementedError, "battery_mode_lock"):
             self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+    def test_public_multi_block_battery_only_constructor_allowed_with_site_lock(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": self._extra_battery_block()},
+            optim_conf,
+            plant_conf,
+            {1: {"soc_init": 0.0, "soc_final": 0.5}},
+        )
 
         opt = self.create_optimization(
             optim_conf=optim_conf,
             plant_conf=plant_conf,
-            _allow_internal_multi_block_battery_model=True,
         )
 
         self.assertEqual(sorted(opt.inverter_block_config), [0, 1])
+
+    def test_public_multi_block_battery_only_constructor_allows_default_site_lock(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf.pop("battery_mode_lock", None)
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": self._extra_battery_block()},
+            optim_conf,
+            plant_conf,
+        )
+
+        opt = self.create_optimization(
+            optim_conf=optim_conf,
+            plant_conf=plant_conf,
+        )
+
+        self.assertEqual(sorted(opt.inverter_block_config), [0, 1])
+
+    def test_public_multi_block_battery_topology_flags_still_disabled_until_step_8(self):
+        for flag in ("set_nocharge_from_grid", "set_nodischarge_to_grid"):
+            with self.subTest(flag=flag):
+                optim_conf, plant_conf = self._battery_only_confs()
+                optim_conf["battery_mode_lock"] = "site"
+                optim_conf[flag] = True
+                parse_inverter_block_configs(
+                    {"hybrid_inverter_config_1": self._extra_battery_block()},
+                    optim_conf,
+                    plant_conf,
+                )
+
+                with self.assertRaisesRegex(
+                    NotImplementedError,
+                    MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+                ):
+                    self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+    def test_public_multi_block_non_battery_extra_block_still_disabled(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        extra_block = {
+            "set_use_pv": False,
+            "set_use_battery": False,
+            "inverter_is_hybrid": False,
+            "compute_curtailment": False,
+        }
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": extra_block},
+            optim_conf,
+            plant_conf,
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE):
+            self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
 
     def test_internal_multi_block_battery_model_creates_independent_block_variables(self):
         optim_conf, plant_conf = self._battery_only_confs()
@@ -908,6 +1067,29 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(
             opt.inverter_block_variables[1].p_sto_pos,
             opt.inverter_block_variables[0].p_sto_pos,
+        )
+
+    def test_private_internal_multi_block_battery_model_does_not_create_site_lock(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf.pop("battery_mode_lock", None)
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": self._extra_battery_block()},
+            optim_conf,
+            plant_conf,
+        )
+
+        opt = self.create_optimization(
+            optim_conf=optim_conf,
+            plant_conf=plant_conf,
+            _allow_internal_multi_block_battery_model=True,
+        )
+
+        self.assertNotIn("E_site", opt.vars)
+        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
+        self.assertIs(opt.inverter_block_variables[1].battery_mode, opt.vars["E_1"])
+        self.assertIsNot(
+            opt.inverter_block_variables[0].battery_mode,
+            opt.inverter_block_variables[1].battery_mode,
         )
 
     def test_internal_multi_block_one_extra_battery_can_solve(self):
@@ -1081,6 +1263,93 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(np.max(self._block_discharge(opt, 0)), 1e-6)
         self.assertGreater(np.max(block_1_discharge), 1e-6)
         self.assertTrue(np.all((block_1_discharge <= 1e-6) | (-block_1_charge <= 1e-6)))
+
+    def test_multi_block_battery_mode_lock_site_rejects_forced_cross_block_mixing(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        payload = {
+            "retrieve_hass_conf": self.retrieve_hass_conf,
+            "optim_conf": optim_conf,
+            "plant_conf": plant_conf,
+            "var_load_cost": self.fcst.var_load_cost,
+            "var_prod_price": self.fcst.var_prod_price,
+            "periods": 2,
+            "extra_blocks": {"hybrid_inverter_config_1": self._extra_battery_block()},
+            "extra_runtime_params": {1: {"soc_init": 0.0, "soc_final": 1.0}},
+            "soc_init": 1.0,
+            "soc_final": 0.0,
+        }
+
+        status, _no_mixed_direction = self._run_in_clean_solver_process(payload)
+        self.assertNotIn(status, VALID_OPTIMAL_STATUSES)
+
+    def test_multi_block_battery_mode_lock_site_separates_charge_and_discharge_timesteps(self):
+        df = self._make_multi_block_battery_df(periods=4)
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": self._extra_battery_block()},
+            optim_conf,
+            plant_conf,
+            {1: {"soc_init": 0.0, "soc_final": 1.0}},
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+            soc_init=1.0,
+            soc_final=0.0,
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self._assert_no_mixed_site_battery_direction(opt)
+
+    def test_multi_block_battery_mode_lock_site_creates_shared_site_mode(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": self._extra_battery_block()},
+            optim_conf,
+            plant_conf,
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        self.assertIn("E_site", opt.vars)
+        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
+        self.assertIs(opt.inverter_block_variables[1].battery_mode, opt.vars["E_1"])
+
+    def test_multi_block_battery_mode_lock_site_three_blocks_24_steps_performance_smoke(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        optim_conf["lp_solver_timeout"] = 30
+        optim_conf["lp_solver_mip_rel_gap"] = 0.05
+        optim_conf["num_threads"] = 1
+        payload = {
+            "retrieve_hass_conf": self.retrieve_hass_conf,
+            "optim_conf": optim_conf,
+            "plant_conf": plant_conf,
+            "var_load_cost": self.fcst.var_load_cost,
+            "var_prod_price": self.fcst.var_prod_price,
+            "periods": 24,
+            "extra_blocks": {
+                "hybrid_inverter_config_1": self._extra_battery_block(),
+                "hybrid_inverter_config_2": self._extra_battery_block(capacity=2000),
+            },
+            "extra_runtime_params": {
+                1: {"soc_init": 0.0, "soc_final": 0.5},
+                2: {"soc_init": 0.0, "soc_final": 0.25},
+            },
+            "soc_init": 0.5,
+            "soc_final": 0.5,
+        }
+
+        status, no_mixed_direction = self._run_in_clean_solver_process(payload)
+        self.assertIn(status, VALID_OPTIMAL_STATUSES)
+        self.assertTrue(no_mixed_direction)
 
     def test_perform_dayahead_forecast_optim(self):
         # Check formatting of output from dayahead optimization

@@ -836,6 +836,15 @@
             "title": "Enable Battery",
             "description": "Set to True if we should consider an energy storage device such as a Li-Ion battery. Defaults to False"
           },
+          "battery_mode_lock": {
+            "type": "string",
+            "enum": [
+              "site"
+            ],
+            "default": "site",
+            "title": "Battery mode lock",
+            "description": "Controls the battery charge/discharge direction lock. Use site to prevent mixed charge and discharge across indexed battery blocks. Only site is supported in this release."
+          },
           "set_nocharge_from_grid": {
             "type": "boolean",
             "default": false,
