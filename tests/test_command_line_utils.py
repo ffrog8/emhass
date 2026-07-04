@@ -200,6 +200,114 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         treat_runtimeparams.assert_awaited_once()
         forecast.assert_not_called()
 
+    async def test_split_pv_nested_pv_forecast_validates_then_reaches_disabled_multi_block_gate(
+        self,
+    ):
+        params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = {
+            "set_use_pv": True,
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+            "inverter_ac_output_max": 5000,
+            "inverter_ac_input_max": 5000,
+            "inverter_efficiency_dc_ac": 1.0,
+            "inverter_efficiency_ac_dc": 1.0,
+        }
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 48,
+            }
+        }
+
+        with patch(
+            "emhass.command_line.utils.treat_runtimeparams",
+            wraps=utils.treat_runtimeparams,
+        ) as treat_runtimeparams:
+            with patch("emhass.command_line.RetrieveHass") as retrieve_hass:
+                with patch("emhass.command_line.Forecast") as forecast:
+                    with patch("emhass.command_line.Optimization") as optimization:
+                        with patch("emhass.command_line.OptimizationCache.get") as cache_get:
+                            with patch("emhass.command_line.OptimizationCache.put") as cache_put:
+                                with self.assertRaisesRegex(
+                                    NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE
+                                ):
+                                    await set_input_data_dict(
+                                        emhass_conf,
+                                        "profit",
+                                        orjson.dumps(params).decode("utf-8"),
+                                        orjson.dumps(runtimeparams).decode("utf-8"),
+                                        "naive-mpc-optim",
+                                        logger,
+                                        get_data_from_file=True,
+                                    )
+
+        treat_runtimeparams.assert_awaited_once()
+        retrieve_hass.assert_not_called()
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+        cache_get.assert_not_called()
+        cache_put.assert_not_called()
+
+    async def test_weather_forecast_cache_split_pv_nested_pv_forecast_validates_then_reaches_disabled_multi_block_gate(
+        self,
+    ):
+        params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
+        params["hybrid_inverter_config_1"] = {
+            "set_use_pv": True,
+            "set_use_battery": True,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": False,
+            "battery_discharge_power_max": 5000,
+            "battery_charge_power_max": 4600,
+            "battery_discharge_efficiency": 0.95,
+            "battery_charge_efficiency": 0.95,
+            "battery_nominal_energy_capacity": 13300,
+            "battery_minimum_state_of_charge": 0.10,
+            "battery_maximum_state_of_charge": 0.95,
+            "battery_target_state_of_charge": 0.90,
+            "inverter_ac_output_max": 5000,
+            "inverter_ac_input_max": 5000,
+            "inverter_efficiency_dc_ac": 1.0,
+            "inverter_efficiency_ac_dc": 1.0,
+        }
+        runtimeparams = {
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 48,
+            }
+        }
+
+        with patch(
+            "emhass.command_line.utils.treat_runtimeparams",
+            wraps=utils.treat_runtimeparams,
+        ) as treat_runtimeparams:
+            with patch("emhass.command_line.Forecast") as forecast:
+                forecast.side_effect = AssertionError(
+                    "Forecast constructed before disabled multi-block gate"
+                )
+                with self.assertRaisesRegex(
+                    NotImplementedError, MULTI_BLOCK_SOLVE_DISABLED_MESSAGE
+                ):
+                    await weather_forecast_cache(
+                        emhass_conf,
+                        orjson.dumps(params).decode("utf-8"),
+                        orjson.dumps(runtimeparams).decode("utf-8"),
+                        logger,
+                    )
+
+        treat_runtimeparams.assert_awaited_once()
+        forecast.assert_not_called()
+
     # Test input data for actions (using data from file)
     async def test_set_input_data_dict(self):
         costfun = "profit"

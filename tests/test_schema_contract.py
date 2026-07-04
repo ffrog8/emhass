@@ -217,6 +217,27 @@ def test_openapi_runtime_params_contract_is_pattern_based():
     assert "battery_charge_power_max" not in runtime_schema.get("properties", {})
 
 
+def test_openapi_runtime_block_schema_documents_nested_pv_forecast():
+    openapi_doc = json.loads(Path("src/emhass/static/openapi.json").read_text(encoding="utf-8"))
+    runtime_schema = openapi_doc["components"]["schemas"]["RuntimeParams"]
+    pattern_properties = runtime_schema.get("patternProperties", {})
+    block_schema = pattern_properties["^hybrid_inverter_config_[1-9][0-9]*$"]
+    description = block_schema["description"]
+
+    assert "hybrid_inverter_config_<N>" not in runtime_schema.get("properties", {})
+    assert "hybrid_inverter_config_1" not in runtime_schema.get("properties", {})
+    for expected in (
+        "already configured hybrid_inverter_config_N block where N >= 1",
+        "split_pv",
+        "pv_power_forecast",
+        "numeric non-negative JSON list",
+        "length at least the optimization horizon",
+        "Flat top-level runtime keys continue to address block 0",
+        "Runtime cannot create blocks",
+    ):
+        assert expected in description
+
+
 # ---------------------------------------------------------------------------
 # #880 / #904 regression tests
 # ---------------------------------------------------------------------------

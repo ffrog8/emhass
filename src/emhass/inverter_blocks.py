@@ -87,7 +87,7 @@ _RESERVED_PV_SOURCE_KEYS = frozenset(
     }
 )
 
-_RUNTIME_ONLY_BLOCK_KEYS = frozenset(
+_RUNTIME_SOC_BLOCK_KEYS = frozenset(
     {
         "soc_init",
         "soc_final",
@@ -96,10 +96,12 @@ _RUNTIME_ONLY_BLOCK_KEYS = frozenset(
     }
 )
 
+_RUNTIME_PV_BLOCK_KEYS = frozenset({"pv_power_forecast"})
+_RUNTIME_ONLY_BLOCK_KEYS = _RUNTIME_SOC_BLOCK_KEYS | _RUNTIME_PV_BLOCK_KEYS
+
 _DEFERRED_RUNTIME_BLOCK_KEYS = frozenset(
     {
         "compute_curtailment",
-        "pv_power_forecast",
     }
 )
 
@@ -318,6 +320,7 @@ def _validate_block_runtime_conf(
     runtime_conf: Mapping[str, object],
     plant_conf: Mapping[str, object],
     set_use_battery: bool,
+    set_use_pv: bool,
 ) -> dict[str, object]:
     runtime_keys = set(runtime_conf)
     invalid_runtime_keys = runtime_keys - _RUNTIME_ONLY_BLOCK_KEYS
@@ -325,8 +328,9 @@ def _validate_block_runtime_conf(
         key = sorted(invalid_runtime_keys, key=str)[0]
         raise ValueError(f"hybrid_inverter_config_{index}.{key} is not a valid runtime-only key")
 
-    if runtime_keys and not set_use_battery:
-        key = sorted(runtime_keys, key=str)[0]
+    soc_runtime_keys = runtime_keys & _RUNTIME_SOC_BLOCK_KEYS
+    if soc_runtime_keys and not set_use_battery:
+        key = sorted(soc_runtime_keys, key=str)[0]
         raise ValueError(f"hybrid_inverter_config_{index}.{key} requires set_use_battery true")
 
     required_soc_bound_keys = {
@@ -334,12 +338,17 @@ def _validate_block_runtime_conf(
         "battery_maximum_state_of_charge",
     }
     missing_soc_bound_keys = required_soc_bound_keys - plant_conf.keys()
-    if runtime_keys and missing_soc_bound_keys:
-        key = sorted(runtime_keys, key=str)[0]
+    if soc_runtime_keys and missing_soc_bound_keys:
+        key = sorted(soc_runtime_keys, key=str)[0]
         missing = sorted(missing_soc_bound_keys)
         raise ValueError(
             f"hybrid_inverter_config_{index}.{key} requires configured battery SOC bounds: {missing}"
         )
+
+    pv_runtime_keys = runtime_keys & _RUNTIME_PV_BLOCK_KEYS
+    if pv_runtime_keys and not set_use_pv:
+        key = sorted(pv_runtime_keys, key=str)[0]
+        raise ValueError(f"hybrid_inverter_config_{index}.{key} requires set_use_pv true")
 
     validated: dict[str, object] = {}
     for key, value in runtime_conf.items():
@@ -347,6 +356,8 @@ def _validate_block_runtime_conf(
             validated[key] = _validate_runtime_soc(value, index, key, plant_conf)
         elif key == "soc_target_timestep":
             validated[key] = _validate_runtime_timestep(value, index, key)
+        elif key in _RUNTIME_PV_BLOCK_KEYS:
+            validated[key] = value
     return validated
 
 
@@ -378,11 +389,13 @@ def _split_block_config(
     if set_use_battery:
         _validate_battery_block(index, raw_block, plant_conf)
 
+    set_use_pv = bool(optim_conf.get("set_use_pv", False))
     validated_runtime_conf = _validate_block_runtime_conf(
         index,
         runtime_conf or {},
         plant_conf,
         set_use_battery,
+        set_use_pv,
     )
     return InverterBlockConfig(
         index=index,

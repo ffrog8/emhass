@@ -219,6 +219,26 @@ class TestBuildSpec(unittest.TestCase):
         )
         self.assertTrue(runtime_schema["additionalProperties"])
 
+    def test_runtime_block_pattern_schema_documents_nested_pv_forecast(self):
+        spec = gen.build_spec()
+        runtime_schema = spec["components"]["schemas"]["RuntimeParams"]
+        pattern_properties = runtime_schema.get("patternProperties", {})
+        block_schema = pattern_properties["^hybrid_inverter_config_[1-9][0-9]*$"]
+        description = block_schema["description"]
+
+        self.assertNotIn("hybrid_inverter_config_<N>", runtime_schema.get("properties", {}))
+        self.assertNotIn("hybrid_inverter_config_1", runtime_schema.get("properties", {}))
+        for expected in (
+            "already configured hybrid_inverter_config_N block where N >= 1",
+            "split_pv",
+            "pv_power_forecast",
+            "numeric non-negative JSON list",
+            "length at least the optimization horizon",
+            "Flat top-level runtime keys continue to address block 0",
+            "Runtime cannot create blocks",
+        ):
+            self.assertIn(expected, description)
+
     def test_runtime_params_component_has_no_config_scalar_duplicates(self):
         spec = gen.build_spec()
         runtime_schema = spec["components"]["schemas"]["RuntimeParams"]
