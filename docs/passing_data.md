@@ -151,12 +151,18 @@ create new blocks.
 }
 ```
 
-Step 6 supports battery-only multi-block plans when the static config uses
-`battery_mode_lock: site` and the configured blocks fit the battery-only scope.
-`battery_mode_lock` is static config, not a runtime parameter. Runtime payloads
-may override block SOC and scalar battery caps as before, but they cannot switch
-the site lock mode. Unsupported hybrid, PV, curtailment, and topology cases
-still raise `multi-block solve not enabled` after validation.
+Public multi-block runtime payloads are admitted only for the supported Step 6
+battery-only shape or the supported Step 7 split-PV hybrid shape. Both require
+`battery_mode_lock: site` in static config; `battery_mode_lock` is not a runtime
+parameter. Runtime payloads may override block SOC and scalar battery caps as
+before, but they cannot switch the site lock mode.
+
+For the Step 7 hybrid shape, static config must use
+`multi_hybrid_inverter_pv_mode: split_pv`, and block `0` plus every configured
+extra block must be battery-backed hybrid blocks with PV enabled. Every extra
+PV block must include nested runtime `pv_power_forecast` data under its
+matching `hybrid_inverter_config_N` object. Other multi-block shapes still
+raise `multi-block solve not enabled` after validation.
 
 In `split_pv` mode, the top-level `pv_power_forecast` remains the PV forecast
 for block `0` only. Each extra block with `set_use_pv: true` must receive its
@@ -175,13 +181,12 @@ are battery-only and do not need a nested PV forecast.
 ```
 
 In `site_pv` mode, and in `legacy` mode or when
-`multi_hybrid_inverter_pv_mode` is unset, extra blocks are battery-only in this
-initial v1 surface. Extra blocks with `set_use_pv: true` are rejected, and
-nested extra-block PV forecasts are rejected.
+`multi_hybrid_inverter_pv_mode` is unset, public hybrid multi-block solving is
+not admitted. Extra blocks with `set_use_pv: true` are rejected, and nested
+extra-block PV forecasts are rejected outside the `split_pv` hybrid path.
 
 Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
-modelling, block-local CSV loading, adjusted-PV models, and per-block
-curtailment remain future work.
+modelling, block-local CSV loading, and adjusted-PV models remain future work.
 
 ### Requiring an intermediate battery SOC target (naive-mpc-optim)
 

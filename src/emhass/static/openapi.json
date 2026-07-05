@@ -610,7 +610,7 @@
             ],
             "default": "legacy",
             "title": "Multi hybrid inverter PV mode",
-            "description": "Controls how PV is interpreted when indexed hybrid inverter blocks are configured. Use legacy for existing single-inverter behaviour. Multi-block solving remains disabled until the indexed optimizer model is implemented."
+            "description": "Controls how PV is interpreted when indexed hybrid inverter blocks are configured. Use legacy for existing single-inverter behaviour. Public multi-block hybrid solving is admitted only with split_pv, battery_mode_lock: site, battery-backed hybrid blocks, and nested runtime pv_power_forecast for every extra PV block; site_pv remains future scope."
           },
           "set_use_adjusted_pv": {
             "type": "boolean",

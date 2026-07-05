@@ -295,14 +295,19 @@ The existing top-level battery and hybrid inverter configuration remains block
 `0`. Additional static blocks can be declared with contiguous keys such as
 `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
 
-Step 6 supports battery-only indexed blocks only when `battery_mode_lock: site`
-is active, block `0` and all extra blocks are battery-only, non-hybrid,
-no-PV, and no-curtailment blocks, and `set_nocharge_from_grid: false` and
-`set_nodischarge_to_grid: false`. Extra blocks that use PV, hybrid inverter
-AC/DC modelling, curtailment, or topology features still validate and then
-raise `multi-block solve not enabled` until later implementation steps. This
-prevents EMHASS from silently ignoring unsupported extra inverter blocks and
-running a single-block plan.
+Public indexed-block solves are admitted only for the supported Step 6
+battery-only shape or the supported Step 7 split-PV hybrid shape. Both require
+`battery_mode_lock: site` so all configured battery blocks share one site-level
+charge/discharge direction.
+
+The Step 6 battery-only shape requires block `0` and all extra blocks to be
+battery-backed, non-hybrid, no-PV, and no-curtailment blocks. The Step 7 hybrid
+shape requires `multi_hybrid_inverter_pv_mode: split_pv`; block `0` and every
+extra block must be battery-backed hybrid blocks with PV enabled; and every
+extra PV block must receive a nested runtime `pv_power_forecast` under
+`hybrid_inverter_config_N`. Other multi-block shapes still validate and then
+raise `multi-block solve not enabled` instead of silently running a single-block
+plan.
 
 Block `0` must stay in the existing flat top-level config. Do not define
 `hybrid_inverter_config_0`.
@@ -316,16 +321,15 @@ this release is `site`, which prevents one configured battery block from
 charging while another configured battery block discharges in the same
 timestep. `none` is reserved and rejected for configured extra blocks.
 
-For Step 6 multi-block battery solves, `set_nocharge_from_grid` and
-`set_nodischarge_to_grid` must both be `false`. Those topology constraints
-remain disabled for multi-block solves until Step 8.
+Configurations outside the two admitted shapes are rejected for public
+multi-block solves.
 
-Allowed extra-block keys in this step are the block-local battery, hybrid
-inverter, curtailment, and enablement keys. Site-level load sensors, tariffs,
-grid import/export limits, deferrable-load settings, secrets, publishing
-settings, and config-time PV source/model keys are rejected. Runtime nested
-blocks may override configured block-local scalar values and runtime-only SOC
-keys for existing blocks only.
+Allowed extra-block keys are the block-local battery, hybrid inverter,
+curtailment, and enablement keys. Site-level load sensors, tariffs, grid
+import/export limits, secrets, publishing settings, and config-time PV
+source/model keys are rejected. Runtime nested blocks may override configured
+block-local scalar values, runtime-only SOC keys, and the required
+`split_pv` extra-block `pv_power_forecast` for existing blocks only.
 
 In `split_pv` mode, the top-level `pv_power_forecast` is the forecast for block
 `0` only. Each extra block with `set_use_pv: true` must receive its own nested
@@ -334,13 +338,12 @@ runtime `pv_power_forecast` list under `hybrid_inverter_config_N`, where
 need a nested PV forecast.
 
 In `site_pv` mode, and in `legacy` mode or when
-`multi_hybrid_inverter_pv_mode` is unset, extra blocks are battery-only in this
-initial v1 surface. Extra blocks with `set_use_pv: true` are rejected, and
-nested extra-block PV forecasts are rejected.
+`multi_hybrid_inverter_pv_mode` is unset, public hybrid multi-block solving is
+not admitted. Extra blocks with `set_use_pv: true` are rejected, and nested
+extra-block PV forecasts are rejected outside the `split_pv` hybrid path.
 
 Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
-modelling, block-local CSV loading, adjusted-PV models, and per-block
-curtailment remain future work.
+modelling, block-local CSV loading, and adjusted-PV models remain future work.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 

@@ -70,6 +70,15 @@ _REQUIRED_BATTERY_KEYS = frozenset(
     }
 )
 
+_REQUIRED_HYBRID_INVERTER_KEYS = frozenset(
+    {
+        "inverter_ac_output_max",
+        "inverter_ac_input_max",
+        "inverter_efficiency_dc_ac",
+        "inverter_efficiency_ac_dc",
+    }
+)
+
 _RESERVED_PV_SOURCE_KEYS = frozenset(
     {
         "sensor_power_photovoltaics",
@@ -297,6 +306,12 @@ def _validate_battery_block(index: int, raw_block: Mapping[str, object], plant_c
         )
 
 
+def _validate_hybrid_block(index: int, raw_block: Mapping[str, object]) -> None:
+    missing = sorted(_REQUIRED_HYBRID_INVERTER_KEYS - raw_block.keys())
+    if missing:
+        raise ValueError(f"hybrid_inverter_config_{index} missing required hybrid inverter keys: {missing}")
+
+
 def _validate_runtime_soc(
     value: object,
     block_index: int,
@@ -392,6 +407,8 @@ def _split_block_config(
         raise ValueError(f"hybrid_inverter_config_{index} contains battery keys but set_use_battery is not true")
     if set_use_battery:
         _validate_battery_block(index, raw_block, plant_conf)
+    if bool(plant_conf.get("inverter_is_hybrid", False)):
+        _validate_hybrid_block(index, raw_block)
 
     set_use_pv = bool(optim_conf.get("set_use_pv", False))
     validated_runtime_conf = _validate_block_runtime_conf(
@@ -539,6 +556,66 @@ def is_public_safe_multi_block_battery_model(
     return True
 
 
+def _has_unsupported_topology_flags(optim_conf: Mapping[str, object]) -> bool:
+    return any(
+        optim_conf.get(flag)
+        for flag in (
+            "set_nocharge_from_grid",
+            "set_nodischarge_to_grid",
+            "set_battery_first_priority",
+        )
+    )
+
+
+def is_public_safe_multi_block_hybrid_model(
+    optim_conf: Mapping[str, object],
+    plant_conf: Mapping[str, object],
+) -> bool:
+    """Return whether parsed extra blocks match the public split-PV hybrid shape."""
+    if not has_extra_inverter_blocks(plant_conf):
+        return False
+    if optim_conf.get("battery_mode_lock", "site") != "site":
+        return False
+    if _has_unsupported_topology_flags(optim_conf):
+        return False
+    if plant_conf.get("multi_hybrid_inverter_pv_mode") != "split_pv":
+        return False
+    if not optim_conf.get("set_use_pv"):
+        return False
+    if not optim_conf.get("set_use_battery"):
+        return False
+    if not plant_conf.get("inverter_is_hybrid"):
+        return False
+
+    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if not isinstance(parsed_blocks, Mapping):
+        return False
+
+    for index, block in parsed_blocks.items():
+        if index == 0:
+            continue
+        if not block.set_use_battery:
+            return False
+        if not block.set_use_pv:
+            return False
+        if not block.plant_conf.get("inverter_is_hybrid"):
+            return False
+        if "pv_power_forecast" not in block.runtime_conf:
+            return False
+    return True
+
+
+def is_public_safe_multi_block_model(
+    optim_conf: Mapping[str, object],
+    plant_conf: Mapping[str, object],
+) -> bool:
+    """Return whether parsed extra blocks are in a public multi-block shape."""
+    return is_public_safe_multi_block_battery_model(
+        optim_conf,
+        plant_conf,
+    ) or is_public_safe_multi_block_hybrid_model(optim_conf, plant_conf)
+
+
 def _freeze_for_signature(value: object) -> object:
     if isinstance(value, Mapping):
         return tuple(
@@ -593,6 +670,7 @@ class InverterBlockRuntime:
     soc_target_floor: Any
     battery_charge_power_max: Any
     battery_discharge_power_max: Any
+    pv_forecast: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -617,6 +695,7 @@ class InverterBlockVariables:
     is_dc_sourcing: Any | None = None
     batt_stress_cost: Any | None = None
     inv_stress_cost: Any | None = None
+    p_pv_curtailment: Any | None = None
     p_batt: Any | None = None
     stored_energy: Any | None = None
     soc: Any | None = None

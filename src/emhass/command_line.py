@@ -34,7 +34,7 @@ from emhass.inverter_blocks import (
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     has_extra_inverter_blocks,
     inverter_block_structure_signature,
-    is_public_safe_multi_block_battery_model,
+    is_public_safe_multi_block_model,
 )
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
@@ -510,6 +510,35 @@ class OptimizationCache:
                 "cache_key": cls._cache_key,
                 "last_used": cls._last_used.isoformat() if cls._last_used else None,
             }
+
+
+def _update_cached_inverter_block_runtime(opt: Optimization, plant_conf: dict) -> None:
+    """Refresh nested inverter-block runtime data on cache hits.
+
+    The optimizer worker owns ``update_inverter_block_runtime``. The local
+    fallback only updates the current exposed parameter alias shape so runtime
+    ``pv_power_forecast`` data does not become part of the cache key.
+    """
+    update_runtime = getattr(type(opt), "update_inverter_block_runtime", None)
+    if callable(update_runtime):
+        update_runtime(opt, plant_conf)
+        return
+
+    blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    runtime_by_index = getattr(opt, "inverter_block_runtime", None)
+    if not isinstance(blocks, dict) or not isinstance(runtime_by_index, dict):
+        return
+
+    for index, block in blocks.items():
+        if index == 0:
+            continue
+        pv_forecast = block.runtime_conf.get("pv_power_forecast")
+        if pv_forecast is None:
+            continue
+        runtime = runtime_by_index.get(index)
+        if runtime is None or getattr(runtime, "pv_forecast", None) is None:
+            continue
+        runtime.pv_forecast.value = np.asarray(pv_forecast, dtype=float)
 
 
 async def _retrieve_from_file(
@@ -1418,7 +1447,7 @@ async def set_input_data_dict(
                 f"battery_mode_lock {battery_mode_lock!r} is not supported "
                 "for multi-block battery solves"
             )
-        if not is_public_safe_multi_block_battery_model(optim_conf, plant_conf):
+        if not is_public_safe_multi_block_model(optim_conf, plant_conf):
             raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
     else:
         plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
@@ -1519,6 +1548,7 @@ async def set_input_data_dict(
                 # constraints via cp.Parameter and need the runtime value
                 # propagated even on a cache hit.
                 opt.update_battery_power_limits(plant_conf)
+                _update_cached_inverter_block_runtime(opt, plant_conf)
             # Update runtime-configurable solver options from optim_conf
             # These don't affect problem structure, so they're safe to update on cached object
             runtime_solver_opts = [
