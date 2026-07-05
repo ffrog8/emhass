@@ -556,17 +556,6 @@ def is_public_safe_multi_block_battery_model(
     return True
 
 
-def _has_unsupported_topology_flags(optim_conf: Mapping[str, object]) -> bool:
-    return any(
-        optim_conf.get(flag)
-        for flag in (
-            "set_nocharge_from_grid",
-            "set_nodischarge_to_grid",
-            "set_battery_first_priority",
-        )
-    )
-
-
 def is_public_safe_multi_block_hybrid_model(
     optim_conf: Mapping[str, object],
     plant_conf: Mapping[str, object],
@@ -575,8 +564,6 @@ def is_public_safe_multi_block_hybrid_model(
     if not has_extra_inverter_blocks(plant_conf):
         return False
     if optim_conf.get("battery_mode_lock", "site") != "site":
-        return False
-    if _has_unsupported_topology_flags(optim_conf):
         return False
     if plant_conf.get("multi_hybrid_inverter_pv_mode") != "split_pv":
         return False

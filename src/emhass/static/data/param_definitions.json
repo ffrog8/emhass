@@ -610,21 +610,21 @@
     },
     "set_nocharge_from_grid": {
       "friendly_name": "Forbid charging battery from grid",
-      "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV",
+      "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV. In split-PV hybrid multi-block solving this is a top-level site topology flag that uses aggregate raw site PV across configured split-PV blocks plus aggregate signed battery charging; it is not block-local source tracking. Battery-only multi-block solving rejects this flag.",
       "input": "boolean",
       "default_value": false,
       "unit": "none"
     },
     "set_nodischarge_to_grid": {
       "friendly_name": "Forbid battery discharge to the grid",
-      "Description": "Set this to true if you want to forbid discharging battery power to the grid.",
+      "Description": "Set this to true if you want to forbid discharging battery power to the grid. In split-PV hybrid multi-block solving this is a top-level site topology flag that uses site hybrid mode semantics where shared site discharge mode implies import/non-export grid direction. Battery-only multi-block solving rejects this flag.",
       "input": "boolean",
       "default_value": true,
       "unit": "none"
     },
     "set_battery_first_priority": {
       "friendly_name": "Drain battery before grid import",
-      "Description": "Set this to true to forbid importing from the grid while the battery is still above its minimum SoC, so stored energy is used before any import. Useful on a flat (non time-of-use) tariff. Note: this can make the problem infeasible in a timestep where the load minus PV exceeds the battery maximum discharge power.",
+      "Description": "Set this to true to forbid importing from the grid while the battery is still above its minimum SoC, so stored energy is used before any import. Useful on a flat (non time-of-use) tariff. Note: this can make the problem infeasible in a timestep where the load minus PV exceeds the battery maximum discharge power. In public battery-only and split-PV hybrid multi-block solving this top-level site topology flag uses aggregate fleet stored energy.",
       "input": "boolean",
       "default_value": false,
       "unit": "none"

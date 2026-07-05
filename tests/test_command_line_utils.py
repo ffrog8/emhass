@@ -417,7 +417,9 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         forecast.assert_not_called()
         optimization.assert_not_called()
 
-    async def test_split_pv_hybrid_block_topology_flags_rejected_until_step_8(self):
+    async def test_split_pv_hybrid_block_topology_flags_reach_public_optimization(
+        self,
+    ):
         for flag in (
             "set_nocharge_from_grid",
             "set_nodischarge_to_grid",
@@ -429,27 +431,52 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                 params["optim_conf"][flag] = True
                 runtimeparams = TestCommandLineAsyncUtils._split_pv_hybrid_runtimeparams()
                 params["passed_data"] = runtimeparams
+                forecast_instance = MagicMock()
+                forecast_instance.forecast_dates = pd.date_range(
+                    "2024-01-01",
+                    periods=10,
+                    freq="30min",
+                )
+                forecast_instance.var_load_cost = "unit_load_cost"
+                forecast_instance.var_prod_price = "unit_prod_price"
+                optimization_instance = MagicMock()
+                prepared_data = {
+                    "df_input_data": None,
+                    "days_list": [],
+                    "df_input_data_dayahead": pd.DataFrame(),
+                    "df_weather": None,
+                    "p_pv_forecast": None,
+                    "p_load_forecast": None,
+                }
 
-                with patch("emhass.command_line.RetrieveHass") as retrieve_hass:
-                    with patch("emhass.command_line.Forecast") as forecast:
-                        with patch("emhass.command_line.Optimization") as optimization:
-                            with self.assertRaisesRegex(
-                                NotImplementedError,
-                                MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
-                            ):
-                                await set_input_data_dict(
-                                    emhass_conf,
-                                    "profit",
-                                    orjson.dumps(params).decode("utf-8"),
-                                    orjson.dumps(runtimeparams).decode("utf-8"),
-                                    "naive-mpc-optim",
-                                    logger,
-                                    get_data_from_file=True,
-                                )
+                with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+                    with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                        with patch("emhass.command_line.OptimizationCache.put") as cache_put:
+                            with patch(
+                                "emhass.command_line.Optimization",
+                                return_value=optimization_instance,
+                            ) as optimization:
+                                with patch(
+                                    "emhass.command_line._prepare_naive_mpc_optim",
+                                    new=AsyncMock(return_value=prepared_data),
+                                ):
+                                    input_data_dict = await set_input_data_dict(
+                                        emhass_conf,
+                                        "profit",
+                                        orjson.dumps(params).decode("utf-8"),
+                                        orjson.dumps(runtimeparams).decode("utf-8"),
+                                        "naive-mpc-optim",
+                                        logger,
+                                        get_data_from_file=True,
+                                    )
 
-                retrieve_hass.assert_not_called()
-                forecast.assert_not_called()
-                optimization.assert_not_called()
+                optimization.assert_called_once()
+                self.assertNotIn(
+                    "_allow_internal_multi_block_battery_model",
+                    optimization.call_args.kwargs,
+                )
+                cache_put.assert_called_once()
+                self.assertIs(input_data_dict["opt"], optimization_instance)
 
     async def test_cached_split_pv_hybrid_runtime_pv_forecast_updates_cached_optimizer(
         self,
@@ -528,7 +555,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             atol=1e-9,
         )
 
-    async def test_battery_only_extra_block_topology_flags_still_reach_disabled_gate(
+    async def test_battery_only_extra_block_nocharge_nodischarge_still_reach_disabled_gate(
         self,
     ):
         for flag in ("set_nocharge_from_grid", "set_nodischarge_to_grid"):
@@ -3741,6 +3768,41 @@ class TestOptimizationCache(unittest.TestCase):
         self.assertEqual(site_key.battery_mode_lock, "site")
         self.assertEqual(none_key.battery_mode_lock, "none")
         self.assertNotEqual(site_key, none_key)
+
+    def test_cache_key_changes_for_top_level_topology_flags(self):
+        base_optim_conf = copy.deepcopy(self.optim_conf)
+        for flag in (
+            "set_nocharge_from_grid",
+            "set_nodischarge_to_grid",
+            "set_battery_first_priority",
+        ):
+            base_optim_conf[flag] = False
+
+        base_key = OptimizationCache._compute_cache_key(
+            base_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        for flag in (
+            "set_nocharge_from_grid",
+            "set_nodischarge_to_grid",
+            "set_battery_first_priority",
+        ):
+            with self.subTest(flag=flag):
+                flag_optim_conf = copy.deepcopy(base_optim_conf)
+                flag_optim_conf[flag] = True
+                flag_key = OptimizationCache._compute_cache_key(
+                    flag_optim_conf,
+                    self.plant_conf,
+                    self.costfun,
+                    self.retrieve_hass_conf,
+                    self.num_timesteps,
+                )
+
+                self.assertNotEqual(base_key, flag_key)
 
     def test_cache_clear(self):
         """Test that clear() empties the cache."""
