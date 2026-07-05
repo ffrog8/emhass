@@ -242,9 +242,9 @@ Battery self-identification (`set_use_battery_identification`) is an opt-in, def
 - `num_threads`: Set the number of threads to pass to LP solvers that support specifying a number of threads. Defaults to 0 (auto-detect).
 - `lp_solver_timeout`: Maximum time in seconds the solver is allowed to run before stopping. Defaults to 45.
 - `lp_solver_mip_rel_gap`: MIP (Mixed-Integer Programming) relative gap tolerance. For problems with binary variables (semi-continuous loads, single-constant loads, etc.), the solver will stop when it finds a solution within this percentage of the optimal. A value of 0.05 (5%) means the solver stops when the solution is guaranteed to be within 5% of optimal. Higher values solve faster with minimal quality impact. Defaults to 0.01 (within 1% of optimal); this keeps deep-horizon problems from timing out before any plan is published. Set to 0 for exact optimal (this was the previous default).
-- `set_nocharge_from_grid`: Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV.
-- `set_nodischarge_to_grid`: Set to true to forbid discharging battery power to the grid. The constraint depends on inverter topology: hybrid inverters (`inverter_is_hybrid` true) block battery discharge whenever PV is exporting; AC-coupled systems instead bound grid export to the available PV (net of any curtailment when `compute_curtailment` is true), which prevents battery energy from reaching the grid while still allowing the battery to supply local load during export. The AC-coupled form fixes the infeasibility reported in issue #936.
-- `set_battery_first_priority`: Set this to true to prefer draining stored battery energy before importing from the grid, so the battery is used up before any grid import while it is still above its minimum SoC. This is mainly useful on a flat (non time-of-use) tariff, where the solver would otherwise be free to interleave grid import with discharge while the battery is still full. Default is false. This is a soft penalty, not a hard constraint: importing while the battery is still charged is heavily penalized so drain-first wins on a flat tariff, but the optimizer can still import when that is the only feasible option (for example recharging to a target SoC with no PV, or a load that exceeds the battery's maximum discharge power), so it will not make the optimization infeasible.
+- `set_nocharge_from_grid`: Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV. In public split-PV hybrid multi-block solving, this remains a top-level site topology flag and uses aggregate raw site PV across the configured split-PV blocks plus aggregate signed battery charging. It is not source tracking and does not prove that every block-local battery charge came only from that block's PV. Public battery-only multi-block solving still rejects this flag.
+- `set_nodischarge_to_grid`: Set to true to forbid discharging battery power to the grid. The constraint depends on inverter topology: hybrid inverters (`inverter_is_hybrid` true) block battery discharge whenever PV is exporting; AC-coupled systems instead bound grid export to the available PV (net of any curtailment when `compute_curtailment` is true), which prevents battery energy from reaching the grid while still allowing the battery to supply local load during export. The AC-coupled form fixes the infeasibility reported in issue #936. In public split-PV hybrid multi-block solving, this remains a top-level site topology flag and uses the existing site hybrid mode semantics: shared site discharge mode implies import/non-export grid direction. Public battery-only multi-block solving still rejects this flag.
+- `set_battery_first_priority`: Set this to true to prefer draining stored battery energy before importing from the grid, so the battery is used up before any grid import while it is still above its minimum SoC. This is mainly useful on a flat (non time-of-use) tariff, where the solver would otherwise be free to interleave grid import with discharge while the battery is still full. Default is false. This is a soft penalty, not a hard constraint: importing while the battery is still charged is heavily penalized so drain-first wins on a flat tariff, but the optimizer can still import when that is the only feasible option (for example recharging to a target SoC with no PV, or a load that exceeds the battery's maximum discharge power), so it will not make the optimization infeasible. In public battery-only and split-PV hybrid multi-block solving, this top-level site topology flag uses aggregate fleet stored energy.
 - `set_battery_dynamic`: Set a power dynamic limiting condition to the battery power. This is an additional constraint on the battery dynamic in power per unit of time, which allows you to set a percentage of the battery's nominal full power as the maximum power allowed for (dis)charge.
 - `battery_dynamic_max`: The maximum positive (for discharge) battery power dynamic. This is the allowed power variation (in percentage) of battery maximum power per unit of time.
 - `battery_dynamic_min`: The maximum negative (for charge) battery power dynamic. This is the allowed power variation (in percentage) of battery maximum power per unit of time.
@@ -260,8 +260,8 @@ Battery self-identification (`set_use_battery_identification`) is an opt-in, def
 
 These are the technical parameters of the energy system of the household.
 
-- `maximum_power_from_grid`: The maximum power that can be supplied by the utility grid in Watts (consumption). Defaults to 9000.
-- `maximum_power_to_grid`: The maximum power that can be supplied to the utility grid in Watts (injection). Defaults to 9000.
+- `maximum_power_from_grid`: The maximum power that can be supplied by the utility grid in Watts (consumption). Defaults to 9000. In indexed-block solving this remains an aggregate site limit on `p_grid_pos`, not a per-block inverter limit.
+- `maximum_power_to_grid`: The maximum power that can be supplied to the utility grid in Watts (injection). Defaults to 9000. In indexed-block solving this remains an aggregate site limit on `p_grid_neg`, not a per-block inverter limit.
 
 We will define the technical parameters of the PV installation. For the modeling task we rely on the PVLib Python package. For more information see: [https://pvlib-python.readthedocs.io/en/stable/](https://pvlib-python.readthedocs.io/en/stable/)
 A dedicated web app will help you search for your correct PV module and inverter names: [https://emhass-pvlib-database.streamlit.app/](https://emhass-pvlib-database.streamlit.app/)
@@ -295,14 +295,14 @@ The existing top-level battery and hybrid inverter configuration remains block
 `0`. Additional static blocks can be declared with contiguous keys such as
 `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
 
-Public indexed-block solves are admitted only for the supported Step 6
-battery-only shape or the supported Step 7 split-PV hybrid shape. Both require
+Public indexed-block solves are admitted only for the supported battery-only
+shape or the supported split-PV hybrid shape. Both require
 `battery_mode_lock: site` so all configured battery blocks share one site-level
 charge/discharge direction.
 
 The Step 6 battery-only shape requires block `0` and all extra blocks to be
-battery-backed, non-hybrid, no-PV, and no-curtailment blocks. The Step 7 hybrid
-shape requires `multi_hybrid_inverter_pv_mode: split_pv`; block `0` and every
+battery-backed, non-hybrid, no-PV, and no-curtailment blocks. The hybrid shape
+requires `multi_hybrid_inverter_pv_mode: split_pv`; block `0` and every
 extra block must be battery-backed hybrid blocks with PV enabled; and every
 extra PV block must receive a nested runtime `pv_power_forecast` under
 `hybrid_inverter_config_N`. Other multi-block shapes still validate and then
@@ -326,10 +326,26 @@ multi-block solves.
 
 Allowed extra-block keys are the block-local battery, hybrid inverter,
 curtailment, and enablement keys. Site-level load sensors, tariffs, grid
-import/export limits, secrets, publishing settings, and config-time PV
-source/model keys are rejected. Runtime nested blocks may override configured
-block-local scalar values, runtime-only SOC keys, and the required
-`split_pv` extra-block `pv_power_forecast` for existing blocks only.
+import/export limits, topology flags, secrets, publishing settings, and
+config-time PV source/model keys are rejected. Runtime nested blocks may
+override configured block-local scalar values, runtime-only SOC keys, and the
+required `split_pv` extra-block `pv_power_forecast` for existing blocks only.
+
+The topology flags `set_nocharge_from_grid`, `set_nodischarge_to_grid`, and
+`set_battery_first_priority` are top-level site flags only. They remain invalid
+inside `hybrid_inverter_config_N`. Public split-PV hybrid multi-block solving
+admits all three flags with aggregate site semantics:
+
+- `set_nocharge_from_grid` uses aggregate raw site PV across configured split-PV
+  blocks plus aggregate signed battery charging. This is not source tracking and
+  is not a block-local no-grid-charge proof.
+- `set_nodischarge_to_grid` uses the existing site hybrid mode semantics:
+  shared site discharge mode implies import/non-export grid direction.
+- `set_battery_first_priority` uses aggregate fleet stored energy.
+
+Public battery-only multi-block solving admits `set_battery_first_priority`
+with aggregate fleet stored energy, but still rejects
+`set_nocharge_from_grid` and `set_nodischarge_to_grid`.
 
 In `split_pv` mode, the top-level `pv_power_forecast` is the forecast for block
 `0` only. Each extra block with `set_use_pv: true` must receive its own nested

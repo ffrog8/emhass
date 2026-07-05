@@ -151,18 +151,30 @@ create new blocks.
 }
 ```
 
-Public multi-block runtime payloads are admitted only for the supported Step 6
-battery-only shape or the supported Step 7 split-PV hybrid shape. Both require
+Public multi-block runtime payloads are admitted only for the supported
+battery-only shape or the supported split-PV hybrid shape. Both require
 `battery_mode_lock: site` in static config; `battery_mode_lock` is not a runtime
 parameter. Runtime payloads may override block SOC and scalar battery caps as
 before, but they cannot switch the site lock mode.
 
-For the Step 7 hybrid shape, static config must use
+For the split-PV hybrid shape, static config must use
 `multi_hybrid_inverter_pv_mode: split_pv`, and block `0` plus every configured
 extra block must be battery-backed hybrid blocks with PV enabled. Every extra
 PV block must include nested runtime `pv_power_forecast` data under its
 matching `hybrid_inverter_config_N` object. Other multi-block shapes still
 raise `multi-block solve not enabled` after validation.
+
+Topology flags remain top-level site config only. Do not send
+`set_nocharge_from_grid`, `set_nodischarge_to_grid`, or
+`set_battery_first_priority` inside `hybrid_inverter_config_N`. Public split-PV
+hybrid multi-block solving admits all three top-level flags with aggregate site
+semantics: `set_nocharge_from_grid` uses aggregate raw site PV across configured
+split-PV blocks plus aggregate signed battery charging, `set_nodischarge_to_grid`
+uses site hybrid mode semantics where shared site discharge mode implies
+import/non-export grid direction, and `set_battery_first_priority` uses
+aggregate fleet stored energy. Public battery-only multi-block solving admits
+`set_battery_first_priority`, but still rejects `set_nocharge_from_grid` and
+`set_nodischarge_to_grid`.
 
 In `split_pv` mode, the top-level `pv_power_forecast` remains the PV forecast
 for block `0` only. Each extra block with `set_use_pv: true` must receive its

@@ -689,6 +689,47 @@ class Optimization:
             p_batt_total = p_batt_total + extra_vars.p_sto_pos + extra_vars.p_sto_neg
         return p_batt_total
 
+    def _site_battery_charge_expression(self):
+        block_vars = self.inverter_block_variables[0]
+        site_charge = block_vars.p_sto_neg
+        if not self._multi_block_battery_model_enabled:
+            return site_charge
+        for index, _block in self._extra_battery_block_configs():
+            site_charge = site_charge + self.inverter_block_variables[index].p_sto_neg
+        return site_charge
+
+    def _site_battery_mode_variable(self):
+        if self._site_battery_mode_lock_active:
+            return self.vars["E_site"]
+        return self.vars["E"]
+
+    def _site_raw_pv_expression(self):
+        site_pv = self.param_pv_forecast
+        if not self._multi_block_hybrid_model_enabled:
+            return site_pv
+        for index, block_config in self._extra_battery_block_configs():
+            if not block_config.plant_conf.get("inverter_is_hybrid", False):
+                continue
+            block_pv = self.inverter_block_runtime[index].pv_forecast
+            if block_pv is not None:
+                site_pv = site_pv + block_pv
+        return site_pv
+
+    def _site_battery_first_energy_terms(self):
+        stored_energy = 0
+        min_energy = 0.0
+        total_capacity = 0.0
+        for index, block_expressions in sorted(self._battery_block_expressions.items()):
+            block_config = self.inverter_block_config[index]
+            block_capacity = block_config.plant_conf["battery_nominal_energy_capacity"]
+            stored_energy = stored_energy + block_expressions["stored_energy"]
+            min_energy += (
+                block_config.plant_conf["battery_minimum_state_of_charge"] * block_capacity
+            )
+            total_capacity += block_capacity
+        tolerance_energy = 0.01 * total_capacity
+        return stored_energy, min_energy, total_capacity, tolerance_energy
+
     def _update_extra_inverter_block_battery_params(self) -> None:
         if not self._multi_block_battery_model_enabled:
             return
@@ -2384,7 +2425,9 @@ class Optimization:
 
         # No charge from grid: The battery charge power cannot exceed the PV production
         if self.optim_conf["set_nocharge_from_grid"]:
-            constraints.append(p_sto_neg + p_pv >= 0)
+            constraints.append(
+                self._site_battery_charge_expression() + self._site_raw_pv_expression() >= 0
+            )
 
         # No discharge to grid: prevent battery energy from reaching the grid. Hybrid inverters
         # prioritise PV to the load, so the battery cannot discharge while PV exports (strict E<=D, #796).
@@ -2393,7 +2436,7 @@ class Optimization:
         # available PV instead (net of curtailment), blocking battery-to-grid while allowing battery-to-load.
         if self.optim_conf["set_nodischarge_to_grid"]:
             if self.plant_conf["inverter_is_hybrid"]:
-                constraints.append(E <= D)
+                constraints.append(self._site_battery_mode_variable() <= D)
             elif self.plant_conf["compute_curtailment"]:
                 constraints.append(
                     self.vars["p_grid_neg"] + p_pv - self.vars["p_pv_curtailment"] >= 0
@@ -2581,14 +2624,22 @@ class Optimization:
                 "maximum_power_from_grid",
                 self.num_timesteps,
             )
+            (
+                stored_energy,
+                min_energy,
+                total_capacity,
+                soc_tolerance_energy,
+            ) = self._site_battery_first_energy_terms()
             # 1% SoC tolerance so the gate opens cleanly once the battery has
             # numerically reached its minimum, avoiding chatter at the floor.
-            soc_tolerance_energy = 0.01 * cap
             # import_gate = 1 (import unpenalized) is only possible once the
             # stored energy is at/below min + tolerance; otherwise the gate is
             # forced to 0 and any grid import in that slot is penalized.
             constraints.append(
-                current_stored_energy - min_energy - soc_tolerance_energy <= cap * (1 - import_gate)
+                stored_energy
+                - min_energy
+                - soc_tolerance_energy
+                <= total_capacity * (1 - import_gate)
             )
             # battery_first_penalty >= import beyond the free (gated) allowance;
             # nonneg, so it equals max(0, import while the battery is charged).
