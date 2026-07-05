@@ -20,6 +20,7 @@ from emhass.inverter_blocks import (
     InverterBlockVariables,
     has_extra_inverter_blocks,
     is_public_safe_multi_block_battery_model,
+    is_public_safe_multi_block_hybrid_model,
 )
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
@@ -127,15 +128,27 @@ class Optimization:
         )
         self._has_extra_inverter_blocks = has_extra_inverter_blocks(self.plant_conf)
         self._battery_mode_lock = self.optim_conf.get("battery_mode_lock", "site")
-        self._site_battery_mode_lock_active = (
+        self._public_multi_block_battery_model_enabled = (
             not self._allow_internal_multi_block_battery_model
             and is_public_safe_multi_block_battery_model(
                 self.optim_conf,
                 self.plant_conf,
             )
         )
+        self._multi_block_hybrid_model_enabled = (
+            not self._allow_internal_multi_block_battery_model
+            and is_public_safe_multi_block_hybrid_model(
+                self.optim_conf,
+                self.plant_conf,
+            )
+        )
+        self._site_battery_mode_lock_active = (
+            self._public_multi_block_battery_model_enabled
+            or self._multi_block_hybrid_model_enabled
+        )
         self._multi_block_battery_model_enabled = (
             self._allow_internal_multi_block_battery_model
+            or self._public_multi_block_battery_model_enabled
             or self._site_battery_mode_lock_active
         )
         if self._has_extra_inverter_blocks and self._battery_mode_lock != "site":
@@ -339,6 +352,7 @@ class Optimization:
             soc_target_floor=self.param_soc_target_floor,
             battery_charge_power_max=self.param_battery_charge_power_max,
             battery_discharge_power_max=self.param_battery_discharge_power_max,
+            pv_forecast=self.param_pv_forecast,
         )
         if not self._multi_block_battery_model_enabled:
             return
@@ -354,6 +368,7 @@ class Optimization:
                 soc_target_floor=params["soc_target_floor"],
                 battery_charge_power_max=params["battery_charge_power_max"],
                 battery_discharge_power_max=params["battery_discharge_power_max"],
+                pv_forecast=params.get("pv_forecast"),
             )
 
     def _refresh_inverter_block_config(self) -> None:
@@ -390,6 +405,7 @@ class Optimization:
             is_dc_sourcing=block_vars.get("is_dc_sourcing"),
             batt_stress_cost=block_vars.get("batt_stress_cost"),
             inv_stress_cost=block_vars.get("inv_stress_cost"),
+            p_pv_curtailment=block_vars.get("p_pv_curtailment"),
             battery_mode=block_vars.get("E"),
         )
         if not self._multi_block_battery_model_enabled:
@@ -403,6 +419,11 @@ class Optimization:
                 soc_high_recovered=None,
                 soc_deficit_cost=None,
                 soc_surplus_cost=None,
+                p_hybrid_inverter=block_vars.get(f"p_hybrid_inverter_{index}"),
+                p_dc_ac=block_vars.get(f"p_dc_ac_{index}"),
+                p_ac_dc=block_vars.get(f"p_ac_dc_{index}"),
+                is_dc_sourcing=block_vars.get(f"is_dc_sourcing_{index}"),
+                p_pv_curtailment=block_vars.get(f"p_pv_curtailment_{index}"),
                 battery_mode=block_vars.get(f"E_{index}"),
             )
 
@@ -420,27 +441,44 @@ class Optimization:
             "the multi-block battery model"
         )
 
+    def _unsupported_multi_block_hybrid_feature(self, index: int, feature: str) -> None:
+        raise NotImplementedError(
+            f"hybrid_inverter_config_{index}.{feature} is not supported by "
+            "the multi-block hybrid model"
+        )
+
     def _validate_multi_block_battery_model_scope(self) -> None:
-        """Limit Step 5/6 multi-block solving to battery-only extra blocks."""
+        """Limit public multi-block solving to admitted Step 6/7 shapes."""
         if (
             not self._multi_block_battery_model_enabled
             or not self._has_extra_inverter_blocks
         ):
             return
 
-        if not self.optim_conf.get("set_use_battery", False):
-            self._unsupported_multi_block_battery_feature(0, "set_use_battery=false")
-        if self.optim_conf.get("set_use_pv", False):
-            self._unsupported_multi_block_battery_feature(0, "set_use_pv=true")
-        if self.optim_conf.get("set_nocharge_from_grid", False):
-            self._unsupported_multi_block_battery_feature(0, "set_nocharge_from_grid=true")
-        if self.optim_conf.get("set_nodischarge_to_grid", False):
-            self._unsupported_multi_block_battery_feature(0, "set_nodischarge_to_grid=true")
-        if self.plant_conf.get("inverter_is_hybrid", False):
-            self._unsupported_multi_block_battery_feature(0, "inverter_is_hybrid=true")
-        if self.plant_conf.get("compute_curtailment", False):
-            self._unsupported_multi_block_battery_feature(0, "compute_curtailment=true")
+        if not self._multi_block_hybrid_model_enabled:
+            if not self.optim_conf.get("set_use_battery", False):
+                self._unsupported_multi_block_battery_feature(0, "set_use_battery=false")
+            if self.optim_conf.get("set_use_pv", False):
+                self._unsupported_multi_block_battery_feature(0, "set_use_pv=true")
+            if self.optim_conf.get("set_nocharge_from_grid", False):
+                self._unsupported_multi_block_battery_feature(0, "set_nocharge_from_grid=true")
+            if self.optim_conf.get("set_nodischarge_to_grid", False):
+                self._unsupported_multi_block_battery_feature(
+                    0,
+                    "set_nodischarge_to_grid=true",
+                )
+            if self.plant_conf.get("inverter_is_hybrid", False):
+                self._unsupported_multi_block_battery_feature(0, "inverter_is_hybrid=true")
+            if self.plant_conf.get("compute_curtailment", False):
+                self._unsupported_multi_block_battery_feature(0, "compute_curtailment=true")
 
+        self._validate_extra_block_battery_feature_scope(
+            allow_pv_hybrid=self._multi_block_hybrid_model_enabled,
+        )
+        if self._multi_block_hybrid_model_enabled:
+            self._validate_extra_block_hybrid_feature_scope()
+
+    def _validate_extra_block_battery_feature_scope(self, *, allow_pv_hybrid: bool) -> None:
         dynamic_defaults = {
             "battery_dynamic_max": 0.9,
             "battery_dynamic_min": -0.9,
@@ -465,12 +503,19 @@ class Optimization:
                 continue
             if not block.optim_conf.get("set_use_battery", False):
                 self._unsupported_multi_block_battery_feature(index, "set_use_battery=false")
-            if block.optim_conf.get("set_use_pv", False):
-                self._unsupported_multi_block_battery_feature(index, "set_use_pv=true")
-            if block.plant_conf.get("inverter_is_hybrid", False):
-                self._unsupported_multi_block_battery_feature(index, "inverter_is_hybrid=true")
-            if block.plant_conf.get("compute_curtailment", False):
-                self._unsupported_multi_block_battery_feature(index, "compute_curtailment=true")
+            if not allow_pv_hybrid:
+                if block.optim_conf.get("set_use_pv", False):
+                    self._unsupported_multi_block_battery_feature(index, "set_use_pv=true")
+                if block.plant_conf.get("inverter_is_hybrid", False):
+                    self._unsupported_multi_block_battery_feature(
+                        index,
+                        "inverter_is_hybrid=true",
+                    )
+                if block.plant_conf.get("compute_curtailment", False):
+                    self._unsupported_multi_block_battery_feature(
+                        index,
+                        "compute_curtailment=true",
+                    )
             if block.optim_conf.get("set_battery_dynamic", False):
                 self._unsupported_multi_block_battery_feature(index, "set_battery_dynamic=true")
             for key, default in dynamic_defaults.items():
@@ -493,6 +538,21 @@ class Optimization:
                     self._unsupported_multi_block_battery_feature(index, key)
             for key in sorted(soc_penalty_keys & block.optim_conf.keys()):
                 self._unsupported_multi_block_battery_feature(index, key)
+
+    def _validate_extra_block_hybrid_feature_scope(self) -> None:
+        inverter_stress_defaults = {
+            "inverter_stress_cost": 0.0,
+            "inverter_stress_segments": 10.0,
+        }
+        for index, block in sorted(self.inverter_block_config.items()):
+            if index == 0:
+                continue
+            for key, default in inverter_stress_defaults.items():
+                if key in block.plant_conf and not self._is_default_scalar_or_vector(
+                    block.plant_conf[key],
+                    default,
+                ):
+                    self._unsupported_multi_block_hybrid_feature(index, key)
 
     def _extra_battery_block_configs(self):
         if not self._multi_block_battery_model_enabled:
@@ -525,6 +585,11 @@ class Optimization:
                     name=f"battery_discharge_power_max_{index}",
                 ),
             }
+            if block.set_use_pv:
+                params["pv_forecast"] = cp.Parameter(
+                    self.num_timesteps,
+                    name=f"pv_forecast_{index}",
+                )
             soc_init = float(
                 block.runtime_conf.get(
                     "soc_init",
@@ -540,7 +605,39 @@ class Optimization:
             params["battery_discharge_power_max"].value = float(
                 block.plant_conf["battery_discharge_power_max"]
             )
+            if "pv_forecast" in params:
+                params["pv_forecast"].value = self._runtime_pv_forecast_values(block)
             self.param_extra_block_battery[index] = params
+
+    def _runtime_pv_forecast_values(self, block: InverterBlockConfig) -> np.ndarray:
+        values = block.runtime_conf.get("pv_power_forecast", 0.0)
+        forecast = np.asarray(values, dtype=float)
+        if forecast.ndim == 0:
+            forecast = np.full(self.num_timesteps, float(forecast))
+        else:
+            forecast = forecast.ravel()
+            if len(forecast) < self.num_timesteps:
+                pad_value = float(forecast[-1]) if len(forecast) else 0.0
+                forecast = np.concatenate(
+                    [forecast, np.full(self.num_timesteps - len(forecast), pad_value)]
+                )
+            else:
+                forecast = forecast[: self.num_timesteps]
+        return forecast
+
+    def update_inverter_block_runtime(self, plant_conf: dict) -> None:
+        """Refresh nested runtime data on OptimizationCache hits.
+
+        The cached CVXPY problem owns persistent parameters. New runtime
+        ``hybrid_inverter_config_N`` values are copied into the existing parsed
+        block wrappers, then into the parameter aliases used by constraints.
+        """
+        parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+        if isinstance(parsed_blocks, Mapping):
+            self.plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = parsed_blocks
+            self._refresh_inverter_block_config()
+        self._update_extra_inverter_block_battery_params()
+        self._refresh_inverter_block_runtime()
 
     def _build_battery_soc_expressions(
         self,
@@ -607,6 +704,8 @@ class Optimization:
             params["battery_discharge_power_max"].value = float(
                 block.plant_conf["battery_discharge_power_max"]
             )
+            if "pv_forecast" in params:
+                params["pv_forecast"].value = self._runtime_pv_forecast_values(block)
 
     def _init_deferrable_load_params(self) -> None:
         """
@@ -1710,6 +1809,17 @@ class Optimization:
                 >= -params["battery_charge_power_max"]
             )
             vars_dict[f"E_{index}"] = cp.Variable(n, boolean=True, name=f"E_{index}")
+            if _block.plant_conf.get("inverter_is_hybrid", False):
+                vars_dict[f"p_hybrid_inverter_{index}"] = cp.Variable(
+                    n,
+                    name=f"p_hybrid_inverter_{index}",
+                )
+                if _block.plant_conf.get("compute_curtailment", False):
+                    vars_dict[f"p_pv_curtailment_{index}"] = cp.Variable(
+                        n,
+                        nonneg=True,
+                        name=f"p_pv_curtailment_{index}",
+                    )
 
         # Self-consumption variable
         if self.costfun == "self-consumption":
@@ -2004,6 +2114,8 @@ class Optimization:
 
         # Main Power Balance Constraints
         if self.plant_conf["inverter_is_hybrid"]:
+            if self._multi_block_hybrid_model_enabled:
+                p_hybrid_inverter = self._hybrid_site_supply_expression()
             constraints.append(
                 p_hybrid_inverter - p_def_sum - p_load + p_grid_neg + p_grid_pos == 0
             )
@@ -2031,50 +2143,102 @@ class Optimization:
         # -p_grid_neg <= max_to_grid[t] * (1 - D[t])
         constraints.append(-p_grid_neg <= cp.multiply(max_power_to_grid_arr, (1 - D)))
 
+    def _hybrid_site_supply_expression(self):
+        site_supply = self.inverter_block_variables[0].p_hybrid_inverter
+        for index, block_config in self._extra_battery_block_configs():
+            if not block_config.plant_conf.get("inverter_is_hybrid", False):
+                continue
+            site_supply = site_supply + self.inverter_block_variables[index].p_hybrid_inverter
+        return site_supply
+
     def _add_hybrid_inverter_constraints(self, constraints, inv_stress_conf):
         """Add constraints specific to hybrid inverters (Vectorized)."""
         if not self.plant_conf["inverter_is_hybrid"]:
             return
 
-        # Retrieve main interface variables
-        block_vars = self.inverter_block_variables[0]
+        self._add_hybrid_inverter_block_constraints(
+            constraints,
+            block_config=self.inverter_block_config[0],
+            block_runtime=self.inverter_block_runtime[0],
+            block_vars=self.inverter_block_variables[0],
+            inv_stress_conf=inv_stress_conf,
+        )
+        if not self._multi_block_hybrid_model_enabled:
+            return
+        for index, block_config in self._extra_battery_block_configs():
+            if not block_config.plant_conf.get("inverter_is_hybrid", False):
+                continue
+            self._add_hybrid_inverter_block_constraints(
+                constraints,
+                block_config=block_config,
+                block_runtime=self.inverter_block_runtime[index],
+                block_vars=self.inverter_block_variables[index],
+                inv_stress_conf=None,
+            )
+
+    def _add_curtailment_bounds(self, constraints) -> None:
+        if self.plant_conf["compute_curtailment"]:
+            constraints.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
+        if not self._multi_block_hybrid_model_enabled:
+            return
+        for index, block_config in self._extra_battery_block_configs():
+            if not block_config.plant_conf.get("compute_curtailment", False):
+                continue
+            block_vars = self.inverter_block_variables[index]
+            block_runtime = self.inverter_block_runtime[index]
+            constraints.append(block_vars.p_pv_curtailment <= block_runtime.pv_forecast)
+
+    def _add_hybrid_inverter_block_constraints(
+        self,
+        constraints,
+        *,
+        block_config: InverterBlockConfig,
+        block_runtime: InverterBlockRuntime,
+        block_vars: InverterBlockVariables,
+        inv_stress_conf,
+    ) -> None:
         p_hybrid_inverter = block_vars.p_hybrid_inverter
-        p_pv_curtailment = self.vars["p_pv_curtailment"]
         p_sto_pos = block_vars.p_sto_pos
         p_sto_neg = block_vars.p_sto_neg
-        p_pv = self.param_pv_forecast
+        p_pv = block_runtime.pv_forecast
+        if p_hybrid_inverter is None or p_pv is None:
+            return
 
-        # Determine Inverter Capacity (Configuration Logic)
-        p_nom_inverter_output = self.plant_conf.get("inverter_ac_output_max", None)
-        p_nom_inverter_input = self.plant_conf.get("inverter_ac_input_max", None)
+        p_nom_inverter_output = block_config.plant_conf.get("inverter_ac_output_max", None)
+        p_nom_inverter_input = block_config.plant_conf.get("inverter_ac_input_max", None)
 
-        # (Legacy lookup logic preserved but runs once during setup)
-        if p_nom_inverter_output is None:
-            if "pv_inverter_model" in self.plant_conf:
-                if isinstance(self.plant_conf["pv_inverter_model"], list):
+        # Block 0 keeps the legacy pv_inverter_model fallback. Extra blocks must
+        # carry explicit AC limits because there is no block-local PV model lookup.
+        if block_config.index == 0 and p_nom_inverter_output is None:
+            if "pv_inverter_model" in block_config.plant_conf:
+                if isinstance(block_config.plant_conf["pv_inverter_model"], list):
                     p_nom_inverter_output = 0.0
-                    for i in range(len(self.plant_conf["pv_inverter_model"])):
-                        if isinstance(self.plant_conf["pv_inverter_model"][i], str):
+                    for i in range(len(block_config.plant_conf["pv_inverter_model"])):
+                        if isinstance(block_config.plant_conf["pv_inverter_model"][i], str):
                             with bz2.BZ2File(
                                 self.emhass_conf["root_path"] / "data" / "cec_inverters.pbz2",
                                 "rb",
                             ) as f:
                                 cec_inverters = pickle.load(f)
-                            inverter = cec_inverters[self.plant_conf["pv_inverter_model"][i]]
+                            inverter = cec_inverters[
+                                block_config.plant_conf["pv_inverter_model"][i]
+                            ]
                             p_nom_inverter_output += inverter.Paco
                         else:
-                            p_nom_inverter_output += self.plant_conf["pv_inverter_model"][i]
+                            p_nom_inverter_output += block_config.plant_conf[
+                                "pv_inverter_model"
+                            ][i]
                 else:
-                    if isinstance(self.plant_conf["pv_inverter_model"], str):
+                    if isinstance(block_config.plant_conf["pv_inverter_model"], str):
                         with bz2.BZ2File(
                             self.emhass_conf["root_path"] / "data" / "cec_inverters.pbz2",
                             "rb",
                         ) as f:
                             cec_inverters = pickle.load(f)
-                        inverter = cec_inverters[self.plant_conf["pv_inverter_model"]]
+                        inverter = cec_inverters[block_config.plant_conf["pv_inverter_model"]]
                         p_nom_inverter_output = inverter.Paco
                     else:
-                        p_nom_inverter_output = self.plant_conf["pv_inverter_model"]
+                        p_nom_inverter_output = block_config.plant_conf["pv_inverter_model"]
 
             if p_nom_inverter_output is None:
                 p_nom_inverter_output = 0  # Fallback
@@ -2082,47 +2246,52 @@ class Optimization:
         if p_nom_inverter_input is None:
             p_nom_inverter_input = p_nom_inverter_output
 
-        eff_dc_ac = self.plant_conf.get("inverter_efficiency_dc_ac", 1.0)
-        eff_ac_dc = self.plant_conf.get("inverter_efficiency_ac_dc", 1.0)
+        eff_dc_ac = block_config.plant_conf.get("inverter_efficiency_dc_ac", 1.0)
+        eff_ac_dc = block_config.plant_conf.get("inverter_efficiency_ac_dc", 1.0)
 
         p_dc_ac_max = p_nom_inverter_output / eff_dc_ac
         p_ac_dc_max = p_nom_inverter_input * eff_ac_dc
 
         n = self.num_timesteps
+        suffix = "" if block_config.index == 0 else f"_{block_config.index}"
 
-        # Define Internal Variables
-        # We define them here and attach to self.vars so they persist for result extraction
-        p_dc_ac = cp.Variable(n, nonneg=True, name="p_dc_ac")
-        p_ac_dc = cp.Variable(n, nonneg=True, name="p_ac_dc")
-        is_dc_sourcing = cp.Variable(n, boolean=True, name="is_dc_sourcing")
+        p_dc_ac_name = f"p_dc_ac{suffix}"
+        p_ac_dc_name = f"p_ac_dc{suffix}"
+        is_dc_sourcing_name = f"is_dc_sourcing{suffix}"
+        p_dc_ac = self.vars.get(p_dc_ac_name)
+        p_ac_dc = self.vars.get(p_ac_dc_name)
+        is_dc_sourcing = self.vars.get(is_dc_sourcing_name)
+        if p_dc_ac is None:
+            p_dc_ac = cp.Variable(n, nonneg=True, name=p_dc_ac_name)
+            self.vars[p_dc_ac_name] = p_dc_ac
+        if p_ac_dc is None:
+            p_ac_dc = cp.Variable(n, nonneg=True, name=p_ac_dc_name)
+            self.vars[p_ac_dc_name] = p_ac_dc
+        if is_dc_sourcing is None:
+            is_dc_sourcing = cp.Variable(n, boolean=True, name=is_dc_sourcing_name)
+            self.vars[is_dc_sourcing_name] = is_dc_sourcing
 
-        self.vars["p_dc_ac"] = p_dc_ac
-        self.vars["p_ac_dc"] = p_ac_dc
-        self.vars["is_dc_sourcing"] = is_dc_sourcing
         self._refresh_inverter_block_variables()
 
-        # Power Balance Constraints (Vectorized)
-
-        # DC Bus Balance
-        if self.plant_conf["compute_curtailment"]:
-            e_dc_balance = (p_pv - p_pv_curtailment + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
+        if block_config.plant_conf.get("compute_curtailment", False):
+            p_pv_curtailment = block_vars.p_pv_curtailment
+            e_dc_balance = (p_pv - p_pv_curtailment + p_sto_pos + p_sto_neg) - (
+                p_dc_ac - p_ac_dc
+            )
         else:
             e_dc_balance = (p_pv + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
-
         constraints.append(e_dc_balance == 0)
 
-        # AC Bus Balance
-        # p_hybrid == converted_DC_to_AC - converted_AC_to_DC
         constraints.append(
             p_hybrid_inverter == (p_dc_ac * eff_dc_ac) - (p_ac_dc * (1.0 / eff_ac_dc))
         )
+        constraints.append(p_hybrid_inverter <= p_nom_inverter_output)
+        constraints.append(p_hybrid_inverter >= -p_nom_inverter_input)
 
-        # Enforce Binary Logic (Cannot source and sink DC simultaneously)
         constraints.append(p_ac_dc <= (1 - is_dc_sourcing) * p_ac_dc_max)
         constraints.append(p_dc_ac <= is_dc_sourcing * p_dc_ac_max)
 
-        # Stress Cost
-        if inv_stress_conf and inv_stress_conf["active"]:
+        if block_config.index == 0 and inv_stress_conf and inv_stress_conf["active"]:
             seg_params = self._build_stress_segments(
                 inv_stress_conf["max_power"],
                 inv_stress_conf["unit_cost"],
@@ -2247,24 +2416,26 @@ class Optimization:
             current_stored_energy
             <= max_energy + block_runtime.soc_high_gap * (1 - soc_high_recovered)
         )
-        constraints.append(soc_low_recovered[1:] >= soc_low_recovered[:-1])
-        constraints.append(soc_high_recovered[1:] >= soc_high_recovered[:-1])
+        if self.num_timesteps > 1:
+            constraints.append(soc_low_recovered[1:] >= soc_low_recovered[:-1])
+            constraints.append(soc_high_recovered[1:] >= soc_high_recovered[:-1])
         constraints.append(soc_low_recovered <= block_runtime.soc_low_required)
         constraints.append(soc_high_recovered <= block_runtime.soc_high_required)
         constraints.append(soc_low_recovered[-1] == block_runtime.soc_low_required)
         constraints.append(soc_high_recovered[-1] == block_runtime.soc_high_required)
-        constraints.append(
-            current_stored_energy[1:]
-            >= current_stored_energy[:-1]
-            - recovery_big_m_low
-            * (soc_low_recovered[:-1] + (1 - block_runtime.soc_low_required))
-        )
-        constraints.append(
-            current_stored_energy[1:]
-            <= current_stored_energy[:-1]
-            + recovery_big_m_high
-            * (soc_high_recovered[:-1] + (1 - block_runtime.soc_high_required))
-        )
+        if self.num_timesteps > 1:
+            constraints.append(
+                current_stored_energy[1:]
+                >= current_stored_energy[:-1]
+                - recovery_big_m_low
+                * (soc_low_recovered[:-1] + (1 - block_runtime.soc_low_required))
+            )
+            constraints.append(
+                current_stored_energy[1:]
+                <= current_stored_energy[:-1]
+                + recovery_big_m_high
+                * (soc_high_recovered[:-1] + (1 - block_runtime.soc_high_required))
+            )
         constraints.append(
             current_stored_energy
             <= min_energy
@@ -4444,7 +4615,8 @@ class Optimization:
             self.param_soc_high_gap.value = high_gap_wh
             self.param_soc_low_required.value = 1.0 if low_gap_wh > 0 else 0.0
             self.param_soc_high_required.value = 1.0 if high_gap_wh > 0 else 0.0
-            self._update_extra_inverter_block_battery_params()
+
+        self._update_extra_inverter_block_battery_params()
 
         # Update Window Mask Parameters for Deferrable Loads
         # This allows warm-starting even when time windows change
@@ -4998,8 +5170,7 @@ class Optimization:
             self._add_hybrid_inverter_constraints(constraints, inv_stress_conf)
             self._add_battery_constraints(constraints, batt_stress_conf)
 
-            if self.plant_conf["compute_curtailment"]:
-                constraints.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
+            self._add_curtailment_bounds(constraints)
 
             if self.costfun == "self-consumption" and "SC" in self.vars:
                 constraints.append(self.vars["SC"] <= self.param_pv_forecast)
@@ -5158,8 +5329,7 @@ class Optimization:
             if self.optim_conf.get("set_use_battery", False):
                 self._add_battery_constraints(constraints_relaxed, batt_stress_conf)
 
-            if self.plant_conf["compute_curtailment"]:
-                constraints_relaxed.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
+            self._add_curtailment_bounds(constraints_relaxed)
             if self.costfun == "self-consumption" and "SC" in self.vars:
                 constraints_relaxed.append(self.vars["SC"] <= self.param_pv_forecast)
                 constraints_relaxed.append(
