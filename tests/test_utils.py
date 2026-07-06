@@ -178,20 +178,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_yaml_parse_attaches_indexed_inverter_blocks(self):
         params = orjson.loads(self.params_json)
-        block = {
-            "set_use_pv": True,
-            "set_use_battery": True,
-            "inverter_is_hybrid": True,
-            "compute_curtailment": False,
-            "battery_discharge_power_max": 5000,
-            "battery_charge_power_max": 4600,
-            "battery_discharge_efficiency": 0.95,
-            "battery_charge_efficiency": 0.95,
-            "battery_nominal_energy_capacity": 13300,
-            "battery_minimum_state_of_charge": 0.10,
-            "battery_maximum_state_of_charge": 0.95,
-            "battery_target_state_of_charge": 0.90,
-        }
+        block = _configured_extra_block()
         params["hybrid_inverter_config_1"] = block
 
         _, _, plant_conf = utils.get_yaml_parse(params, logger)
@@ -693,6 +680,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
     async def test_treat_runtimeparams_merges_nested_scalar_runtime_into_existing_block_only(self):
         params = orjson.loads(self.params_json)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
+        params["hybrid_inverter_config_1"]["set_use_pv"] = False
         original_block0_charge_limit = params["plant_conf"]["battery_charge_power_max"]
         runtimeparams = {
             "soc_init": 0.42,
@@ -2097,18 +2085,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_param_to_config_preserves_indexed_inverter_config_blocks(self):
         params = orjson.loads(self.params_json)
-        block = {
-            "set_use_battery": True,
-            "inverter_is_hybrid": True,
-            "battery_discharge_power_max": 5000,
-            "battery_charge_power_max": 4600,
-            "battery_discharge_efficiency": 0.95,
-            "battery_charge_efficiency": 0.95,
-            "battery_nominal_energy_capacity": 13300,
-            "battery_minimum_state_of_charge": 0.10,
-            "battery_maximum_state_of_charge": 0.95,
-            "battery_target_state_of_charge": 0.90,
-        }
+        block = _configured_extra_block()
         params["hybrid_inverter_config_1"] = block
         _, _, plant_conf = utils.get_yaml_parse(params, logger)
         params["plant_conf"] = plant_conf

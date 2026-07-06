@@ -1,9 +1,17 @@
 # Plan / Optimization Output Schema
 
-This page documents the columns of the optimization-result DataFrame returned by
-`publish_data` (see [API Reference](emhass.md)).
-Downstream consumers — Home Assistant cards, Node-RED flows, EVCC adapters, third-party
-automations — can rely on this schema as a versioned contract.
+This page documents the columns of the optimization-result DataFrame and saved
+`opt_res_latest.csv` plan output (see [API Reference](emhass.md)).
+`publish_data()` consumes that result, publishes the legacy block `0` entity
+surface, and returns the tracked one-row published-column subset. In Step 9,
+multi-block columns extend only the optimizer result and saved CSV;
+`publish_data()` remains on the legacy block `0` publishing surface until
+Step 10.
+
+Downstream consumers that read the result DataFrame or saved CSV can rely on
+this schema as a versioned contract. Consumers that read Home Assistant entities
+or the `publish_data()` return value should use the legacy block `0` columns
+until Step 10 adds suffixed publishing.
 
 ## Schema version
 
@@ -12,7 +20,7 @@ Every result DataFrame carries the schema version as a pandas attribute:
 ```python
 result = await publish_data(...)
 result.attrs["emhass_schema_version"]
-# "1.0"
+# "1.1"
 ```
 
 The version string is also exposed as a module-level constant:
@@ -25,11 +33,11 @@ from emhass.command_line import EMHASS_SCHEMA_VERSION
 
 | Bump kind | Trigger |
 |-----------|---------|
-| **Patch** (`1.0` → `1.0.1`) | Documentation clarification, sign convention confirmed, description sharpened. No consumer code change required. |
-| **Minor** (`1.0` → `1.1`) | New column added without removing or renaming existing columns. Consumers using `.get(col)` keep working. |
-| **Major** (`1.0` → `2.0`) | Column removed, column renamed, sign convention flipped, unit changed, or HA-scaling factor changed for a column. |
+| **Patch** (`1.1` → `1.1.1`) | Documentation clarification, sign convention confirmed, description sharpened. No consumer code change required. |
+| **Minor** (`1.1` → `1.2`) | New column added without removing or renaming existing columns. Consumers using `.get(col)` keep working. |
+| **Major** (`1.1` → `2.0`) | Column removed, column renamed, sign convention flipped, unit changed, or HA-scaling factor changed for a column. |
 
-Consumers pin to a major version. Code that requires schema ≥ 1.0 should check:
+Consumers pin to a major version. Code that requires schema ≥ 1.1 should check:
 
 ```python
 major = int(result.attrs.get("emhass_schema_version", "0").split(".")[0])
@@ -38,6 +46,10 @@ if major != 1:
 ```
 
 ## Column table
+
+This table documents the legacy block `0` columns currently returned and
+published by `publish_data()`. In Step 9, these names remain block-local and
+unchanged.
 
 11 fixed columns plus four variable groups: `P_deferrable{k}`,
 `predicted_temp_heater{k}`, `heating_demand_heater{k}` (for each configured
@@ -60,6 +72,35 @@ component the chosen `costfun` decomposes into).
 | `optim_status` | `_publish_grid_and_costs` | text | n/a | always (defaulted to `"Optimal"` with WARN log if missing) | n/a | `optim_status` | CVXPY status strings: `Optimal`, `Infeasible`, `Unbounded`, etc. `device_class=""`, `unit_of_measurement=""`. |
 | `unit_load_cost` | `_publish_grid_and_costs` | €/kWh | n/a (price) | always | 1:1 | `unit_load_cost` | per-timestep tariff series for load |
 | `unit_prod_price` | `_publish_grid_and_costs` | €/kWh | n/a (price) | always | 1:1 | `unit_prod_price` | per-timestep sell price series |
+
+## Multi-block result columns
+
+Step 9 adds these columns to the optimizer result DataFrame and saved
+`opt_res_latest.csv`. They are not part of the one-row `publish_data()` return
+or Home Assistant publishing surface until Step 10.
+
+Block `0` keeps the legacy unsuffixed names. Extra blocks use the block index as
+an `_<N>` suffix. Fleet values are exposed only by explicit `*_total` columns.
+
+| Quantity | Block `0` column | Extra block example | Total column | Unit | Notes |
+|----------|------------------|---------------------|--------------|------|-------|
+| Battery power | `P_batt` | `P_batt_1` | `P_batt_total` | W | Positive = discharge, negative = charge. `P_batt` remains block `0`, not the fleet total. |
+| Battery state of charge | `SOC_opt` | `SOC_opt_1` | `SOC_opt_total` | fraction (0..1) | All `SOC_opt*` result/CSV columns stay as fractions. HA suffixed publishing and percent conversion remain Step 10 work. |
+| Hybrid inverter power | `P_hybrid_inverter` | `P_hybrid_inverter_1` | `P_hybrid_inverter_total` | W | AC-side power; positive = DC → AC delivery, negative = AC → DC. |
+| PV availability | `P_PV` | `P_PV_1` | `P_PV_total` | W | `P_PV_total` is an AC-equivalent PV availability diagnostic. It is not source tracking and is not actual AC-side source attribution. |
+| PV curtailment | `P_PV_curtailment` | `P_PV_curtailment_1` | `P_PV_curtailment_total` | W | Present when any block has curtailment enabled. Positive = curtailed delta. |
+
+Aggregate formulas:
+
+- `P_batt_total = sum(P_batt_i)` across battery blocks.
+- `SOC_opt_total = sum(SOC_opt_i * battery_nominal_energy_capacity_i) /
+  sum(battery_nominal_energy_capacity_i)` across battery blocks.
+- `P_hybrid_inverter_total = sum(P_hybrid_inverter_i)` across hybrid inverter
+  blocks.
+- `P_PV_total = sum(ac_pv_availability_i)` across PV blocks, where each block's
+  availability is post-curtailment PV converted through that block's active
+  solved inverter direction.
+- `P_PV_curtailment_total = sum(P_PV_curtailment_i)` across curtailed PV blocks.
 
 ### SOC_opt scaling callout
 
@@ -101,29 +142,37 @@ if "SOC_opt" in result.columns:
 
 ### Node-RED
 
-The published HA entities carry the result columns by their friendly names (set per
-`custom_*_id` config). A flow that depends on the schema should hard-code the major
-version it was authored against and refuse to run if the EMHASS instance advertises a
-different major (read from the EMHASS log line at startup, or via the `/api/last-run`
-endpoint once that lands — see board item AC-3).
+In Step 9, the published HA entities still carry only the legacy block `0`
+columns by their friendly names (set per `custom_*_id` config). Suffixed HA
+entities for extra blocks and HA percent conversion for suffixed SOC values are
+Step 10 work.
+
+A flow that reads the result DataFrame or saved CSV should hard-code the major
+version it was authored against and refuse to run if the EMHASS instance
+advertises a different major (read from the EMHASS log line at startup, or via
+the `/api/last-run` endpoint once that lands — see board item AC-3).
 
 ## Source helpers
 
-Per-column source helpers in `src/emhass/command_line.py`:
+Legacy block `0` publish helpers in `src/emhass/command_line.py`:
 
 | Helper | Approximate line range | Columns published |
 |--------|------------------------|-------------------|
-| `_publish_standard_forecasts` | 2152-2214 | `P_Load`, `P_PV`, `P_PV_curtailment`, `P_hybrid_inverter` |
-| `_publish_deferrable_loads` | 2215-2259 | `P_deferrable{k}` for `k ∈ [0, N)` |
-| `_publish_thermal_loads` | 2260-2304 | `predicted_temp_heater{k}`, `heating_demand_heater{k}` |
-| `_publish_battery_data` | 2305-2341 | `P_batt`, `SOC_opt` |
-| `_publish_grid_and_costs` | 2342-2405 | `P_grid`, `cost_fun_<name>`, `optim_status`, `unit_load_cost`, `unit_prod_price` |
+| `_publish_standard_forecasts` | 2367-2429 | `P_Load`, `P_PV`, `P_PV_curtailment`, `P_hybrid_inverter` |
+| `_publish_deferrable_loads` | 2430-2564 | `P_deferrable{k}` for `k ∈ [0, N)` |
+| `_publish_thermal_loads` | 2565-2609 | `predicted_temp_heater{k}`, `heating_demand_heater{k}` |
+| `_publish_battery_data` | 2610-2646 | `P_batt`, `SOC_opt` |
+| `_publish_grid_and_costs` | 2647-2707 | `P_grid`, `cost_fun_<name>`, `optim_status`, `unit_load_cost`, `unit_prod_price` |
 
-The aggregator `publish_data` (~line 2408) calls these in order and subsets the result
-DataFrame to the published columns before returning.
+The aggregator `publish_data` (~line 2713) calls these in order and subsets the result
+DataFrame to the published columns before returning. Step 9 multi-block columns
+are built in `optimization.py::_add_public_multi_block_result_columns`; they
+remain in the optimizer result DataFrame and saved CSV until Step 10 extends
+publisher suffixing.
 
 ## Version history
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.1 | 2026-07-05 | Added public multi-block optimizer result/CSV columns and aggregate diagnostics. `publish_data()` publishing and return value remain legacy block `0` until Step 10. |
 | 1.0 | 2026-05-10 | Initial published schema. Sign conventions derived from `src/emhass/optimization.py` with inline citations. |

@@ -9,6 +9,8 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import generate_openapi as gen  # noqa: E402
 
+from emhass.command_line import EMHASS_SCHEMA_VERSION  # noqa: E402
+
 
 def _resolve_schema_ref(openapi_doc, schema):
     if "$ref" not in schema:
@@ -159,6 +161,11 @@ class TestRouteGuard(unittest.TestCase):
 
 
 class TestBuildSpec(unittest.TestCase):
+    def test_spec_info_version_matches_schema_version(self):
+        spec = gen.build_spec()
+
+        self.assertEqual(spec["info"]["version"], EMHASS_SCHEMA_VERSION)
+
     def test_build_spec_filters_paths_to_live_routes(self):
         # only routes present in the passed-in live set survive; other curated paths drop
         spec = gen.build_spec(routes={("/get-config", "GET"), ("/healthz", "GET")})

@@ -4282,6 +4282,8 @@ class Optimization:
             if "inv_stress_cost" in self.vars:
                 opt_tp["inv_stress_cost"] = get_val(self.vars["inv_stress_cost"])
 
+        self._add_public_multi_block_result_columns(opt_tp, p_pv)
+
         # Costs & Prices
         opt_tp["unit_load_cost"] = unit_load_cost
         opt_tp["unit_prod_price"] = unit_prod_price
@@ -4391,6 +4393,133 @@ class Optimization:
     def _solver_value_scalar(expression) -> float:
         value = getattr(expression, "value", expression)
         return float(np.asarray(value, dtype=float).item())
+
+    def _public_multi_block_result_columns_enabled(self) -> bool:
+        return (
+            self._public_multi_block_battery_model_enabled
+            or self._multi_block_hybrid_model_enabled
+        )
+
+    @staticmethod
+    def _block_result_suffix(index: int) -> str:
+        if index == 0:
+            return ""
+        return f"_{index}"
+
+    def _block_raw_pv_values(self, index: int, root_pv) -> np.ndarray:
+        if index == 0:
+            return self._solver_value_array(root_pv)
+        return self._solver_value_array(self.inverter_block_runtime[index].pv_forecast)
+
+    def _block_pv_curtailment_values(self, index: int) -> np.ndarray:
+        block_config = self.inverter_block_config[index]
+        if not block_config.plant_conf.get("compute_curtailment", False):
+            return np.zeros(self.num_timesteps)
+        block_variables = self.inverter_block_variables[index]
+        return self._solver_value_array(block_variables.p_pv_curtailment)
+
+    def _block_ac_pv_availability_values(self, index: int, root_pv) -> np.ndarray:
+        raw_pv = self._block_raw_pv_values(index, root_pv)
+        curtailment = self._block_pv_curtailment_values(index)
+        post_curtailment_pv = raw_pv - curtailment
+        post_curtailment_pv[
+            np.isclose(post_curtailment_pv, 0.0, atol=1e-9, rtol=0.0)
+        ] = 0.0
+
+        block_config = self.inverter_block_config[index]
+        if not block_config.plant_conf.get("inverter_is_hybrid", False):
+            return post_curtailment_pv
+
+        block_variables = self.inverter_block_variables[index]
+        p_dc_ac = self._solver_value_array(block_variables.p_dc_ac)
+        p_ac_dc = self._solver_value_array(block_variables.p_ac_dc)
+        eff_dc_ac = block_config.plant_conf.get("inverter_efficiency_dc_ac", 1.0)
+        eff_ac_dc = block_config.plant_conf.get("inverter_efficiency_ac_dc", 1.0)
+
+        # Diagnostic only: convert post-curtailment PV through one solved
+        # inverter direction. This is PV availability, not source contribution.
+        ac_to_dc_mode = p_ac_dc > p_dc_ac
+        ac_availability = np.where(
+            ac_to_dc_mode,
+            post_curtailment_pv / eff_ac_dc,
+            post_curtailment_pv * eff_dc_ac,
+        )
+        ac_availability[
+            np.isclose(ac_availability, 0.0, atol=1e-9, rtol=0.0)
+        ] = 0.0
+        return ac_availability
+
+    def _add_public_multi_block_result_columns(self, opt_tp, root_pv) -> None:
+        if not self._public_multi_block_result_columns_enabled():
+            return
+
+        block_diagnostics = self._battery_block_diagnostics.get("blocks", {})
+        p_batt_total = np.zeros(self.num_timesteps)
+        stored_energy_total = np.zeros(self.num_timesteps)
+        battery_capacity_total = 0.0
+        for index, diagnostics in sorted(block_diagnostics.items()):
+            block_config = self.inverter_block_config[index]
+            capacity = block_config.plant_conf["battery_nominal_energy_capacity"]
+            p_batt_total += diagnostics["p_batt"]
+            stored_energy_total += diagnostics["stored_energy"]
+            battery_capacity_total += capacity
+
+            if index == 0:
+                continue
+            suffix = self._block_result_suffix(index)
+            opt_tp[f"P_batt{suffix}"] = diagnostics["p_batt"]
+            opt_tp[f"SOC_opt{suffix}"] = diagnostics["soc"]
+
+        if battery_capacity_total > 0:
+            opt_tp["P_batt_total"] = p_batt_total
+            opt_tp["SOC_opt_total"] = stored_energy_total / battery_capacity_total
+
+        pv_total = np.zeros(self.num_timesteps)
+        for index, block_config in sorted(self.inverter_block_config.items()):
+            if not block_config.set_use_pv:
+                continue
+            if index != 0:
+                suffix = self._block_result_suffix(index)
+                opt_tp[f"P_PV{suffix}"] = self._block_raw_pv_values(index, root_pv)
+            pv_total += self._block_ac_pv_availability_values(index, root_pv)
+        opt_tp["P_PV_total"] = pv_total
+
+        has_curtailment_block = any(
+            block_config.plant_conf.get("compute_curtailment", False)
+            for block_config in self.inverter_block_config.values()
+        )
+        if has_curtailment_block:
+            curtailment_total = np.zeros(self.num_timesteps)
+            for index, block_config in sorted(self.inverter_block_config.items()):
+                curtailment = self._block_pv_curtailment_values(index)
+                curtailment_total += curtailment
+                if index == 0 or not block_config.plant_conf.get(
+                    "compute_curtailment", False
+                ):
+                    continue
+                suffix = self._block_result_suffix(index)
+                opt_tp[f"P_PV_curtailment{suffix}"] = curtailment
+            opt_tp["P_PV_curtailment_total"] = curtailment_total
+
+        has_hybrid_block = any(
+            block_config.plant_conf.get("inverter_is_hybrid", False)
+            for block_config in self.inverter_block_config.values()
+        )
+        if has_hybrid_block:
+            hybrid_inverter_total = np.zeros(self.num_timesteps)
+            for index, block_config in sorted(self.inverter_block_config.items()):
+                if not block_config.plant_conf.get("inverter_is_hybrid", False):
+                    continue
+                block_variables = self.inverter_block_variables[index]
+                p_hybrid_inverter = self._solver_value_array(
+                    block_variables.p_hybrid_inverter
+                )
+                hybrid_inverter_total += p_hybrid_inverter
+                if index == 0:
+                    continue
+                suffix = self._block_result_suffix(index)
+                opt_tp[f"P_hybrid_inverter{suffix}"] = p_hybrid_inverter
+            opt_tp["P_hybrid_inverter_total"] = hybrid_inverter_total
 
     def _build_private_battery_block_diagnostics(self) -> None:
         if not self._multi_block_battery_model_enabled:
@@ -5523,6 +5652,7 @@ class Optimization:
             )
 
         # Results Extraction
+        self._build_private_battery_block_diagnostics()
         results_df = self._build_results_dataframe(
             data_opt,
             unit_load_cost,
@@ -5535,7 +5665,6 @@ class Optimization:
             debug,
             q_inputs=self.q_inputs,
         )
-        self._build_private_battery_block_diagnostics()
         if stage_times is not None:
             stage_times["optim_solve.extract"] = time.perf_counter() - _extract_start_perf
         return results_df

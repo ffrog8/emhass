@@ -2509,12 +2509,22 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             {
                 "P_Load": [200.0, 200.0],
                 "P_PV": [100.0, 100.0],
+                "P_PV_1": [25.0, 25.0],
+                "P_PV_total": [125.0, 125.0],
                 "P_PV_curtailment": [0.0, 25.0],
+                "P_PV_curtailment_1": [10.0, 20.0],
+                "P_PV_curtailment_total": [10.0, 45.0],
                 "P_hybrid_inverter": [50.0, 50.0],
+                "P_hybrid_inverter_1": [15.0, 15.0],
+                "P_hybrid_inverter_total": [65.0, 65.0],
                 "P_deferrable0": [3000.0, 0.0],
                 "P_deferrable1": [375.0, 750.0],
                 "P_batt": [400.0, -400.0],
+                "P_batt_1": [100.0, -100.0],
+                "P_batt_total": [500.0, -500.0],
                 "SOC_opt": [0.55, 0.50],
+                "SOC_opt_1": [0.40, 0.45],
+                "SOC_opt_total": [0.475, 0.475],
                 "P_grid": [-300.0, 500.0],
                 "cost_fun_profit": [0.0, 0.0],
                 "optim_status": ["Optimal", "Optimal"],
@@ -2568,6 +2578,11 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             observed_posted_data[pair] = data
 
         self.assertCountEqual(observed_posted_data, expected_posted_data)
+        for entity_id, _ in observed_posted_data:
+            self.assertFalse(
+                entity_id.endswith(("_1", "_total")),
+                f"unexpected Step 9 suffixed entity posted: {entity_id}",
+            )
         for pair, expected_series in expected_posted_data.items():
             actual_series = observed_posted_data[pair]
             if isinstance(actual_series, pd.DataFrame):
@@ -3161,7 +3176,7 @@ class TestSchemaVersion(unittest.IsolatedAsyncioTestCase):
     def test_constant_value(self):
         from emhass.command_line import EMHASS_SCHEMA_VERSION
 
-        self.assertEqual(EMHASS_SCHEMA_VERSION, "1.0")
+        self.assertEqual(EMHASS_SCHEMA_VERSION, "1.1")
 
     async def test_publish_data_attaches_schema_version_on_saved_entities_path(self):
         from emhass.command_line import EMHASS_SCHEMA_VERSION
