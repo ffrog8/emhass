@@ -21,6 +21,77 @@ shell_command:
 ```
 You should be careful that the list of dictionaries has the correct length, which is the number of defined deferrable loads.
 
+## Multi-block publisher suffixing
+
+For indexed hybrid inverter/battery blocks, block `0` keeps the existing Home
+Assistant entity names. Extra blocks append the block index to the resolved base
+entity ID.
+
+| Quantity | Block `0` entity | Block `1` entity |
+|---|---|---|
+| PV forecast | `sensor.p_pv_forecast` | `sensor.p_pv_forecast_1` |
+| PV curtailment | `sensor.p_pv_curtailment` | `sensor.p_pv_curtailment_1` |
+| Hybrid inverter power | `sensor.p_hybrid_inverter` | `sensor.p_hybrid_inverter_1` |
+| Battery power forecast | `sensor.p_batt_forecast` | `sensor.p_batt_forecast_1` |
+| Battery SOC forecast | `sensor.soc_batt_forecast` | `sensor.soc_batt_forecast_1` |
+
+Site-level entities are not suffixed: load, grid, unit costs, total cost,
+optimisation status, and deferrable loads remain site-level. Block-local
+deferrable entity names such as `sensor.p_deferrable_1_0` are reserved for
+future use and are not published in v1.
+
+Custom base entity IDs continue to work through the same `custom_*_id`
+descriptors. For extra blocks, EMHASS appends the block suffix to the resolved
+base entity ID before `post_data()` applies any `publish_prefix`. For example,
+with `custom_batt_forecast_id.entity_id = "sensor.my_battery_plan"` and
+`publish_prefix = "mpc_"`, block `1` is based on
+`sensor.my_battery_plan_1` and then passed through the existing prefix handling.
+
+## Multi-block migration notes
+
+- Existing Home Assistant entities are unchanged and still represent block `0`.
+- Extra block entities are additive. Existing automations that read
+  `sensor.p_batt_forecast`, `sensor.soc_batt_forecast`,
+  `sensor.p_hybrid_inverter`, or `sensor.p_pv_forecast` continue to address
+  block `0`.
+- `publish_prefix` still uses the existing `post_data()` behavior. Extra block
+  suffixes are applied to the base entity ID before the prefix is applied.
+- Result/CSV `SOC_opt*` columns remain fractions in `[0, 1]`; Home Assistant
+  SOC entities are published as percent values.
+- Aggregate `*_total` columns are diagnostics. Do not use them as inverter
+  command entities.
+- Block-local deferrable entities such as `sensor.p_deferrable_1_0` and
+  `sensor.p_deferrable_1_0_state` are reserved for future use and are not
+  published in v1.
+
+## External command bridge examples
+
+EMHASS does not command inverters directly. It publishes the plan, and an
+external Home Assistant automation, Node-RED flow, or inverter integration
+applies the first timestep to each inverter.
+
+EMHASS battery power uses:
+
+```text
+P_batt_i > 0  means discharge
+P_batt_i < 0  means charge
+```
+
+If your inverter API uses positive charge and negative discharge, invert the
+sign in the command bridge:
+
+```text
+setpoint_i = -P_batt_i
+```
+
+Use block-local entities such as `sensor.p_batt_forecast_1` for inverter `1`.
+Do not command from aggregate diagnostics such as `P_batt_total`,
+`SOC_opt_total`, `P_hybrid_inverter_total`, or `P_PV_total`.
+
+Do not assume `/action/dayahead-optim`, `/action/naive-mpc-optim`, or other
+optimization endpoints return a JSON plan suitable for direct control. The
+command bridge should consume published sensors or saved optimization output.
+
 ## Computed variables and published data
 
 Below you can find a list of the variables resulting from EMHASS computation, shown in the charts and published to Home Assistant through the ```publish_data``` command:
