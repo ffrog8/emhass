@@ -37,7 +37,7 @@ default_csv_filename = "opt_res_latest.csv"
 default_pkl_suffix = "_mlf.pkl"
 default_metadata_json = "metadata.json"
 test_df_literal = "test_df_final.pkl"
-EMHASS_SCHEMA_VERSION = "1.1"
+EMHASS_SCHEMA_VERSION = "1.2"
 
 
 def _record_optim_snapshot(
@@ -2644,6 +2644,65 @@ async def _publish_battery_data(ctx: PublishContext, opt_res_latest: pd.DataFram
     return cols
 
 
+def _suffix_entity_descriptor(entity_conf: dict, block_index: int) -> dict:
+    """Return a shallow copy of an entity descriptor for an extra inverter block."""
+    suffixed = copy.copy(entity_conf)
+    suffixed["entity_id"] = f"{entity_conf['entity_id']}_{block_index}"
+    if "friendly_name" in suffixed:
+        suffixed["friendly_name"] = f"{entity_conf['friendly_name']} block {block_index}"
+    return suffixed
+
+
+def _numeric_suffixed_columns(columns, root: str) -> list[tuple[int, str]]:
+    """Find result columns named ``<root>_<N>`` for extra blocks only."""
+    prefix = f"{root}_"
+    matches = []
+    for column in columns:
+        if not column.startswith(prefix):
+            continue
+        suffix = column[len(prefix) :]
+        if not suffix.isdecimal():
+            continue
+        block_index = int(suffix)
+        if block_index == 0:
+            continue
+        matches.append((block_index, column))
+    return sorted(matches)
+
+
+async def _publish_suffixed_block_result_columns(
+    ctx: PublishContext, opt_res_latest: pd.DataFrame
+) -> list[str]:
+    """Publish additive Home Assistant entities for known extra block result columns."""
+    cols = []
+    column_mappings = [
+        ("P_PV", "custom_pv_forecast_id", "power", "power", None),
+        ("P_PV_curtailment", "custom_pv_curtailment_id", "power", "power", None),
+        ("P_hybrid_inverter", "custom_hybrid_inverter_id", "power", "power", None),
+        ("P_batt", "custom_batt_forecast_id", "power", "batt", None),
+        ("SOC_opt", "custom_batt_soc_forecast_id", "battery", "SOC", 100.0),
+    ]
+    for root, entity_key, device_class, type_var, scale in column_mappings:
+        base_entity = ctx.params["passed_data"][entity_key]
+        for block_index, column in _numeric_suffixed_columns(opt_res_latest.columns, root):
+            entity_conf = _suffix_entity_descriptor(base_entity, block_index)
+            data = opt_res_latest[column]
+            if scale is not None:
+                data = data * scale
+            await ctx.rh.post_data(
+                data,
+                ctx.idx,
+                entity_conf["entity_id"],
+                device_class,
+                entity_conf["unit_of_measurement"],
+                entity_conf["friendly_name"],
+                type_var=type_var,
+                **ctx.common_kwargs,
+            )
+            cols.append(column)
+    return cols
+
+
 async def _publish_grid_and_costs(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
     """Publish Grid Power, Costs, and Optimization Status."""
     cols = []
@@ -2786,6 +2845,7 @@ async def publish_data(
     cols_published.extend(await _publish_deferrable_states(ctx, opt_res_latest))
     cols_published.extend(await _publish_thermal_loads(ctx, opt_res_latest))
     cols_published.extend(await _publish_battery_data(ctx, opt_res_latest))
+    cols_published.extend(await _publish_suffixed_block_result_columns(ctx, opt_res_latest))
     cols_published.extend(await _publish_grid_and_costs(ctx, opt_res_latest))
     # Return Summary DataFrame
     opt_res = opt_res_latest[cols_published].loc[[opt_res_latest.index[idx_closest]]]

@@ -2533,10 +2533,16 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             },
             index=idx,
         )
+        opt_res_latest["P_batt_0"] = [999.0, 999.0]
+        opt_res_latest["SOC_opt_0"] = [0.99, 0.99]
+        opt_res_latest["P_PV_0"] = [999.0, 999.0]
+        opt_res_latest["P_hybrid_inverter_0"] = [999.0, 999.0]
+        opt_res_latest["P_deferrable_1_0"] = [123.0, 123.0]
+        opt_res_latest["P_deferrable_1_1"] = [456.0, 456.0]
         input_data_dict["rh"].post_data = AsyncMock(return_value=True)
 
         with patch("emhass.command_line._get_closest_index", return_value=0):
-            await publish_data(input_data_dict, logger, opt_res_latest=opt_res_latest)
+            result = await publish_data(input_data_dict, logger, opt_res_latest=opt_res_latest)
 
         def posted_payload(call):
             data = call.kwargs.get("data_df")
@@ -2571,6 +2577,21 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                 ["variable", "on"], index=idx
             ),
         }
+        expected_posted_data.update(
+            {
+                ("sensor.p_pv_forecast_1", "power"): opt_res_latest["P_PV_1"],
+                (
+                    "sensor.p_pv_curtailment_1",
+                    "power",
+                ): opt_res_latest["P_PV_curtailment_1"],
+                (
+                    "sensor.p_hybrid_inverter_1",
+                    "power",
+                ): opt_res_latest["P_hybrid_inverter_1"],
+                ("sensor.p_batt_forecast_1", "batt"): opt_res_latest["P_batt_1"],
+                ("sensor.soc_batt_forecast_1", "SOC"): opt_res_latest["SOC_opt_1"] * 100,
+            }
+        )
         observed_posted_data = {}
         for call in input_data_dict["rh"].post_data.call_args_list:
             pair, data = posted_payload(call)
@@ -2580,9 +2601,11 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(observed_posted_data, expected_posted_data)
         for entity_id, _ in observed_posted_data:
             self.assertFalse(
-                entity_id.endswith(("_1", "_total")),
-                f"unexpected Step 9 suffixed entity posted: {entity_id}",
+                entity_id.endswith("_total"),
+                f"unexpected aggregate diagnostic entity posted: {entity_id}",
             )
+            self.assertNotRegex(entity_id, r"^sensor\.p_deferrable_\d+_\d+(_state)?$")
+            self.assertFalse(entity_id.endswith("_0"))
         for pair, expected_series in expected_posted_data.items():
             actual_series = observed_posted_data[pair]
             if isinstance(actual_series, pd.DataFrame):
@@ -2594,6 +2617,115 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                 check_dtype=False,
                 check_names=False,
             )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.attrs["emhass_schema_version"], "1.2")
+        self.assertEqual(list(result.index), [idx[0]])
+        self.assertIn("P_batt_1", result.columns)
+        self.assertIn("SOC_opt_1", result.columns)
+        self.assertIn("P_hybrid_inverter_1", result.columns)
+        self.assertIn("P_PV_1", result.columns)
+        self.assertIn("P_PV_curtailment_1", result.columns)
+        self.assertNotIn("P_batt_0", result.columns)
+        self.assertNotIn("SOC_opt_0", result.columns)
+        self.assertNotIn("P_PV_0", result.columns)
+        self.assertNotIn("P_hybrid_inverter_0", result.columns)
+        self.assertNotIn("P_deferrable_1_0", result.columns)
+        self.assertNotIn("P_deferrable_1_1", result.columns)
+        self.assertNotIn("P_batt_total", result.columns)
+        self.assertNotIn("SOC_opt_total", result.columns)
+        self.assertNotIn("P_hybrid_inverter_total", result.columns)
+        self.assertNotIn("P_PV_total", result.columns)
+        self.assertNotIn("P_PV_curtailment_total", result.columns)
+
+    async def test_publish_data_suffixes_custom_base_entities_before_publish_prefix(self):
+        """Extra battery blocks derive suffixed base IDs before applying publish_prefix."""
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params["optim_conf"]["set_use_battery"] = True
+        params["optim_conf"]["number_of_deferrable_loads"] = 0
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            orjson.dumps(params).decode("utf-8"),
+            None,
+            "publish-data",
+            logger,
+            get_data_from_file=True,
+        )
+        passed_data = input_data_dict["params"]["passed_data"]
+        passed_data["custom_batt_forecast_id"]["entity_id"] = "sensor.my_battery_plan"
+        passed_data["custom_batt_soc_forecast_id"]["entity_id"] = "sensor.my_soc_plan"
+        passed_data["publish_prefix"] = "mpc_"
+        idx = pd.date_range(
+            "2024-01-01 00:00:00",
+            periods=2,
+            freq=input_data_dict["retrieve_hass_conf"]["optimization_time_step"],
+            tz=input_data_dict["retrieve_hass_conf"]["time_zone"],
+        )
+        opt_res_latest = pd.DataFrame(
+            {
+                "P_Load": [200.0, 200.0],
+                "P_batt": [400.0, -400.0],
+                "P_batt_1": [100.0, -100.0],
+                "SOC_opt": [0.55, 0.50],
+                "SOC_opt_1": [0.40, 0.45],
+                "P_grid": [-300.0, 500.0],
+                "cost_fun_profit": [0.0, 0.0],
+                "optim_status": ["Optimal", "Optimal"],
+                "unit_load_cost": [0.20, 0.20],
+                "unit_prod_price": [0.05, 0.05],
+            },
+            index=idx,
+        )
+        input_data_dict["rh"].post_data = AsyncMock(return_value=True)
+
+        with patch("emhass.command_line._get_closest_index", return_value=0):
+            await publish_data(
+                input_data_dict,
+                logger,
+                opt_res_latest=opt_res_latest,
+                dont_post=True,
+            )
+
+        def calls_for_entity(entity_id):
+            return [
+                call
+                for call in input_data_dict["rh"].post_data.call_args_list
+                if len(call.args) > 2 and call.args[2] == entity_id
+            ]
+
+        batt_calls = calls_for_entity("sensor.my_battery_plan_1")
+        self.assertEqual(len(batt_calls), 1)
+        batt_call = batt_calls[0]
+        pd.testing.assert_series_equal(
+            batt_call.args[0],
+            opt_res_latest["P_batt_1"],
+            check_dtype=False,
+            check_names=False,
+        )
+        self.assertEqual(batt_call.args[1], 0)
+        self.assertEqual(batt_call.args[3], "power")
+        self.assertEqual(batt_call.args[4], "W")
+        self.assertEqual(batt_call.kwargs["type_var"], "batt")
+        self.assertEqual(batt_call.kwargs["publish_prefix"], "mpc_")
+        self.assertFalse(batt_call.kwargs["save_entities"])
+        self.assertTrue(batt_call.kwargs["dont_post"])
+
+        soc_calls = calls_for_entity("sensor.my_soc_plan_1")
+        self.assertEqual(len(soc_calls), 1)
+        soc_call = soc_calls[0]
+        pd.testing.assert_series_equal(
+            soc_call.args[0],
+            opt_res_latest["SOC_opt_1"] * 100,
+            check_dtype=False,
+            check_names=False,
+        )
+        self.assertEqual(soc_call.args[1], 0)
+        self.assertEqual(soc_call.args[3], "battery")
+        self.assertEqual(soc_call.args[4], "%")
+        self.assertEqual(soc_call.kwargs["type_var"], "SOC")
+        self.assertEqual(soc_call.kwargs["publish_prefix"], "mpc_")
+        self.assertFalse(soc_call.kwargs["save_entities"])
+        self.assertTrue(soc_call.kwargs["dont_post"])
 
     async def test_publish_thermal_loads(self):
         """
@@ -3176,7 +3308,7 @@ class TestSchemaVersion(unittest.IsolatedAsyncioTestCase):
     def test_constant_value(self):
         from emhass.command_line import EMHASS_SCHEMA_VERSION
 
-        self.assertEqual(EMHASS_SCHEMA_VERSION, "1.1")
+        self.assertEqual(EMHASS_SCHEMA_VERSION, "1.2")
 
     async def test_publish_data_attaches_schema_version_on_saved_entities_path(self):
         from emhass.command_line import EMHASS_SCHEMA_VERSION
