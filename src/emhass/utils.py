@@ -26,8 +26,10 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from emhass.inverter_blocks import (
     HYBRID_INVERTER_CONFIG_PREFIX,
     INVERTER_BLOCK_CONFIGS_KEY,
+    MULTI_INVERTER_MODE_MULTI,
     merge_inverter_block_runtime_overrides,
     parse_inverter_block_configs,
+    resolve_multi_inverter_mode,
 )
 
 if TYPE_CHECKING:
@@ -208,6 +210,9 @@ def _validate_inverter_block_pv_mode(
     params: dict[str, dict],
     block_runtime_conf: dict[int, dict[str, object]],
 ) -> None:
+    if resolve_multi_inverter_mode(params["plant_conf"]) != MULTI_INVERTER_MODE_MULTI:
+        return
+
     block_indexes = _extra_inverter_block_indexes(params)
     if not block_indexes:
         return
@@ -2255,8 +2260,20 @@ async def treat_runtimeparams(
     if block_runtime_conf:
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
         for index in sorted(block_runtime_conf):
+            block = next(
+                (
+                    candidate
+                    for candidate in blocks.values()
+                    if candidate.index == index
+                ),
+                None,
+            )
+            if block is None:
+                raise ValueError(
+                    f"hybrid_inverter_config_{index} runtime block without matching configured block"
+                )
             params["passed_data"][f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"] = dict(
-                blocks[index].runtime_conf
+                block.runtime_conf
             )
 
     # If heat_topology is present (static config or runtime override), compile

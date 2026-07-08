@@ -398,9 +398,17 @@
       "default_value": false,
       "unit": "none"
     },
+    "multi_inverter_mode": {
+      "friendly_name": "Multi inverter mode",
+      "Description": "Controls whether indexed hybrid_inverter_config_N entries are active. Use single for the normal single-inverter configuration; indexed entries are preserved but ignored. Use multi to activate configured hybrid_inverter_config_1..N entries.",
+      "input": "select",
+      "select_options": ["single", "multi"],
+      "default_value": "single",
+      "unit": "none"
+    },
     "multi_hybrid_inverter_pv_mode": {
       "friendly_name": "Multi hybrid inverter PV mode",
-      "Description": "Controls how PV is interpreted when indexed hybrid inverter blocks are configured. Use legacy for existing single-inverter behaviour. Public multi-block hybrid solving is admitted only with split_pv, battery_mode_lock: site, battery-backed hybrid blocks, and nested runtime pv_power_forecast for every extra PV block; site_pv remains future scope.",
+      "Description": "Controls how PV is interpreted when multi_inverter_mode is multi. The default value preserves current single-inverter PV behaviour. Public multi-inverter hybrid solving is admitted only with split_pv, battery_mode_lock: site, battery-backed hybrid inverter configs, and nested runtime pv_power_forecast for every active PV inverter; site_pv remains future scope.",
       "input": "select",
       "select_options": ["legacy", "site_pv", "split_pv"],
       "default_value": "legacy",
@@ -636,7 +644,7 @@
     },
     "battery_mode_lock": {
       "friendly_name": "Battery mode lock",
-      "Description": "Controls the battery charge/discharge direction lock. Use site to prevent mixed charge and discharge across indexed battery blocks. Only site is supported in this release.",
+      "Description": "Controls the battery charge/discharge direction lock. Use site to prevent mixed charge and discharge across indexed batteries. Only site is supported in this release.",
       "input": "select",
       "select_options": [
         "site"
@@ -646,14 +654,14 @@
     },
     "set_nocharge_from_grid": {
       "friendly_name": "Forbid charging battery from grid",
-      "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV. In split-PV hybrid multi-block solving this is a top-level site topology flag that uses aggregate raw site PV across configured split-PV blocks plus aggregate signed battery charging; it is not block-local source tracking. Battery-only multi-block solving rejects this flag.",
+      "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV. In split-PV hybrid multi-inverter solving this is a top-level site topology flag that uses aggregate raw site PV across configured split-PV inverters plus aggregate signed battery charging; it is not inverter-local source tracking. Battery-only multi-inverter solving rejects this flag.",
       "input": "boolean",
       "default_value": false,
       "unit": "none"
     },
     "set_nodischarge_to_grid": {
       "friendly_name": "Forbid battery discharge to the grid",
-      "Description": "Set this to true if you want to forbid discharging battery power to the grid. In split-PV hybrid multi-block solving this is a top-level site topology flag that uses site hybrid mode semantics where shared site discharge mode implies import/non-export grid direction. Battery-only multi-block solving rejects this flag.",
+      "Description": "Set this to true if you want to forbid discharging battery power to the grid. In split-PV hybrid multi-inverter solving this is a top-level site topology flag that uses site hybrid mode semantics where shared site discharge mode implies import/non-export grid direction. Battery-only multi-inverter solving rejects this flag.",
       "input": "boolean",
       "default_value": true,
       "unit": "none"

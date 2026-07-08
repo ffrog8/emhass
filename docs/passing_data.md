@@ -117,8 +117,9 @@ Here is the list of the other additional dictionary keys that can be passed at r
 
 ### Nested hybrid inverter runtime blocks
 
-The existing flat runtime payload continues to address hybrid inverter block
-`0`. Do not send `hybrid_inverter_config_0`; block `0` uses the top-level keys.
+In single-inverter mode, the existing flat runtime payload continues to address
+the top-level inverter configuration. Do not send `hybrid_inverter_config_0`;
+runtime block `0` is invalid.
 
 ```json
 {
@@ -129,10 +130,22 @@ The existing flat runtime payload continues to address hybrid inverter block
 }
 ```
 
-Extra hybrid inverter blocks use nested runtime objects named
+Multi-inverter mode is explicit. It can be enabled in static config or for a
+single request with:
+
+```json
+{
+  "multi_inverter_mode": "multi"
+}
+```
+
+When multi-inverter mode is active, the active inverters are the one-based
+static configs `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so
+on. The top-level battery, hybrid inverter, and PV runtime keys are not an
+active inverter in this mode. Nested runtime objects are named
 `hybrid_inverter_config_N`, where `N >= 1`. A nested runtime block is valid only
 when the matching static config block already exists; runtime payloads cannot
-create new blocks.
+create new inverters.
 
 ```json
 {
@@ -151,37 +164,39 @@ create new blocks.
 }
 ```
 
-Public multi-block runtime payloads are admitted only for the supported
+Public multi-inverter runtime payloads are admitted only for the supported
 battery-only shape or the supported split-PV hybrid shape. Both require
 `battery_mode_lock: site` in static config; `battery_mode_lock` is not a runtime
-parameter. Runtime payloads may override block SOC and scalar battery caps as
+parameter. Runtime payloads may override inverter SOC and scalar battery caps as
 before, but they cannot switch the site lock mode.
 
 For the split-PV hybrid shape, static config must use
-`multi_hybrid_inverter_pv_mode: split_pv`, and block `0` plus every configured
-extra block must be battery-backed hybrid blocks with PV enabled. Every extra
-PV block must include nested runtime `pv_power_forecast` data under its
-matching `hybrid_inverter_config_N` object. Other multi-block shapes still
-raise `multi-block solve not enabled` after validation.
+`multi_hybrid_inverter_pv_mode: split_pv`, and every active inverter config must
+be battery-backed, hybrid, and PV-enabled. Every active PV inverter must include
+nested runtime `pv_power_forecast` data under its matching
+`hybrid_inverter_config_N` object. Other multi-inverter shapes still raise
+`multi-block solve not enabled` after validation.
 
 Topology flags remain top-level site config only. Do not send
 `set_nocharge_from_grid`, `set_nodischarge_to_grid`, or
 `set_battery_first_priority` inside `hybrid_inverter_config_N`. Public split-PV
-hybrid multi-block solving admits all three top-level flags with aggregate site
+hybrid multi-inverter solving admits all three top-level flags with aggregate site
 semantics: `set_nocharge_from_grid` uses aggregate raw site PV across configured
 split-PV blocks plus aggregate signed battery charging, `set_nodischarge_to_grid`
 uses site hybrid mode semantics where shared site discharge mode implies
 import/non-export grid direction, and `set_battery_first_priority` uses
-aggregate fleet stored energy. Public battery-only multi-block solving admits
+aggregate fleet stored energy. Public battery-only multi-inverter solving admits
 `set_battery_first_priority`, but still rejects `set_nocharge_from_grid` and
 `set_nodischarge_to_grid`.
 
-In `split_pv` mode, the top-level `pv_power_forecast` remains the PV forecast
-for block `0` only. Each extra block with `set_use_pv: true` must receive its
-own nested `pv_power_forecast` under `hybrid_inverter_config_N`, where
-`N >= 1`. The nested forecast must be a numeric non-negative JSON list with
-length at least the optimization horizon. Extra blocks with `set_use_pv: false`
-are battery-only and do not need a nested PV forecast.
+In `split_pv` multi-inverter mode, each active inverter with `set_use_pv: true`
+must receive its own nested `pv_power_forecast` under
+`hybrid_inverter_config_N`, where `N >= 1`. The top-level `pv_power_forecast`
+remains the single-inverter runtime shape and is not used as an active inverter
+forecast in multi-inverter mode. The nested forecast must be a numeric
+non-negative JSON list with length at least the optimization horizon. Active
+inverters with `set_use_pv: false` are battery-only and do not need a nested PV
+forecast.
 
 ```json
 {
@@ -192,13 +207,14 @@ are battery-only and do not need a nested PV forecast.
 }
 ```
 
-In `site_pv` mode, and in `legacy` mode or when
-`multi_hybrid_inverter_pv_mode` is unset, public hybrid multi-block solving is
-not admitted. Extra blocks with `set_use_pv: true` are rejected, and nested
-extra-block PV forecasts are rejected outside the `split_pv` hybrid path.
+In `site_pv` mode, and when `multi_hybrid_inverter_pv_mode` is unset or set to
+the default value, public hybrid multi-inverter solving is not admitted. Indexed
+configs with `set_use_pv: true` are rejected, and nested inverter PV forecasts
+are rejected outside the `split_pv` hybrid path.
 
-Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
-modelling, block-local CSV loading, and adjusted-PV models remain future work.
+Timestamp dictionaries for nested PV, inverter-local PV sensors,
+inverter-local PVLib modelling, inverter-local CSV loading, and adjusted-PV
+models remain future work.
 
 ### Requiring an intermediate battery SOC target (naive-mpc-optim)
 

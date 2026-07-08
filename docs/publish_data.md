@@ -21,13 +21,15 @@ shell_command:
 ```
 You should be careful that the list of dictionaries has the correct length, which is the number of defined deferrable loads.
 
-## Multi-block publisher suffixing
+## Multi-inverter publisher suffixing
 
-For indexed hybrid inverter/battery blocks, block `0` keeps the existing Home
-Assistant entity names. Extra blocks append the block index to the resolved base
-entity ID.
+In single-inverter mode, existing Home Assistant entity names keep their current
+meaning.
 
-| Quantity | Block `0` entity | Block `1` entity |
+In multi-inverter mode, unsuffixed inverter entities are site totals. Active
+inverters use one-based suffixes that match `hybrid_inverter_config_N`.
+
+| Quantity | Site total entity | Inverter `1` entity |
 |---|---|---|
 | PV forecast | `sensor.p_pv_forecast` | `sensor.p_pv_forecast_1` |
 | PV curtailment | `sensor.p_pv_curtailment` | `sensor.p_pv_curtailment_1` |
@@ -41,25 +43,25 @@ deferrable entity names such as `sensor.p_deferrable_1_0` are reserved for
 future use and are not published in v1.
 
 Custom base entity IDs continue to work through the same `custom_*_id`
-descriptors. For extra blocks, EMHASS appends the block suffix to the resolved
-base entity ID before `post_data()` applies any `publish_prefix`. For example,
+descriptors. For active inverters, EMHASS appends the inverter suffix to the
+resolved base entity ID before `post_data()` applies any `publish_prefix`. For example,
 with `custom_batt_forecast_id.entity_id = "sensor.my_battery_plan"` and
-`publish_prefix = "mpc_"`, block `1` is based on
+`publish_prefix = "mpc_"`, inverter `1` is based on
 `sensor.my_battery_plan_1` and then passed through the existing prefix handling.
 
-## Multi-block migration notes
+## Multi-inverter migration notes
 
-- Existing Home Assistant entities are unchanged and still represent block `0`.
-- Extra block entities are additive. Existing automations that read
+- Existing single-inverter Home Assistant entities are unchanged.
+- In multi-inverter mode, unsuffixed inverter entities are site totals, and
+  suffixed entities are inverter-local. Existing automations that read
   `sensor.p_batt_forecast`, `sensor.soc_batt_forecast`,
-  `sensor.p_hybrid_inverter`, or `sensor.p_pv_forecast` continue to address
-  block `0`.
-- `publish_prefix` still uses the existing `post_data()` behavior. Extra block
+  `sensor.p_hybrid_inverter`, or `sensor.p_pv_forecast` should not treat those
+  unsuffixed values as one inverter command when multi-inverter mode is enabled.
+- `publish_prefix` still uses the existing `post_data()` behavior. Inverter
   suffixes are applied to the base entity ID before the prefix is applied.
 - Result/CSV `SOC_opt*` columns remain fractions in `[0, 1]`; Home Assistant
   SOC entities are published as percent values.
-- Aggregate `*_total` columns are diagnostics. Do not use them as inverter
-  command entities.
+- Public `*_total` result columns are not emitted in multi-inverter mode.
 - Block-local deferrable entities such as `sensor.p_deferrable_1_0` and
   `sensor.p_deferrable_1_0_state` are reserved for future use and are not
   published in v1.
@@ -84,9 +86,9 @@ sign in the command bridge:
 setpoint_i = -P_batt_i
 ```
 
-Use block-local entities such as `sensor.p_batt_forecast_1` for inverter `1`.
-Do not command from aggregate diagnostics such as `P_batt_total`,
-`SOC_opt_total`, `P_hybrid_inverter_total`, or `P_PV_total`.
+Use inverter-local entities such as `sensor.p_batt_forecast_1` for inverter
+`1`. In multi-inverter mode, do not use unsuffixed site-total entities as a
+command target for one inverter.
 
 Do not assume `/action/dayahead-optim`, `/action/naive-mpc-optim`, or other
 optimization endpoints return a JSON plan suitable for direct control. The

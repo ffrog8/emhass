@@ -260,8 +260,8 @@ Battery self-identification (`set_use_battery_identification`) is an opt-in, def
 
 These are the technical parameters of the energy system of the household.
 
-- `maximum_power_from_grid`: The maximum power that can be supplied by the utility grid in Watts (consumption). Defaults to 9000. In indexed-block solving this remains an aggregate site limit on `p_grid_pos`, not a per-block inverter limit.
-- `maximum_power_to_grid`: The maximum power that can be supplied to the utility grid in Watts (injection). Defaults to 9000. In indexed-block solving this remains an aggregate site limit on `p_grid_neg`, not a per-block inverter limit.
+- `maximum_power_from_grid`: The maximum power that can be supplied by the utility grid in Watts (consumption). Defaults to 9000. In multi-inverter solving this remains an aggregate site limit on `p_grid_pos`, not a per-inverter limit.
+- `maximum_power_to_grid`: The maximum power that can be supplied to the utility grid in Watts (injection). Defaults to 9000. In multi-inverter solving this remains an aggregate site limit on `p_grid_neg`, not a per-inverter limit.
 
 We will define the technical parameters of the PV installation. For the modeling task we rely on the PVLib Python package. For more information see: [https://pvlib-python.readthedocs.io/en/stable/](https://pvlib-python.readthedocs.io/en/stable/)
 A dedicated web app will help you search for your correct PV module and inverter names: [https://emhass-pvlib-database.streamlit.app/](https://emhass-pvlib-database.streamlit.app/)
@@ -289,77 +289,93 @@ Then the additional technical parameters:
 - `inverter_stress_cost`: The virtual penalty cost (in currency/kWh) applied if the inverter runs at its maximum nominal power (Recommended: 0.05 - 0.20).
 - `inverter_stress_segments`: The number of linear segments used to approximate the quadratic curve. Higher values are more accurate but increase computation slightly (Recommended: 10).
 
-### Indexed hybrid inverter blocks
+### Multi-inverter configuration
 
-The existing top-level battery and hybrid inverter configuration remains block
-`0`. Additional static blocks can be declared with contiguous keys such as
-`hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so on.
+Single-inverter mode is the default. In this mode, the existing top-level
+battery and hybrid inverter configuration is used exactly as before, and indexed
+`hybrid_inverter_config_N` sections are ignored unless
+`multi_inverter_mode: multi` is enabled.
 
-Public indexed-block solves are admitted only for the supported battery-only
+Multi-inverter mode is explicit:
+
+```yaml
+multi_inverter_mode: multi
+```
+
+When multi-inverter mode is enabled, the active inverter configs are the
+one-based static sections `hybrid_inverter_config_1`,
+`hybrid_inverter_config_2`, and so on. The top-level battery, hybrid inverter,
+and PV settings are not an active inverter in this mode; they remain available
+for single-inverter operation and site-level settings. Static
+`hybrid_inverter_config_0` is ignored with a warning. Runtime
+`hybrid_inverter_config_0` is invalid.
+
+Public multi-inverter solves are admitted only for the supported battery-only
 shape or the supported split-PV hybrid shape. Both require
-`battery_mode_lock: site` so all configured battery blocks share one site-level
+`battery_mode_lock: site` so all configured batteries share one site-level
 charge/discharge direction.
 
-The Step 6 battery-only shape requires block `0` and all extra blocks to be
-battery-backed, non-hybrid, no-PV, and no-curtailment blocks. The hybrid shape
-requires `multi_hybrid_inverter_pv_mode: split_pv`; block `0` and every
-extra block must be battery-backed hybrid blocks with PV enabled; and every
-extra PV block must receive a nested runtime `pv_power_forecast` under
-`hybrid_inverter_config_N`. Other multi-block shapes still validate and then
-raise `multi-block solve not enabled` instead of silently running a single-block
-plan.
+The battery-only shape requires every active inverter config to be
+battery-backed, non-hybrid, no-PV, and no-curtailment. The hybrid shape requires
+`multi_hybrid_inverter_pv_mode: split_pv`; every active inverter config must be
+battery-backed, hybrid, PV-enabled; and every active PV inverter must receive a
+nested runtime `pv_power_forecast` under `hybrid_inverter_config_N`. Other
+multi-inverter shapes still validate and then raise `multi-block solve not
+enabled` instead of silently running a single-inverter plan.
 
-Block `0` must stay in the existing flat top-level config. Do not define
-`hybrid_inverter_config_0`.
-
-`multi_hybrid_inverter_pv_mode` controls how PV is interpreted when indexed
-hybrid inverter blocks are configured. Accepted values are `legacy`, `site_pv`,
-and `split_pv`. The default is `legacy`.
+`multi_hybrid_inverter_pv_mode` controls how PV is interpreted when
+multi-inverter hybrid solving is enabled. Accepted values are `legacy`,
+`site_pv`, and `split_pv`. The default value preserves the current
+single-inverter PV behaviour; public multi-inverter hybrid solving is admitted
+only with `split_pv`.
 
 `battery_mode_lock` is top-level static config only. The only supported value in
-this release is `site`, which prevents one configured battery block from
-charging while another configured battery block discharges in the same
-timestep. `none` is reserved and rejected for configured extra blocks.
+this release is `site`, which prevents one configured battery from charging
+while another configured battery discharges in the same timestep. `none` is
+reserved and rejected for multi-inverter solving.
 
 Configurations outside the two admitted shapes are rejected for public
-multi-block solves.
+multi-inverter solves.
 
-Allowed extra-block keys are the block-local battery, hybrid inverter,
+Allowed indexed config keys are the inverter-local battery, hybrid inverter,
 curtailment, and enablement keys. Site-level load sensors, tariffs, grid
 import/export limits, topology flags, secrets, publishing settings, and
 config-time PV source/model keys are rejected. Runtime nested blocks may
-override configured block-local scalar values, runtime-only SOC keys, and the
-required `split_pv` extra-block `pv_power_forecast` for existing blocks only.
+override configured inverter-local scalar values, runtime-only SOC keys, and the
+required `split_pv` inverter-local `pv_power_forecast` for existing configured
+inverters only.
 
 The topology flags `set_nocharge_from_grid`, `set_nodischarge_to_grid`, and
 `set_battery_first_priority` are top-level site flags only. They remain invalid
-inside `hybrid_inverter_config_N`. Public split-PV hybrid multi-block solving
+inside `hybrid_inverter_config_N`. Public split-PV hybrid multi-inverter solving
 admits all three flags with aggregate site semantics:
 
 - `set_nocharge_from_grid` uses aggregate raw site PV across configured split-PV
-  blocks plus aggregate signed battery charging. This is not source tracking and
-  is not a block-local no-grid-charge proof.
+  inverters plus aggregate signed battery charging. This is not source tracking
+  and is not an inverter-local no-grid-charge proof.
 - `set_nodischarge_to_grid` uses the existing site hybrid mode semantics:
   shared site discharge mode implies import/non-export grid direction.
 - `set_battery_first_priority` uses aggregate fleet stored energy.
 
-Public battery-only multi-block solving admits `set_battery_first_priority`
+Public battery-only multi-inverter solving admits `set_battery_first_priority`
 with aggregate fleet stored energy, but still rejects
 `set_nocharge_from_grid` and `set_nodischarge_to_grid`.
 
-In `split_pv` mode, the top-level `pv_power_forecast` is the forecast for block
-`0` only. Each extra block with `set_use_pv: true` must receive its own nested
-runtime `pv_power_forecast` list under `hybrid_inverter_config_N`, where
-`N >= 1`. Extra blocks with `set_use_pv: false` remain battery-only and do not
-need a nested PV forecast.
+In `split_pv` multi-inverter mode, each active inverter with
+`set_use_pv: true` must receive its own nested runtime `pv_power_forecast` list
+under `hybrid_inverter_config_N`, where `N >= 1`. The top-level
+`pv_power_forecast` remains the single-inverter runtime shape and is not used as
+an active inverter forecast in multi-inverter mode. Active inverters with
+`set_use_pv: false` remain battery-only and do not need a nested PV forecast.
 
-In `site_pv` mode, and in `legacy` mode or when
-`multi_hybrid_inverter_pv_mode` is unset, public hybrid multi-block solving is
-not admitted. Extra blocks with `set_use_pv: true` are rejected, and nested
-extra-block PV forecasts are rejected outside the `split_pv` hybrid path.
+In `site_pv` mode, and when `multi_hybrid_inverter_pv_mode` is unset or set to
+the default value, public hybrid multi-inverter solving is not admitted. Indexed
+configs with `set_use_pv: true` are rejected, and nested inverter PV forecasts
+are rejected outside the `split_pv` hybrid path.
 
-Timestamp dictionaries for nested PV, block-local PV sensors, block-local PVLib
-modelling, block-local CSV loading, and adjusted-PV models remain future work.
+Timestamp dictionaries for nested PV, inverter-local PV sensors,
+inverter-local PVLib modelling, inverter-local CSV loading, and adjusted-PV
+models remain future work.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 
