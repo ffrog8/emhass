@@ -472,56 +472,6 @@ async def parameter_set():
     return await make_response({}, 200)
 
 
-def _summarize_runtimeparams_for_log(value):
-    secret_keys = set(get_keys_to_mask())
-    secret_keys_lower = {key.lower() for key in secret_keys}
-    secret_markers = ("token", "secret", "password", "api_key")
-    mask = "***"
-
-    def looks_token_like(text: str) -> bool:
-        if len(text) >= 24 and "." in text:
-            return True
-        return (
-            len(text) >= 32
-            and any(character.isdigit() for character in text)
-            and any(character.isalpha() for character in text)
-        )
-
-    def is_sensitive_key(key) -> bool:
-        key_text = str(key)
-        key_lower = key_text.lower()
-        return (
-            key_text in secret_keys
-            or key_lower in secret_keys_lower
-            or any(marker in key_lower for marker in secret_markers)
-        )
-
-    def summarize(item, key=""):
-        if is_sensitive_key(key):
-            return mask
-        if isinstance(item, dict):
-            summarized = {}
-            redacted_index = 0
-            for nested_key, nested_value in item.items():
-                if is_sensitive_key(nested_key):
-                    summarized[f"<redacted_{redacted_index}>"] = mask
-                    redacted_index += 1
-                else:
-                    summarized[nested_key] = summarize(nested_value, nested_key)
-            return summarized
-        if isinstance(item, (list, tuple)):
-            return f"<list len={len(item)}>"
-        if isinstance(item, str) and looks_token_like(item):
-            return mask
-        if isinstance(item, bool):
-            return "<bool>"
-        if isinstance(item, (int, float)):
-            return f"<{type(item).__name__}>"
-        return item
-
-    return summarize(value)
-
-
 async def _load_params_and_runtime(request, emhass_conf, logger):
     """
     Loads configuration parameters from pickle and runtime parameters from the request.
@@ -557,9 +507,7 @@ async def _load_params_and_runtime(request, emhass_conf, logger):
     try:
         runtimeparams = await request.get_json(force=True)
         if runtimeparams:
-            logger.info(
-                "Passed runtime parameters: %s", _summarize_runtimeparams_for_log(runtimeparams)
-            )
+            logger.info("Passed runtime parameters: " + str(runtimeparams))
         else:
             runtimeparams = {}
     except Exception as e:

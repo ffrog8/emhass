@@ -14,7 +14,12 @@ import pandas as pd
 import pytz
 
 from emhass import utils
-from emhass.inverter_blocks import _RESERVED_PV_SOURCE_KEYS, INVERTER_BLOCK_CONFIGS_KEY
+from emhass.inverter_blocks import (
+    _RESERVED_PV_SOURCE_KEYS,
+    INVERTER_BLOCK_CONFIGS_KEY,
+    MULTI_INVERTER_MODE_KEY,
+    MULTI_INVERTER_MODE_MULTI,
+)
 from emhass.utils import treat_runtimeparams
 
 # The root folder
@@ -68,6 +73,10 @@ def _configured_extra_pv_only_block() -> dict:
         "inverter_efficiency_dc_ac": 1.0,
         "inverter_efficiency_ac_dc": 1.0,
     }
+
+
+def _enable_multi_inverter_mode(params: dict) -> None:
+    params["plant_conf"][MULTI_INVERTER_MODE_KEY] = MULTI_INVERTER_MODE_MULTI
 
 
 class TestUtils(unittest.IsolatedAsyncioTestCase):
@@ -176,8 +185,9 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(self.params_json, logger)
         self.assertEqual(retrieve_hass_conf["Altitude"], 8000.0)
 
-    async def test_get_yaml_parse_attaches_indexed_inverter_blocks(self):
+    async def test_get_yaml_parse_attaches_indexed_inverter_blocks_in_multi_mode(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         block = _configured_extra_block()
         params["hybrid_inverter_config_1"] = block
 
@@ -186,6 +196,15 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
         self.assertEqual(list(blocks), [0, 1])
         self.assertEqual(blocks[1].plant_conf["battery_nominal_energy_capacity"], 13300)
+
+    async def test_get_yaml_parse_single_mode_ignores_indexed_inverter_blocks(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+
+        _, _, plant_conf = utils.get_yaml_parse(params, logger)
+
+        blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
+        self.assertEqual(list(blocks), [0])
 
     async def test_build_params_preserves_indexed_inverter_config_blocks(self):
         config = await utils.build_config(emhass_conf, logger, emhass_conf["defaults_path"])
@@ -481,6 +500,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
     async def test_treat_runtimeparams_rejects_runtime_block_without_config_block(self):
         params = orjson.loads(self.params_json)
         runtimeparams = {
+            "multi_inverter_mode": "multi",
             "hybrid_inverter_config_1": {
                 "soc_init": 0.4,
             }
@@ -524,6 +544,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
         for invalid_key in invalid_keys:
             params = orjson.loads(self.params_json)
+            _enable_multi_inverter_mode(params)
             params["hybrid_inverter_config_1"] = _configured_extra_block()
             runtimeparams = {
                 "hybrid_inverter_config_1": {
@@ -543,6 +564,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_treat_runtimeparams_rejects_non_dict_nested_runtime_block(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         runtimeparams = {"hybrid_inverter_config_1": "bad"}
 
@@ -558,6 +580,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_treat_runtimeparams_merges_nested_scalar_runtime_into_existing_block_only(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         params["hybrid_inverter_config_1"]["set_use_pv"] = False
         original_block0_charge_limit = params["plant_conf"]["battery_charge_power_max"]
@@ -599,10 +622,35 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         assert 1 in plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
         assert "_inverter_block_configs" not in params_out["plant_conf"]
 
+    async def test_treat_runtimeparams_runtime_multi_mode_override_enables_nested_runtime(self):
+        params = orjson.loads(self.params_json)
+        params["hybrid_inverter_config_1"] = _configured_extra_block()
+        params["hybrid_inverter_config_1"]["set_use_pv"] = False
+        runtimeparams = {
+            "multi_inverter_mode": "multi",
+            "hybrid_inverter_config_1": {
+                "soc_init": 0.51,
+            },
+        }
+
+        params_json, _, _, plant_conf = await utils.treat_runtimeparams(
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+
+        params_out = orjson.loads(params_json)
+        assert params_out["plant_conf"][MULTI_INVERTER_MODE_KEY] == MULTI_INVERTER_MODE_MULTI
+        assert plant_conf[INVERTER_BLOCK_CONFIGS_KEY][1].runtime_conf == {"soc_init": 0.51}
+
     async def test_treat_runtimeparams_failed_nested_scalar_runtime_leaves_configured_block_unchanged(
         self,
     ):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         original_static_block = deepcopy(params["hybrid_inverter_config_1"])
         runtimeparams = {
@@ -634,6 +682,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         }
         for soc_key, value in runtime_soc_values.items():
             params = orjson.loads(self.params_json)
+            _enable_multi_inverter_mode(params)
             params["hybrid_inverter_config_1"] = _configured_extra_pv_only_block()
             runtimeparams = {
                 "hybrid_inverter_config_1": {
@@ -654,6 +703,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
     async def test_treat_runtimeparams_rejects_invalid_nested_soc_target_timestep(self):
         for bad_value in [1.5, True, -1]:
             params = orjson.loads(self.params_json)
+            _enable_multi_inverter_mode(params)
             params["hybrid_inverter_config_1"] = _configured_extra_block()
             runtimeparams = {
                 "hybrid_inverter_config_1": {
@@ -676,6 +726,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         nested_forecast = [0.0] * 48
@@ -704,36 +755,39 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
             == nested_forecast
         )
 
-    async def test_treat_runtimeparams_legacy_rejects_extra_block_pv_enabled(self):
+    async def test_treat_runtimeparams_single_mode_ignores_extra_block_pv_enabled(self):
         params = orjson.loads(self.params_json)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
 
-        with self.assertRaisesRegex(ValueError, "legacy.*split_pv"):
-            await utils.treat_runtimeparams(
-                orjson.dumps({}).decode("utf-8"),
-                params,
-                *utils.get_yaml_parse(params, logger),
-                "naive-mpc-optim",
-                logger,
-                emhass_conf,
-            )
+        _, _, _, plant_conf = await utils.treat_runtimeparams(
+            orjson.dumps({}).decode("utf-8"),
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
 
-    async def test_treat_runtimeparams_none_legacy_rejects_extra_block_pv_enabled(self):
+        assert list(plant_conf[INVERTER_BLOCK_CONFIGS_KEY]) == [0]
+
+    async def test_treat_runtimeparams_none_single_mode_ignores_extra_block_pv_enabled(self):
         params = orjson.loads(self.params_json)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
 
-        with self.assertRaisesRegex(ValueError, "legacy.*split_pv"):
-            await utils.treat_runtimeparams(
-                None,
-                params,
-                *utils.get_yaml_parse(params, logger),
-                "naive-mpc-optim",
-                logger,
-                emhass_conf,
-            )
+        _, _, _, plant_conf = await utils.treat_runtimeparams(
+            None,
+            params,
+            *utils.get_yaml_parse(params, logger),
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+
+        assert list(plant_conf[INVERTER_BLOCK_CONFIGS_KEY]) == [0]
 
     async def test_treat_runtimeparams_site_pv_rejects_extra_block_pv_enabled(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "site_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_block()
 
@@ -749,6 +803,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_treat_runtimeparams_site_pv_rejects_nested_pv_forecast(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "site_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_pv_only_block()
         runtimeparams = {
@@ -771,6 +826,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_block()
 
@@ -788,6 +844,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         params["hybrid_inverter_config_1"]["set_use_pv"] = False
@@ -807,6 +864,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
     async def test_treat_runtimeparams_split_pv_rejects_nested_pv_for_non_pv_block(self):
         params = orjson.loads(self.params_json)
+        _enable_multi_inverter_mode(params)
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = _configured_extra_block()
         params["hybrid_inverter_config_1"]["set_use_pv"] = False
@@ -840,6 +898,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         ]
         for bad_forecast, message in invalid_forecast_cases:
             params = orjson.loads(self.params_json)
+            _enable_multi_inverter_mode(params)
             params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
             params["hybrid_inverter_config_1"] = _configured_extra_block()
             runtimeparams = {

@@ -6,6 +6,7 @@ paths can share one block-local contract while multi-block solving remains
 disabled outside this module.
 """
 
+import logging
 import math
 import re
 from collections.abc import Mapping
@@ -15,6 +16,11 @@ from typing import Any
 HYBRID_INVERTER_CONFIG_PREFIX = "hybrid_inverter_config_"
 INVERTER_BLOCK_CONFIGS_KEY = "_inverter_block_configs"
 MULTI_BLOCK_SOLVE_DISABLED_MESSAGE = "multi-block solve not enabled"
+MULTI_INVERTER_MODE_KEY = "multi_inverter_mode"
+MULTI_INVERTER_MODE_SINGLE = "single"
+MULTI_INVERTER_MODE_MULTI = "multi"
+MULTI_INVERTER_MODE_VALUES = frozenset({MULTI_INVERTER_MODE_SINGLE, MULTI_INVERTER_MODE_MULTI})
+_LOGGER = logging.getLogger(__name__)
 
 _BLOCK_KEY_RE = re.compile(r"^hybrid_inverter_config_(\d+)$")
 
@@ -233,7 +239,38 @@ def _validate_soc(value: object, block_index: int, key: str) -> float:
     return numeric
 
 
-def _extract_block_indexes(input_conf: Mapping[str, object]) -> list[int]:
+def _validate_multi_inverter_mode(value: object) -> str:
+    if value is None:
+        return MULTI_INVERTER_MODE_SINGLE
+    if value not in MULTI_INVERTER_MODE_VALUES:
+        values = ", ".join(sorted(MULTI_INVERTER_MODE_VALUES))
+        raise ValueError(f"{MULTI_INVERTER_MODE_KEY} must be one of: {values}")
+    return str(value)
+
+
+def resolve_multi_inverter_mode(
+    plant_conf: Mapping[str, object],
+    runtimeparams: Mapping[str, object] | None = None,
+) -> str:
+    """Return the active single/multi inverter mode for this request."""
+    if runtimeparams is not None and MULTI_INVERTER_MODE_KEY in runtimeparams:
+        return _validate_multi_inverter_mode(runtimeparams[MULTI_INVERTER_MODE_KEY])
+    return _validate_multi_inverter_mode(plant_conf.get(MULTI_INVERTER_MODE_KEY))
+
+
+def _warn_ignored_config_zero() -> None:
+    _LOGGER.warning(
+        "hybrid_inverter_config_0 is ignored; use the flat top-level config for "
+        "single-inverter mode or hybrid_inverter_config_1..N in multi-inverter mode"
+    )
+
+
+def _warn_if_static_config_zero_present(input_conf: Mapping[str, object]) -> None:
+    if f"{HYBRID_INVERTER_CONFIG_PREFIX}0" in input_conf:
+        _warn_ignored_config_zero()
+
+
+def _extract_block_indexes(input_conf: Mapping[str, object], *, warn_on_zero: bool = False) -> list[int]:
     indexes: list[int] = []
     for key in input_conf:
         if not key.startswith(HYBRID_INVERTER_CONFIG_PREFIX):
@@ -243,7 +280,9 @@ def _extract_block_indexes(input_conf: Mapping[str, object]) -> list[int]:
             raise ValueError(f"{key} must be named hybrid_inverter_config_<positive integer>")
         index = int(match.group(1))
         if index == 0:
-            raise ValueError("hybrid_inverter_config_0 is invalid; block 0 is the flat root config")
+            if warn_on_zero:
+                _warn_ignored_config_zero()
+            continue
         if key != f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}":
             raise ValueError(f"{key} must be named hybrid_inverter_config_<positive integer>")
         indexes.append(index)
@@ -432,11 +471,40 @@ def merge_inverter_block_runtime_overrides(
 ) -> dict[int, dict[str, object]]:
     block_runtime_conf: dict[int, dict[str, object]] = {}
     scalar_config_overrides_by_index: dict[int, dict[str, object]] = {}
-    configured_indexes = set(_extract_block_indexes(input_conf))
+    plant_conf = input_conf.get("plant_conf", {})
+    if not isinstance(plant_conf, Mapping):
+        plant_conf = {}
+    multi_inverter_mode = resolve_multi_inverter_mode(plant_conf, runtimeparams)
+    if (
+        isinstance(input_conf.get("plant_conf"), dict)
+        and (
+            MULTI_INVERTER_MODE_KEY in runtimeparams
+            or MULTI_INVERTER_MODE_KEY in plant_conf
+        )
+    ):
+        input_conf["plant_conf"][MULTI_INVERTER_MODE_KEY] = multi_inverter_mode
+
+    runtime_indexes = _extract_runtime_block_indexes(runtimeparams)
+    if multi_inverter_mode == MULTI_INVERTER_MODE_SINGLE:
+        if runtime_indexes:
+            raise ValueError(
+                "nested hybrid_inverter_config_N runtime blocks require "
+                "multi_inverter_mode=multi"
+            )
+        return block_runtime_conf
+
+    configured_indexes = set(_extract_block_indexes(input_conf, warn_on_zero=False))
+    if not configured_indexes:
+        if runtime_indexes:
+            index = runtime_indexes[0]
+            raise ValueError(
+                f"hybrid_inverter_config_{index} runtime block without matching configured block"
+            )
+        raise ValueError("multi_inverter_mode=multi requires hybrid_inverter_config_1")
     allowed_config_keys = _OPTIM_CONF_BLOCK_KEYS | _PLANT_CONF_BLOCK_KEYS
     forbidden_keys = _SITE_LEVEL_FORBIDDEN_KEYS | _RESERVED_PV_SOURCE_KEYS
 
-    for index in _extract_runtime_block_indexes(runtimeparams):
+    for index in runtime_indexes:
         if index not in configured_indexes:
             raise ValueError(
                 f"hybrid_inverter_config_{index} runtime block without matching configured block"
@@ -490,7 +558,25 @@ def parse_inverter_block_configs(
         0: InverterBlockConfig(index=0, optim_conf=optim_conf, plant_conf=plant_conf)
     }
     runtime_conf_by_index = block_runtime_conf or {}
-    block_indexes = _extract_block_indexes(input_conf)
+    multi_inverter_mode = resolve_multi_inverter_mode(plant_conf)
+    if multi_inverter_mode == MULTI_INVERTER_MODE_MULTI or MULTI_INVERTER_MODE_KEY in plant_conf:
+        plant_conf[MULTI_INVERTER_MODE_KEY] = multi_inverter_mode
+
+    if multi_inverter_mode == MULTI_INVERTER_MODE_SINGLE:
+        _warn_if_static_config_zero_present(input_conf)
+        if runtime_conf_by_index:
+            index = sorted(runtime_conf_by_index)[0]
+            raise ValueError(
+                f"hybrid_inverter_config_{index} runtime block requires "
+                "multi_inverter_mode=multi"
+            )
+        plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = blocks
+        return blocks
+
+    block_indexes = _extract_block_indexes(input_conf, warn_on_zero=True)
+    if not block_indexes:
+        raise ValueError("multi_inverter_mode=multi requires hybrid_inverter_config_1")
+
     unknown_runtime_indexes = sorted(set(runtime_conf_by_index) - set(block_indexes))
     if unknown_runtime_indexes:
         index = unknown_runtime_indexes[0]
@@ -567,8 +653,6 @@ def is_public_safe_multi_block_hybrid_model(
         return False
     if plant_conf.get("multi_hybrid_inverter_pv_mode") != "split_pv":
         return False
-    if not optim_conf.get("set_use_pv"):
-        return False
     if not optim_conf.get("set_use_battery"):
         return False
     if not plant_conf.get("inverter_is_hybrid"):
@@ -583,11 +667,9 @@ def is_public_safe_multi_block_hybrid_model(
             continue
         if not block.set_use_battery:
             return False
-        if not block.set_use_pv:
-            return False
         if not block.plant_conf.get("inverter_is_hybrid"):
             return False
-        if "pv_power_forecast" not in block.runtime_conf:
+        if block.set_use_pv and "pv_power_forecast" not in block.runtime_conf:
             return False
     return True
 

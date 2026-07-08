@@ -2364,12 +2364,8 @@ def _get_closest_index(retrieve_hass_conf: dict, index: pd.DatetimeIndex) -> int
     return index.get_indexer([now_precise], method="nearest")[0]
 
 
-async def _publish_standard_forecasts(
-    ctx: PublishContext, opt_res_latest: pd.DataFrame
-) -> list[str]:
-    """Publish PV, Load, Curtailment, and Hybrid Inverter data."""
-    cols = []
-    # Load Forecast
+async def _publish_load_forecast(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
+    """Publish the site load forecast."""
     custom_load = ctx.params["passed_data"]["custom_load_forecast_id"]
     await ctx.rh.post_data(
         opt_res_latest["P_Load"],
@@ -2381,50 +2377,7 @@ async def _publish_standard_forecasts(
         type_var="power",
         **ctx.common_kwargs,
     )
-    cols.append("P_Load")
-    # PV Forecast
-    if "P_PV" in opt_res_latest.columns:
-        custom_pv = ctx.params["passed_data"]["custom_pv_forecast_id"]
-        await ctx.rh.post_data(
-            opt_res_latest["P_PV"],
-            ctx.idx,
-            custom_pv["entity_id"],
-            "power",
-            custom_pv["unit_of_measurement"],
-            custom_pv["friendly_name"],
-            type_var="power",
-            **ctx.common_kwargs,
-        )
-        cols.append("P_PV")
-    # Curtailment
-    if ctx.plant_conf["compute_curtailment"]:
-        custom_curt = ctx.params["passed_data"]["custom_pv_curtailment_id"]
-        await ctx.rh.post_data(
-            opt_res_latest["P_PV_curtailment"],
-            ctx.idx,
-            custom_curt["entity_id"],
-            "power",
-            custom_curt["unit_of_measurement"],
-            custom_curt["friendly_name"],
-            type_var="power",
-            **ctx.common_kwargs,
-        )
-        cols.append("P_PV_curtailment")
-    # Hybrid Inverter
-    if ctx.plant_conf["inverter_is_hybrid"]:
-        custom_inv = ctx.params["passed_data"]["custom_hybrid_inverter_id"]
-        await ctx.rh.post_data(
-            opt_res_latest["P_hybrid_inverter"],
-            ctx.idx,
-            custom_inv["entity_id"],
-            "power",
-            custom_inv["unit_of_measurement"],
-            custom_inv["friendly_name"],
-            type_var="power",
-            **ctx.common_kwargs,
-        )
-        cols.append("P_hybrid_inverter")
-    return cols
+    return ["P_Load"]
 
 
 async def _publish_deferrable_loads(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
@@ -2607,54 +2560,17 @@ async def _publish_thermal_loads(ctx: PublishContext, opt_res_latest: pd.DataFra
     return cols
 
 
-async def _publish_battery_data(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
-    """Publish Battery Power and SOC."""
-    cols = []
-    if not ctx.optim_conf["set_use_battery"]:
-        return cols
-    if "P_batt" not in opt_res_latest.columns:
-        ctx.logger.error("P_batt was not found in results DataFrame.")
-        return cols
-    # Power
-    custom_batt = ctx.params["passed_data"]["custom_batt_forecast_id"]
-    await ctx.rh.post_data(
-        opt_res_latest["P_batt"],
-        ctx.idx,
-        custom_batt["entity_id"],
-        "power",
-        custom_batt["unit_of_measurement"],
-        custom_batt["friendly_name"],
-        type_var="batt",
-        **ctx.common_kwargs,
-    )
-    cols.append("P_batt")
-    # SOC
-    custom_soc = ctx.params["passed_data"]["custom_batt_soc_forecast_id"]
-    await ctx.rh.post_data(
-        opt_res_latest["SOC_opt"] * 100,
-        ctx.idx,
-        custom_soc["entity_id"],
-        "battery",
-        custom_soc["unit_of_measurement"],
-        custom_soc["friendly_name"],
-        type_var="SOC",
-        **ctx.common_kwargs,
-    )
-    cols.append("SOC_opt")
-    return cols
-
-
 def _suffix_entity_descriptor(entity_conf: dict, block_index: int) -> dict:
-    """Return a shallow copy of an entity descriptor for an extra inverter block."""
+    """Return a shallow copy of an entity descriptor for a suffixed inverter."""
     suffixed = copy.copy(entity_conf)
     suffixed["entity_id"] = f"{entity_conf['entity_id']}_{block_index}"
     if "friendly_name" in suffixed:
-        suffixed["friendly_name"] = f"{entity_conf['friendly_name']} block {block_index}"
+        suffixed["friendly_name"] = f"{entity_conf['friendly_name']} inverter {block_index}"
     return suffixed
 
 
 def _numeric_suffixed_columns(columns, root: str) -> list[tuple[int, str]]:
-    """Find result columns named ``<root>_<N>`` for extra blocks only."""
+    """Find result columns named ``<root>_<N>`` for per-inverter values."""
     prefix = f"{root}_"
     matches = []
     for column in columns:
@@ -2670,43 +2586,62 @@ def _numeric_suffixed_columns(columns, root: str) -> list[tuple[int, str]]:
     return sorted(matches)
 
 
-async def _publish_suffixed_block_result_columns(
-    ctx: PublishContext, opt_res_latest: pd.DataFrame
+async def _publish_result_column(
+    ctx: PublishContext,
+    opt_res_latest: pd.DataFrame,
+    column: str,
+    entity_conf: dict,
+    device_class: str,
+    type_var: str,
+    scale: float | None = None,
+) -> str:
+    """Publish one optimization-result column using an existing entity descriptor."""
+    data = opt_res_latest[column]
+    if scale is not None:
+        data = data * scale
+    await ctx.rh.post_data(
+        data,
+        ctx.idx,
+        entity_conf["entity_id"],
+        device_class,
+        entity_conf["unit_of_measurement"],
+        entity_conf["friendly_name"],
+        type_var=type_var,
+        **ctx.common_kwargs,
+    )
+    return column
+
+
+async def _publish_block_result_group(
+    ctx: PublishContext,
+    opt_res_latest: pd.DataFrame,
+    root: str,
+    entity_key: str,
+    device_class: str,
+    type_var: str,
+    scale: float | None = None,
 ) -> list[str]:
-    """Publish additive Home Assistant entities for known extra block result columns."""
+    """Publish an unsuffixed total/single result and its suffixed inverter values."""
     cols = []
-    column_mappings = [
-        ("P_PV", "custom_pv_forecast_id", "power", "power", None),
-        ("P_PV_curtailment", "custom_pv_curtailment_id", "power", "power", None),
-        ("P_hybrid_inverter", "custom_hybrid_inverter_id", "power", "power", None),
-        ("P_batt", "custom_batt_forecast_id", "power", "batt", None),
-        ("SOC_opt", "custom_batt_soc_forecast_id", "battery", "SOC", 100.0),
-    ]
-    for root, entity_key, device_class, type_var, scale in column_mappings:
-        base_entity = ctx.params["passed_data"][entity_key]
-        for block_index, column in _numeric_suffixed_columns(opt_res_latest.columns, root):
-            entity_conf = _suffix_entity_descriptor(base_entity, block_index)
-            data = opt_res_latest[column]
-            if scale is not None:
-                data = data * scale
-            await ctx.rh.post_data(
-                data,
-                ctx.idx,
-                entity_conf["entity_id"],
-                device_class,
-                entity_conf["unit_of_measurement"],
-                entity_conf["friendly_name"],
-                type_var=type_var,
-                **ctx.common_kwargs,
+    base_entity = ctx.params["passed_data"][entity_key]
+    if root in opt_res_latest.columns:
+        cols.append(
+            await _publish_result_column(
+                ctx, opt_res_latest, root, base_entity, device_class, type_var, scale
             )
-            cols.append(column)
+        )
+    for block_index, column in _numeric_suffixed_columns(opt_res_latest.columns, root):
+        entity_conf = _suffix_entity_descriptor(base_entity, block_index)
+        cols.append(
+            await _publish_result_column(
+                ctx, opt_res_latest, column, entity_conf, device_class, type_var, scale
+            )
+        )
     return cols
 
 
-async def _publish_grid_and_costs(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
-    """Publish Grid Power, Costs, and Optimization Status."""
-    cols = []
-    # Grid
+async def _publish_grid_power(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
+    """Publish the site grid power forecast."""
     custom_grid = ctx.params["passed_data"]["custom_grid_forecast_id"]
     await ctx.rh.post_data(
         opt_res_latest["P_grid"],
@@ -2718,8 +2653,12 @@ async def _publish_grid_and_costs(ctx: PublishContext, opt_res_latest: pd.DataFr
         type_var="power",
         **ctx.common_kwargs,
     )
-    cols.append("P_grid")
-    # Cost Function
+    return ["P_grid"]
+
+
+async def _publish_costs_and_status(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
+    """Publish costs and optimization status."""
+    cols = []
     custom_cost = ctx.params["passed_data"]["custom_cost_fun_id"]
     col_cost_fun = [i for i in opt_res_latest.columns if "cost_fun_" in i]
     await ctx.rh.post_data(
@@ -2840,13 +2779,53 @@ async def publish_data(
     )
     # Publish Data Components
     cols_published = []
-    cols_published.extend(await _publish_standard_forecasts(ctx, opt_res_latest))
+    cols_published.extend(await _publish_load_forecast(ctx, opt_res_latest))
+    cols_published.extend(await _publish_grid_power(ctx, opt_res_latest))
+    cols_published.extend(
+        await _publish_block_result_group(
+            ctx, opt_res_latest, "P_PV", "custom_pv_forecast_id", "power", "power"
+        )
+    )
+    cols_published.extend(
+        await _publish_block_result_group(
+            ctx,
+            opt_res_latest,
+            "P_PV_curtailment",
+            "custom_pv_curtailment_id",
+            "power",
+            "power",
+        )
+    )
+    cols_published.extend(
+        await _publish_block_result_group(
+            ctx,
+            opt_res_latest,
+            "P_hybrid_inverter",
+            "custom_hybrid_inverter_id",
+            "power",
+            "power",
+        )
+    )
+    cols_published.extend(
+        await _publish_block_result_group(
+            ctx, opt_res_latest, "P_batt", "custom_batt_forecast_id", "power", "batt"
+        )
+    )
+    cols_published.extend(
+        await _publish_block_result_group(
+            ctx,
+            opt_res_latest,
+            "SOC_opt",
+            "custom_batt_soc_forecast_id",
+            "battery",
+            "SOC",
+            100.0,
+        )
+    )
     cols_published.extend(await _publish_deferrable_loads(ctx, opt_res_latest))
     cols_published.extend(await _publish_deferrable_states(ctx, opt_res_latest))
     cols_published.extend(await _publish_thermal_loads(ctx, opt_res_latest))
-    cols_published.extend(await _publish_battery_data(ctx, opt_res_latest))
-    cols_published.extend(await _publish_suffixed_block_result_columns(ctx, opt_res_latest))
-    cols_published.extend(await _publish_grid_and_costs(ctx, opt_res_latest))
+    cols_published.extend(await _publish_costs_and_status(ctx, opt_res_latest))
     # Return Summary DataFrame
     opt_res = opt_res_latest[cols_published].loc[[opt_res_latest.index[idx_closest]]]
     opt_res.attrs["emhass_schema_version"] = EMHASS_SCHEMA_VERSION

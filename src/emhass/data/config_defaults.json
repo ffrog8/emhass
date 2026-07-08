@@ -95,6 +95,7 @@
   "maximum_power_from_grid": 9000,
   "maximum_power_to_grid": 9000,
   "set_use_pv": false,
+  "multi_inverter_mode": "single",
   "multi_hybrid_inverter_pv_mode": "legacy",
   "set_use_adjusted_pv": false,
   "adjusted_pv_regression_model": "LassoRegression",

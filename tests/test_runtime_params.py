@@ -113,13 +113,13 @@ class TestRuntimeParams(unittest.TestCase):
         description = descriptor["Description"]
 
         for expected in (
-            "already configured hybrid_inverter_config_N block where N >= 1",
+            "already configured hybrid_inverter_config_N inverter where N >= 1",
             "split_pv",
             "pv_power_forecast",
             "numeric non-negative JSON list",
             "length at least the optimization horizon",
-            "Flat top-level runtime keys continue to address block 0",
-            "Runtime cannot create blocks",
+            "Flat top-level runtime keys continue to address single-inverter mode",
+            "Runtime cannot create inverters",
         ):
             self.assertIn(expected, description)
 

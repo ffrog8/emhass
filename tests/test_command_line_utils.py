@@ -123,6 +123,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _make_split_pv_hybrid_block_params(params):
         params["optim_conf"]["battery_mode_lock"] = "site"
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["optim_conf"]["set_use_pv"] = True
         params["optim_conf"]["set_use_battery"] = True
@@ -144,6 +145,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         if extra_pv is None:
             extra_pv = [0.0] * 10
         return {
+            "multi_inverter_mode": "multi",
             "pv_power_forecast": [0.0] * 10,
             "load_power_forecast": [0.0] * 10,
             "load_cost_forecast": [0.20] * 10,
@@ -168,6 +170,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _make_battery_only_multi_block_params(params, battery_mode_lock="site"):
         params["optim_conf"]["battery_mode_lock"] = battery_mode_lock
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["optim_conf"]["set_use_pv"] = False
         params["optim_conf"]["set_use_battery"] = True
         params["optim_conf"]["set_nocharge_from_grid"] = False
@@ -594,6 +597,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["hybrid_inverter_config_1"] = {
             "set_use_pv": False,
             "set_use_battery": True,
@@ -648,6 +652,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["hybrid_inverter_config_1"] = {
             "set_use_pv": False,
             "set_use_battery": True,
@@ -698,11 +703,12 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = {
             "set_use_pv": True,
             "set_use_battery": True,
-            "inverter_is_hybrid": True,
+            "inverter_is_hybrid": False,
             "compute_curtailment": False,
             "battery_discharge_power_max": 5000,
             "battery_charge_power_max": 4600,
@@ -756,6 +762,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         params = dict(orjson.loads(self.params_json))
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         params["plant_conf"]["multi_hybrid_inverter_pv_mode"] = "split_pv"
         params["hybrid_inverter_config_1"] = {
             "set_use_pv": True,
@@ -2473,8 +2480,8 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(passed_data["publish_prefix"], "")
 
-    async def test_publish_data_uses_legacy_single_inverter_entity_pairs(self):
-        """publish_data posts legacy entity IDs and type_var values without relying on order."""
+    async def test_publish_data_groups_multi_inverter_totals_and_suffixed_entities(self):
+        """publish_data posts unsuffixed totals and grouped per-inverter entities."""
         params = await TestCommandLineAsyncUtils.get_test_params()
         params["optim_conf"].update(
             {
@@ -2508,22 +2515,25 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         opt_res_latest = pd.DataFrame(
             {
                 "P_Load": [200.0, 200.0],
-                "P_PV": [100.0, 100.0],
+                "P_PV": [125.0, 125.0],
                 "P_PV_1": [25.0, 25.0],
                 "P_PV_total": [125.0, 125.0],
-                "P_PV_curtailment": [0.0, 25.0],
+                "P_PV_curtailment": [10.0, 45.0],
                 "P_PV_curtailment_1": [10.0, 20.0],
                 "P_PV_curtailment_total": [10.0, 45.0],
-                "P_hybrid_inverter": [50.0, 50.0],
+                "P_hybrid_inverter": [65.0, 65.0],
                 "P_hybrid_inverter_1": [15.0, 15.0],
+                "P_hybrid_inverter_2": [0.0, 0.0],
                 "P_hybrid_inverter_total": [65.0, 65.0],
                 "P_deferrable0": [3000.0, 0.0],
                 "P_deferrable1": [375.0, 750.0],
-                "P_batt": [400.0, -400.0],
+                "P_batt": [500.0, -500.0],
                 "P_batt_1": [100.0, -100.0],
+                "P_batt_2": [0.0, 0.0],
                 "P_batt_total": [500.0, -500.0],
-                "SOC_opt": [0.55, 0.50],
+                "SOC_opt": [0.475, 0.475],
                 "SOC_opt_1": [0.40, 0.45],
+                "SOC_opt_2": [0.89, 0.89],
                 "SOC_opt_total": [0.475, 0.475],
                 "P_grid": [-300.0, 500.0],
                 "cost_fun_profit": [0.0, 0.0],
@@ -2588,15 +2598,52 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                     "sensor.p_hybrid_inverter_1",
                     "power",
                 ): opt_res_latest["P_hybrid_inverter_1"],
+                (
+                    "sensor.p_hybrid_inverter_2",
+                    "power",
+                ): opt_res_latest["P_hybrid_inverter_2"],
                 ("sensor.p_batt_forecast_1", "batt"): opt_res_latest["P_batt_1"],
+                ("sensor.p_batt_forecast_2", "batt"): opt_res_latest["P_batt_2"],
                 ("sensor.soc_batt_forecast_1", "SOC"): opt_res_latest["SOC_opt_1"] * 100,
+                ("sensor.soc_batt_forecast_2", "SOC"): opt_res_latest["SOC_opt_2"] * 100,
             }
         )
         observed_posted_data = {}
+        observed_entity_order = []
         for call in input_data_dict["rh"].post_data.call_args_list:
             pair, data = posted_payload(call)
             self.assertNotIn(pair, observed_posted_data)
             observed_posted_data[pair] = data
+            observed_entity_order.append(pair[0])
+
+        self.assertEqual(
+            observed_entity_order,
+            [
+                "sensor.p_load_forecast",
+                "sensor.p_grid_forecast",
+                "sensor.p_pv_forecast",
+                "sensor.p_pv_forecast_1",
+                "sensor.p_pv_curtailment",
+                "sensor.p_pv_curtailment_1",
+                "sensor.p_hybrid_inverter",
+                "sensor.p_hybrid_inverter_1",
+                "sensor.p_hybrid_inverter_2",
+                "sensor.p_batt_forecast",
+                "sensor.p_batt_forecast_1",
+                "sensor.p_batt_forecast_2",
+                "sensor.soc_batt_forecast",
+                "sensor.soc_batt_forecast_1",
+                "sensor.soc_batt_forecast_2",
+                "sensor.p_deferrable0",
+                "sensor.p_deferrable1",
+                "sensor.p_deferrable0_state",
+                "sensor.p_deferrable1_state",
+                "sensor.total_cost_fun_value",
+                "sensor.optim_status",
+                "sensor.unit_load_cost",
+                "sensor.unit_prod_price",
+            ],
+        )
 
         self.assertCountEqual(observed_posted_data, expected_posted_data)
         for entity_id, _ in observed_posted_data:
@@ -2621,9 +2668,13 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.attrs["emhass_schema_version"], "1.2")
         self.assertEqual(list(result.index), [idx[0]])
         self.assertIn("P_batt_1", result.columns)
+        self.assertIn("P_batt_2", result.columns)
         self.assertIn("SOC_opt_1", result.columns)
+        self.assertIn("SOC_opt_2", result.columns)
         self.assertIn("P_hybrid_inverter_1", result.columns)
+        self.assertIn("P_hybrid_inverter_2", result.columns)
         self.assertIn("P_PV_1", result.columns)
+        self.assertNotIn("P_PV_2", result.columns)
         self.assertIn("P_PV_curtailment_1", result.columns)
         self.assertNotIn("P_batt_0", result.columns)
         self.assertNotIn("SOC_opt_0", result.columns)
@@ -3768,7 +3819,7 @@ class TestOptimizationCache(unittest.TestCase):
 
         self.assertEqual(flat_key, parsed_key)
 
-    def test_cache_key_changes_when_extra_inverter_block_added(self):
+    def test_cache_key_same_when_indexed_inverter_config_added_in_single_mode(self):
         flat_key = OptimizationCache._compute_cache_key(
             self.optim_conf,
             self.plant_conf,
@@ -3779,6 +3830,53 @@ class TestOptimizationCache(unittest.TestCase):
 
         parsed_optim_conf = copy.deepcopy(self.optim_conf)
         parsed_plant_conf = copy.deepcopy(self.plant_conf)
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": {
+                    "set_use_pv": True,
+                    "set_use_battery": True,
+                    "inverter_is_hybrid": True,
+                    "compute_curtailment": False,
+                    "battery_discharge_power_max": 5000,
+                    "battery_charge_power_max": 4600,
+                    "battery_discharge_efficiency": 0.95,
+                    "battery_charge_efficiency": 0.95,
+                    "battery_nominal_energy_capacity": 13300,
+                    "battery_minimum_state_of_charge": 0.10,
+                    "battery_maximum_state_of_charge": 0.95,
+                    "battery_target_state_of_charge": 0.90,
+                    "inverter_ac_output_max": 5000,
+                    "inverter_ac_input_max": 5000,
+                    "inverter_efficiency_dc_ac": 1.0,
+                    "inverter_efficiency_ac_dc": 1.0,
+                }
+            },
+            parsed_optim_conf,
+            parsed_plant_conf,
+        )
+
+        parsed_key = OptimizationCache._compute_cache_key(
+            parsed_optim_conf,
+            parsed_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertEqual(flat_key, parsed_key)
+
+    def test_cache_key_changes_when_multi_inverter_mode_enabled(self):
+        flat_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        parsed_optim_conf = copy.deepcopy(self.optim_conf)
+        parsed_plant_conf = copy.deepcopy(self.plant_conf)
+        parsed_plant_conf["multi_inverter_mode"] = "multi"
         parse_inverter_block_configs(
             {
                 "hybrid_inverter_config_1": {
@@ -3829,6 +3927,7 @@ class TestOptimizationCache(unittest.TestCase):
             optim_conf["battery_mode_lock"] = "site"
             optim_conf["set_use_pv"] = True
             optim_conf["set_use_battery"] = True
+            plant_conf["multi_inverter_mode"] = "multi"
             plant_conf["multi_hybrid_inverter_pv_mode"] = "split_pv"
             plant_conf["inverter_is_hybrid"] = True
             plant_conf["compute_curtailment"] = False

@@ -2,15 +2,16 @@
 
 This page documents the columns of the optimization-result DataFrame and saved
 `opt_res_latest.csv` plan output (see [API Reference](emhass.md)).
-`publish_data()` consumes that result, publishes the block `0` entity surface
-plus supported suffixed entities for extra inverter/battery blocks, and returns
-the tracked one-row published-column subset.
+`publish_data()` consumes that result, publishes the single-inverter entity
+surface in single-inverter mode, and publishes site totals plus supported
+suffixed inverter entities in multi-inverter mode.
 
 Downstream consumers that read the result DataFrame or saved CSV can rely on
 this schema as a versioned contract. Consumers that read Home Assistant entities
-or the `publish_data()` return value can use the same block `0` columns and the
-supported suffixed block columns documented below. Aggregate `*_total` columns
-remain diagnostics and are not published as command entities.
+or the `publish_data()` return value can use the single-inverter columns and
+the supported suffixed inverter columns documented below. In multi-inverter
+mode, unsuffixed inverter columns are site totals and should not be sent to one
+inverter as a command.
 
 ## Schema version
 
@@ -46,8 +47,10 @@ if major != 1:
 
 ## Column table
 
-This table documents the block `0` columns published by `publish_data()`.
-These names remain block-local and unchanged.
+This table documents the unsuffixed columns published by `publish_data()`.
+In single-inverter mode these names keep their existing meaning. In
+multi-inverter mode, inverter quantities such as `P_batt`,
+`SOC_opt`, `P_hybrid_inverter`, and `P_PV` are site totals.
 
 11 fixed columns plus four variable groups: `P_deferrable{k}`,
 `predicted_temp_heater{k}`, `heating_demand_heater{k}` (for each configured
@@ -73,46 +76,47 @@ to the Home Assistant cost entity but are not returned through the
 | `unit_load_cost` | `_publish_grid_and_costs` | €/kWh | n/a (price) | always | 1:1 | `unit_load_cost` | per-timestep tariff series for load |
 | `unit_prod_price` | `_publish_grid_and_costs` | €/kWh | n/a (price) | always | 1:1 | `unit_prod_price` | per-timestep sell price series |
 
-## Multi-block result columns
+## Multi-inverter result columns
 
 The optimizer result DataFrame and saved `opt_res_latest.csv` remain the source
-of result columns. `publish_data()` now publishes supported extra-block battery,
-SOC, hybrid inverter, PV, and PV-curtailment columns to suffixed Home Assistant
-entities and includes those supported suffixed columns in its one-row return.
+of result columns. In single-inverter mode, existing unsuffixed columns keep
+their current meaning.
 
-Block `0` keeps the legacy unsuffixed names. Extra blocks use the block index as
-an `_<N>` suffix. Fleet values are exposed only by explicit `*_total` columns.
+In multi-inverter mode, unsuffixed inverter quantities are site totals. Active
+inverters use one-based suffixes that match `hybrid_inverter_config_N`. The
+optimizer does not emit public `_0` columns and does not emit public `*_total`
+columns.
 
-| Quantity | Block `0` column | Extra block example | Total column | Unit | Notes |
-|----------|------------------|---------------------|--------------|------|-------|
-| Battery power | `P_batt` | `P_batt_1` | `P_batt_total` | W | Positive = discharge, negative = charge. `P_batt` remains block `0`, not the fleet total. |
-| Battery state of charge | `SOC_opt` | `SOC_opt_1` | `SOC_opt_total` | fraction (0..1) | All `SOC_opt*` result/CSV columns stay as fractions. HA block `0` and suffixed SOC entities are published as percent values. |
-| Hybrid inverter power | `P_hybrid_inverter` | `P_hybrid_inverter_1` | `P_hybrid_inverter_total` | W | AC-side power; positive = DC → AC delivery, negative = AC → DC. |
-| PV availability | `P_PV` | `P_PV_1` | `P_PV_total` | W | `P_PV_total` is an AC-equivalent PV availability diagnostic. It is not source tracking and is not actual AC-side source attribution. |
-| PV curtailment | `P_PV_curtailment` | `P_PV_curtailment_1` | `P_PV_curtailment_total` | W | Present when any block has curtailment enabled. Positive = curtailed delta. |
+| Quantity | Site total column | Inverter example | Unit | Notes |
+|----------|-------------------|------------------|------|-------|
+| Battery power | `P_batt` | `P_batt_1` | W | Positive = discharge, negative = charge. In multi-inverter mode, do not send unsuffixed `P_batt` to one inverter. |
+| Battery state of charge | `SOC_opt` | `SOC_opt_1` | fraction (0..1) | Site total SOC is capacity-weighted across active batteries. All result/CSV SOC columns stay as fractions; HA SOC entities are published as percent values. |
+| Hybrid inverter power | `P_hybrid_inverter` | `P_hybrid_inverter_1` | W | AC-side power; positive = DC → AC delivery, negative = AC → DC. |
+| PV availability | `P_PV` | `P_PV_1` | W | `P_PV` is an AC-equivalent site PV availability diagnostic in multi-inverter mode. Per-inverter PV columns expose that inverter's forecast. |
+| PV curtailment | `P_PV_curtailment` | `P_PV_curtailment_1` | W | Present when any active inverter has curtailment enabled. Positive = curtailed delta. |
 
-Aggregate formulas:
+Multi-inverter aggregate formulas:
 
-- `P_batt_total = sum(P_batt_i)` across battery blocks.
-- `SOC_opt_total = sum(SOC_opt_i * battery_nominal_energy_capacity_i) /
-  sum(battery_nominal_energy_capacity_i)` across battery blocks.
-- `P_hybrid_inverter_total = sum(P_hybrid_inverter_i)` across hybrid inverter
-  blocks.
-- `P_PV_total = sum(ac_pv_availability_i)` across PV blocks, where each block's
-  availability is post-curtailment PV converted through that block's active
-  solved inverter direction.
-- `P_PV_curtailment_total = sum(P_PV_curtailment_i)` across curtailed PV blocks.
+- `P_batt = sum(P_batt_N)` across active battery-backed inverters.
+- `SOC_opt = sum(SOC_opt_N * battery_nominal_energy_capacity_N) /
+  sum(battery_nominal_energy_capacity_N)` across active batteries.
+- `P_hybrid_inverter = sum(P_hybrid_inverter_N)` across active hybrid
+  inverters.
+- `P_PV = sum(ac_pv_availability_N)` across active PV inverters, where each
+  inverter's availability is post-curtailment PV converted through that
+  inverter's active solved direction.
+- `P_PV_curtailment = sum(P_PV_curtailment_N)` across curtailed PV inverters.
 
-Aggregate totals remain diagnostics. They are not published as inverter command
-entities and are not included in the `publish_data()` returned
-`cols_published` subset.
+Unsuffixed multi-inverter totals are diagnostics and site-level forecasts. Use
+suffixed columns such as `P_batt_1` or `P_hybrid_inverter_2` for
+inverter-specific command bridges.
 
 ### SOC_opt scaling callout
 
 > ⚠️ **`SOC_opt` is the most common consumer bug.**
 >
 > The DataFrame value and the CSV export carry each `SOC_opt*` state-of-charge as
-> a **fraction in [0, 1]**. When the same block `0` or suffixed SOC column is
+> a **fraction in [0, 1]**. When the same unsuffixed or suffixed SOC column is
 > published to Home Assistant it is multiplied by **100** to display as a
 > percentage. Consumers reading the result DataFrame or the exported CSV must
 > therefore multiply by 100 themselves if they expect percent; consumers reading
@@ -150,9 +154,9 @@ if "SOC_opt" in result.columns:
 
 A flow that reads the result DataFrame, saved CSV, or published HA entities
 should hard-code the major version it was authored against and refuse to run if
-the EMHASS instance advertises a different major. Read block-local sensors such
-as `sensor.p_batt_forecast_1` for extra blocks, and do not use aggregate
-`*_total` diagnostics as inverter command targets.
+the EMHASS instance advertises a different major. In multi-inverter mode, read
+inverter-local sensors such as `sensor.p_batt_forecast_1` for command targets;
+the unsuffixed battery, SOC, hybrid inverter, and PV entities are site totals.
 
 ## Source helpers
 
@@ -160,23 +164,23 @@ Publish helpers in `src/emhass/command_line.py`:
 
 | Helper | Approximate line range | Columns published |
 |--------|------------------------|-------------------|
-| `_publish_standard_forecasts` | 2367-2429 | `P_Load`, `P_PV`, `P_PV_curtailment`, `P_hybrid_inverter` |
-| `_publish_deferrable_loads` | 2430-2564 | `P_deferrable{k}` for `k ∈ [0, N)` |
-| `_publish_thermal_loads` | 2565-2609 | `predicted_temp_heater{k}`, `heating_demand_heater{k}` |
-| `_publish_battery_data` | 2610-2646 | `P_batt`, `SOC_opt` |
-| `_publish_suffixed_block_result_columns` | 2673-2705 | `P_batt_N`, `SOC_opt_N`, `P_hybrid_inverter_N`, `P_PV_N`, `P_PV_curtailment_N` for supported extra blocks |
-| `_publish_grid_and_costs` | 2706-2769 | `P_grid`, `cost_fun_<name>`, `optim_status`, `unit_load_cost`, `unit_prod_price` |
+| `_publish_load_forecast` | 2367-2382 | `P_Load` |
+| `_publish_grid_power` | 2643-2658 | `P_grid` |
+| `_publish_block_result_group` | 2615-2642 | `P_PV*`, `P_PV_curtailment*`, `P_hybrid_inverter*`, `P_batt*`, `SOC_opt*` |
+| `_publish_deferrable_loads` / `_publish_deferrable_states` | 2383-2495 | `P_deferrable{k}` and optional state sensors for `k ∈ [0, N)` |
+| `_publish_thermal_loads` | 2518-2588 | `predicted_temp_heater{k}`, `heating_demand_heater{k}` |
+| `_publish_costs_and_status` | 2659-2717 | `cost_fun_<name>`, `optim_status`, `unit_load_cost`, `unit_prod_price` |
 
-The aggregator `publish_data` (~line 2772) calls these in order and subsets the result
-DataFrame to the published columns before returning. Multi-block columns are
-built in `optimization.py::_add_public_multi_block_result_columns`; supported
-extra-block columns are then published through
-`_publish_suffixed_block_result_columns`.
+The aggregator `publish_data` calls these in grouped order and subsets the
+result DataFrame to the published columns before returning. Multi-inverter
+columns are built in `optimization.py::_add_public_multi_block_result_columns`;
+supported suffixed inverter columns are then published through
+`_publish_block_result_group`.
 
 ## Version history
 
 | Version | Date | Change |
 |---------|------|--------|
-| 1.2 | 2026-07-06 | Added Home Assistant publisher suffixing and `publish_data()` return columns for supported extra block battery/SOC/hybrid/PV outputs. Aggregate totals remain diagnostics and are not published. |
-| 1.1 | 2026-07-05 | Added public multi-block optimizer result/CSV columns and aggregate diagnostics. `publish_data()` publishing and return value were still block `0` only in this version. |
+| 1.2 | 2026-07-07 | Added Home Assistant publisher suffixing and corrected the public multi-inverter contract before release: explicit `multi_inverter_mode`, one-based active inverter configs, unsuffixed site totals, suffixed inverter values, no public `_0` or `*_total` columns, grouped publisher order, and raw runtime logging compatibility. |
+| 1.1 | 2026-07-05 | Added the pre-release public multi-inverter optimizer result/CSV columns and aggregate diagnostics. `publish_data()` publishing and return value were still single-inverter only in this version. |
 | 1.0 | 2026-05-10 | Initial published schema. Sign conventions derived from `src/emhass/optimization.py` with inline citations. |
