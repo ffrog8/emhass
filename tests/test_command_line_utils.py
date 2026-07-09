@@ -420,6 +420,116 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         forecast.assert_not_called()
         optimization.assert_not_called()
 
+    async def test_publish_data_input_prep_skips_split_pv_runtime_validation_empty_payload(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+
+        with patch("emhass.command_line.Forecast") as forecast:
+            with patch("emhass.command_line.Optimization") as optimization:
+                input_data_dict = await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    "{}",
+                    "publish-data",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        self.assertIsInstance(input_data_dict, dict)
+        self.assertIsNone(input_data_dict["fcst"])
+        self.assertIsNone(input_data_dict["opt"])
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_publish_data_input_prep_keeps_prefix_without_split_pv_runtime_validation(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+
+        with patch("emhass.command_line.Forecast") as forecast:
+            with patch("emhass.command_line.Optimization") as optimization:
+                input_data_dict = await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    orjson.dumps({"publish_prefix": "multi_"}).decode("utf-8"),
+                    "publish-data",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        self.assertIsInstance(input_data_dict, dict)
+        self.assertIsNone(input_data_dict["fcst"])
+        self.assertIsNone(input_data_dict["opt"])
+        self.assertEqual(input_data_dict["params"]["passed_data"]["publish_prefix"], "multi_")
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_publish_data_input_prep_ignores_nested_multi_inverter_runtime(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        runtimeparams = {
+            "multi_inverter_mode": "multi",
+            "prediction_horizon": 47,
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 47,
+            },
+        }
+
+        with patch("emhass.command_line.Forecast") as forecast:
+            with patch("emhass.command_line.Optimization") as optimization:
+                input_data_dict = await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    orjson.dumps(runtimeparams).decode("utf-8"),
+                    "publish-data",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        self.assertIsInstance(input_data_dict, dict)
+        self.assertIsNone(input_data_dict["fcst"])
+        self.assertIsNone(input_data_dict["opt"])
+        self.assertNotIn("hybrid_inverter_config_1", input_data_dict["params"]["passed_data"])
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_publish_data_input_prep_keeps_publish_controls_with_nested_runtime(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        custom_batt_forecast = {
+            "entity_id": "sensor.multi_batt_plan",
+            "unit_of_measurement": "W",
+            "friendly_name": "Multi Battery Plan",
+        }
+        runtimeparams = {
+            "publish_prefix": "multi_",
+            "publish_deferrable_load_states": True,
+            "custom_batt_forecast_id": custom_batt_forecast,
+            "hybrid_inverter_config_1": {
+                "pv_power_forecast": [0.0] * 47,
+            },
+        }
+
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            orjson.dumps(params).decode("utf-8"),
+            orjson.dumps(runtimeparams).decode("utf-8"),
+            "publish-data",
+            logger,
+            get_data_from_file=True,
+        )
+
+        self.assertEqual(input_data_dict["params"]["passed_data"]["publish_prefix"], "multi_")
+        self.assertTrue(input_data_dict["optim_conf"]["publish_deferrable_load_states"])
+        self.assertEqual(
+            input_data_dict["params"]["passed_data"]["custom_batt_forecast_id"],
+            custom_batt_forecast,
+        )
+        self.assertNotIn("hybrid_inverter_config_1", input_data_dict["params"]["passed_data"])
+
     async def test_split_pv_hybrid_block_topology_flags_reach_public_optimization(
         self,
     ):
@@ -2687,6 +2797,78 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("P_hybrid_inverter_total", result.columns)
         self.assertNotIn("P_PV_total", result.columns)
         self.assertNotIn("P_PV_curtailment_total", result.columns)
+
+    async def test_publish_data_uses_47_row_saved_multi_inverter_result_without_runtime_pv(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params["optim_conf"].update(
+            {
+                "set_use_battery": True,
+                "number_of_deferrable_loads": 0,
+            }
+        )
+        params["plant_conf"].update(
+            {
+                "multi_inverter_mode": "multi",
+                "multi_hybrid_inverter_pv_mode": "split_pv",
+                "inverter_is_hybrid": True,
+                "compute_curtailment": False,
+            }
+        )
+        params["hybrid_inverter_config_1"] = (
+            TestCommandLineAsyncUtils._hybrid_extra_block(set_use_pv=True)
+        )
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            orjson.dumps(params).decode("utf-8"),
+            "{}",
+            "publish-data",
+            logger,
+            get_data_from_file=True,
+        )
+        idx = pd.date_range(
+            "2024-01-01 00:00:00",
+            periods=47,
+            freq=input_data_dict["retrieve_hass_conf"]["optimization_time_step"],
+            tz=input_data_dict["retrieve_hass_conf"]["time_zone"],
+        )
+        opt_res_latest = pd.DataFrame(
+            {
+                "P_Load": [200.0] * 47,
+                "P_PV": [100.0] * 47,
+                "P_PV_1": [40.0] * 47,
+                "P_hybrid_inverter": [60.0] * 47,
+                "P_hybrid_inverter_1": [25.0] * 47,
+                "P_batt": [10.0] * 47,
+                "P_batt_1": [5.0] * 47,
+                "SOC_opt": [0.50] * 47,
+                "SOC_opt_1": [0.45] * 47,
+                "P_grid": [90.0] * 47,
+                "cost_fun_profit": [0.0] * 47,
+                "optim_status": ["Optimal"] * 47,
+                "unit_load_cost": [0.20] * 47,
+                "unit_prod_price": [0.05] * 47,
+            },
+            index=idx,
+        )
+        input_data_dict["rh"].post_data = AsyncMock(return_value=True)
+
+        with patch("emhass.command_line._get_closest_index", return_value=0):
+            result = await publish_data(input_data_dict, logger, opt_res_latest=opt_res_latest)
+
+        posted_entities = [
+            call.args[2]
+            for call in input_data_dict["rh"].post_data.call_args_list
+            if len(call.args) > 2
+        ]
+        self.assertIn("sensor.p_pv_forecast", posted_entities)
+        self.assertIn("sensor.p_pv_forecast_1", posted_entities)
+        self.assertIn("sensor.p_hybrid_inverter_1", posted_entities)
+        self.assertIn("sensor.p_batt_forecast_1", posted_entities)
+        self.assertIn("sensor.soc_batt_forecast_1", posted_entities)
+        self.assertEqual(list(result.index), [idx[0]])
+        self.assertIn("P_PV_1", result.columns)
+        self.assertIn("P_batt_1", result.columns)
 
     async def test_publish_data_suffixes_custom_base_entities_before_publish_prefix(self):
         """Extra battery blocks derive suffixed base IDs before applying publish_prefix."""

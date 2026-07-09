@@ -113,6 +113,23 @@ _RUNTIME_SOC_BLOCK_KEYS = frozenset(
 
 _RUNTIME_PV_BLOCK_KEYS = frozenset({"pv_power_forecast"})
 _RUNTIME_ONLY_BLOCK_KEYS = _RUNTIME_SOC_BLOCK_KEYS | _RUNTIME_PV_BLOCK_KEYS
+_RUNTIME_SCALAR_CONFIG_BLOCK_KEYS = frozenset(
+    {
+        "battery_charge_power_max",
+        "battery_discharge_power_max",
+        "battery_minimum_state_of_charge",
+        "battery_maximum_state_of_charge",
+        "battery_target_state_of_charge",
+    }
+)
+_RUNTIME_SOC_SCALAR_CONFIG_BLOCK_KEYS = frozenset(
+    {
+        "battery_minimum_state_of_charge",
+        "battery_maximum_state_of_charge",
+        "battery_target_state_of_charge",
+    }
+)
+_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY = "_hybrid_inverter_runtime_target_bounds_relaxed_indexes"
 
 _DEFERRED_RUNTIME_BLOCK_KEYS = frozenset(
     {
@@ -317,7 +334,13 @@ def _validate_block_values(index: int, raw_block: Mapping[str, object], plant_co
         _validate_efficiency(plant_conf[key], index, key)
 
 
-def _validate_battery_block(index: int, raw_block: Mapping[str, object], plant_conf: dict[str, object]) -> None:
+def _validate_battery_block(
+    index: int,
+    raw_block: Mapping[str, object],
+    plant_conf: dict[str, object],
+    *,
+    validate_target_bounds: bool = True,
+) -> None:
     missing = sorted(_REQUIRED_BATTERY_KEYS - raw_block.keys())
     if missing:
         raise ValueError(f"hybrid_inverter_config_{index} missing required battery keys: {missing}")
@@ -339,7 +362,7 @@ def _validate_battery_block(index: int, raw_block: Mapping[str, object], plant_c
     )
     if soc_min >= soc_max:
         raise ValueError(f"hybrid_inverter_config_{index} battery minimum SOC must be less than maximum SOC")
-    if soc_target < soc_min or soc_target > soc_max:
+    if validate_target_bounds and (soc_target < soc_min or soc_target > soc_max):
         raise ValueError(
             f"hybrid_inverter_config_{index}.battery_target_state_of_charge must be within min/max SOC"
         )
@@ -351,7 +374,7 @@ def _validate_hybrid_block(index: int, raw_block: Mapping[str, object]) -> None:
         raise ValueError(f"hybrid_inverter_config_{index} missing required hybrid inverter keys: {missing}")
 
 
-def _validate_runtime_soc(
+def _validate_runtime_soc_init(
     value: object,
     block_index: int,
     key: str,
@@ -360,8 +383,58 @@ def _validate_runtime_soc(
     numeric = _validate_soc(value, block_index, key)
     soc_min = float(plant_conf["battery_minimum_state_of_charge"])
     soc_max = float(plant_conf["battery_maximum_state_of_charge"])
-    if numeric < soc_min or numeric > soc_max:
-        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be within configured min/max SOC")
+    if numeric < soc_min:
+        _LOGGER.warning(
+            "Passed hybrid_inverter_config_%s.%s=%s is lower than soc_min=%s, "
+            "keeping real initial SOC for optimization recovery",
+            block_index,
+            key,
+            numeric,
+            soc_min,
+        )
+    if numeric > soc_max:
+        _LOGGER.warning(
+            "Passed hybrid_inverter_config_%s.%s=%s is greater than soc_max=%s, "
+            "keeping real initial SOC for optimization recovery",
+            block_index,
+            key,
+            numeric,
+            soc_max,
+        )
+    return numeric
+
+
+def _validate_runtime_soc_final(
+    value: object,
+    block_index: int,
+    key: str,
+    plant_conf: Mapping[str, object],
+) -> float:
+    numeric = _validate_soc(value, block_index, key)
+    soc_min = float(plant_conf["battery_minimum_state_of_charge"])
+    soc_max = float(plant_conf["battery_maximum_state_of_charge"])
+    if numeric < soc_min:
+        _LOGGER.warning(
+            "Passed hybrid_inverter_config_%s.%s=%s is lower than soc_min=%s, "
+            "setting %s=soc_min",
+            block_index,
+            key,
+            numeric,
+            soc_min,
+            key,
+        )
+        numeric = soc_min
+    if numeric > soc_max:
+        _LOGGER.warning(
+            "Passed hybrid_inverter_config_%s.%s=%s is greater than soc_max=%s, "
+            "setting %s=soc_max",
+            block_index,
+            key,
+            numeric,
+            soc_max,
+            key,
+        )
+        numeric = soc_max
     return numeric
 
 
@@ -379,6 +452,7 @@ def _validate_block_runtime_conf(
     plant_conf: Mapping[str, object],
     set_use_battery: bool,
     set_use_pv: bool,
+    fill_battery_defaults: bool = False,
 ) -> dict[str, object]:
     runtime_keys = set(runtime_conf)
     invalid_runtime_keys = runtime_keys - _RUNTIME_ONLY_BLOCK_KEYS
@@ -410,12 +484,32 @@ def _validate_block_runtime_conf(
 
     validated: dict[str, object] = {}
     for key, value in runtime_conf.items():
-        if key in {"soc_init", "soc_final", "soc_target"}:
-            validated[key] = _validate_runtime_soc(value, index, key, plant_conf)
+        if key == "soc_init":
+            validated[key] = _validate_runtime_soc_init(value, index, key, plant_conf)
+        elif key == "soc_final":
+            validated[key] = _validate_runtime_soc_final(value, index, key, plant_conf)
+        elif key == "soc_target":
+            validated[key] = _validate_soc(value, index, key)
         elif key == "soc_target_timestep":
             validated[key] = _validate_runtime_timestep(value, index, key)
         elif key in _RUNTIME_PV_BLOCK_KEYS:
             validated[key] = value
+    if fill_battery_defaults and set_use_battery:
+        target_soc = float(plant_conf["battery_target_state_of_charge"])
+        if "soc_init" not in validated:
+            validated["soc_init"] = _validate_runtime_soc_init(
+                target_soc,
+                index,
+                "soc_init",
+                plant_conf,
+            )
+        if "soc_final" not in validated:
+            validated["soc_final"] = _validate_runtime_soc_final(
+                target_soc,
+                index,
+                "soc_final",
+                plant_conf,
+            )
     return validated
 
 
@@ -423,6 +517,8 @@ def _split_block_config(
     index: int,
     raw_block: Mapping[str, object],
     runtime_conf: Mapping[str, object] | None = None,
+    *,
+    validate_target_bounds: bool = True,
 ) -> InverterBlockConfig:
     optim_conf: dict[str, object] = {}
     plant_conf: dict[str, object] = {}
@@ -445,7 +541,12 @@ def _split_block_config(
     if not set_use_battery and present_battery_keys:
         raise ValueError(f"hybrid_inverter_config_{index} contains battery keys but set_use_battery is not true")
     if set_use_battery:
-        _validate_battery_block(index, raw_block, plant_conf)
+        _validate_battery_block(
+            index,
+            raw_block,
+            plant_conf,
+            validate_target_bounds=validate_target_bounds,
+        )
     if bool(plant_conf.get("inverter_is_hybrid", False)):
         _validate_hybrid_block(index, raw_block)
 
@@ -456,6 +557,7 @@ def _split_block_config(
         plant_conf,
         set_use_battery,
         set_use_pv,
+        fill_battery_defaults=runtime_conf is not None,
     )
     return InverterBlockConfig(
         index=index,
@@ -471,6 +573,7 @@ def merge_inverter_block_runtime_overrides(
 ) -> dict[int, dict[str, object]]:
     block_runtime_conf: dict[int, dict[str, object]] = {}
     scalar_config_overrides_by_index: dict[int, dict[str, object]] = {}
+    relaxed_target_bound_indexes: set[int] = set()
     plant_conf = input_conf.get("plant_conf", {})
     if not isinstance(plant_conf, Mapping):
         plant_conf = {}
@@ -530,6 +633,8 @@ def merge_inverter_block_runtime_overrides(
                 continue
             if key not in allowed_config_keys:
                 raise ValueError(f"{block_key}.{key} is not a valid runtime block key")
+            if key not in _RUNTIME_SCALAR_CONFIG_BLOCK_KEYS:
+                raise ValueError(f"{block_key}.{key} is not a valid runtime override key")
             if key in {
                 "battery_charge_power_max",
                 "battery_discharge_power_max",
@@ -538,13 +643,30 @@ def merge_inverter_block_runtime_overrides(
             scalar_config_overrides[key] = value
             candidate_static_block[key] = value
 
-        _split_block_config(index, candidate_static_block, runtime_conf)
-        block_runtime_conf[index] = runtime_conf
+        relax_target_bounds = bool(
+            _RUNTIME_SOC_SCALAR_CONFIG_BLOCK_KEYS & scalar_config_overrides.keys()
+        )
+        parsed_block = _split_block_config(
+            index,
+            candidate_static_block,
+            runtime_conf,
+            validate_target_bounds=not relax_target_bounds,
+        )
+        block_runtime_conf[index] = parsed_block.runtime_conf
         scalar_config_overrides_by_index[index] = scalar_config_overrides
+        if relax_target_bounds:
+            relaxed_target_bound_indexes.add(index)
 
     for index, scalar_config_overrides in scalar_config_overrides_by_index.items():
         block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
         input_conf[block_key].update(scalar_config_overrides)
+    if isinstance(input_conf.get("plant_conf"), dict):
+        if relaxed_target_bound_indexes:
+            input_conf["plant_conf"][_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY] = sorted(
+                relaxed_target_bound_indexes
+            )
+        else:
+            input_conf["plant_conf"].pop(_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY, None)
     return block_runtime_conf
 
 
@@ -559,6 +681,9 @@ def parse_inverter_block_configs(
     }
     runtime_conf_by_index = block_runtime_conf or {}
     multi_inverter_mode = resolve_multi_inverter_mode(plant_conf)
+    relaxed_target_bound_indexes = set(
+        plant_conf.pop(_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY, [])
+    )
     if multi_inverter_mode == MULTI_INVERTER_MODE_MULTI or MULTI_INVERTER_MODE_KEY in plant_conf:
         plant_conf[MULTI_INVERTER_MODE_KEY] = multi_inverter_mode
 
@@ -589,7 +714,12 @@ def parse_inverter_block_configs(
         raw_block = input_conf[block_key]
         if not isinstance(raw_block, Mapping):
             raise ValueError(f"{block_key} must be a dictionary")
-        blocks[index] = _split_block_config(index, raw_block, runtime_conf_by_index.get(index))
+        blocks[index] = _split_block_config(
+            index,
+            raw_block,
+            runtime_conf_by_index.get(index),
+            validate_target_bounds=index not in relaxed_target_bound_indexes,
+        )
     plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = blocks
     return blocks
 
@@ -722,10 +852,10 @@ def inverter_block_structure_signature(plant_conf: Mapping[str, object]) -> tupl
 
 @dataclass(frozen=True)
 class InverterBlockRuntime:
-    """Current CVXPY parameter aliases for block 0 battery runtime state.
+    """Current CVXPY parameter aliases for one inverter battery runtime state.
 
     ``Optimization`` rebuilds this wrapper whenever horizon-dependent parameters
-    are recreated. The attributes reference the legacy ``self.param_*`` objects;
+    are recreated. The attributes reference owned CVXPY parameter objects;
     callers must update those parameters rather than replacing values here.
     """
 

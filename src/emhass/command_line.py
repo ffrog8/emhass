@@ -47,6 +47,66 @@ default_pkl_suffix = "_mlf.pkl"
 default_metadata_json = "metadata.json"
 test_df_literal = "test_df_final.pkl"
 EMHASS_SCHEMA_VERSION = "1.2"
+PUBLISH_DATA_RUNTIME_KEYS = {
+    "continual_publish",
+    "custom_batt_forecast_id",
+    "custom_batt_soc_forecast_id",
+    "custom_cost_fun_id",
+    "custom_deferrable_forecast_id",
+    "custom_deferrable_state_id",
+    "custom_grid_forecast_id",
+    "custom_heating_demand_id",
+    "custom_hybrid_inverter_id",
+    "custom_load_forecast_id",
+    "custom_optim_status_id",
+    "custom_predicted_temperature_id",
+    "custom_pv_curtailment_id",
+    "custom_pv_forecast_id",
+    "custom_unit_load_cost_id",
+    "custom_unit_prod_price_id",
+    "entity_save",
+    "publish_deferrable_load_states",
+    "publish_prefix",
+}
+
+
+def _publish_data_input_prep_params(
+    params: dict,
+    runtimeparams: str | dict | None,
+    logger: logging.Logger,
+) -> tuple[dict, str | None]:
+    """Return publish-only params/runtime values for saved-result publication.
+
+    The saved result columns decide total and per-inverter publication, so publish-only
+    input preparation must not validate optimiser runtime such as split-PV forecasts.
+    """
+    publish_params = copy.deepcopy(params)
+    if isinstance(publish_params.get("plant_conf"), dict):
+        publish_params["plant_conf"]["multi_inverter_mode"] = "single"
+
+    if runtimeparams is None:
+        return publish_params, None
+    if isinstance(runtimeparams, str):
+        loaded_runtimeparams = orjson.loads(runtimeparams)
+        if loaded_runtimeparams is None:
+            return publish_params, None
+        runtimeparams_dict = dict(loaded_runtimeparams)
+    else:
+        runtimeparams_dict = dict(runtimeparams)
+
+    publish_runtimeparams = {
+        key: value
+        for key, value in runtimeparams_dict.items()
+        if key in PUBLISH_DATA_RUNTIME_KEYS
+    }
+    ignored_keys = sorted(set(runtimeparams_dict) - set(publish_runtimeparams))
+    if ignored_keys:
+        logger.warning(
+            "publish-data ignores runtime parameters that only affect optimiser input "
+            "preparation for a new result: %s",
+            ", ".join(ignored_keys),
+        )
+    return publish_params, orjson.dumps(publish_runtimeparams).decode("utf-8")
 
 
 def _record_optim_snapshot(
@@ -1419,10 +1479,17 @@ async def set_input_data_dict(
             params = dict(orjson.loads(params))
     else:
         params = {}
+    # Publish-only actions read saved results; they need publishing config but no
+    # optimiser horizon or multi-inverter runtime validation.
+    actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
+    if set_type == "publish-data":
+        params, runtimeparams = _publish_data_input_prep_params(params, runtimeparams, logger)
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
-    has_configured_extra_inverter_blocks = has_extra_inverter_blocks(plant_conf)
+    has_configured_extra_inverter_blocks = (
+        set_type not in actions_without_fcst_or_opt and has_extra_inverter_blocks(plant_conf)
+    )
     (
         params,
         retrieve_hass_conf,
@@ -1484,7 +1551,6 @@ async def set_input_data_dict(
     #     Keeping these out of the OptimizationCache path stops them poisoning
     #     the cache key with config-default values that a subsequent
     #     naive-mpc-optim call would then miss against.
-    actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
     actions_skip_optim_cache = [
         "forecast-model-fit",
         "forecast-model-predict",

@@ -218,6 +218,37 @@ def test_indexed_hybrid_inverter_blocks_are_not_static_defaults():
     assert not {key for key in default_keys if pattern.match(key)}
 
 
+def test_multi_inverter_config_ui_fields_remain_scalar_selects():
+    pd = json.loads(
+        Path("src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
+    )
+    solar_fields = pd["Solar System (PV)"]
+
+    assert solar_fields["multi_inverter_mode"]["input"] == "select"
+    assert solar_fields["multi_inverter_mode"]["select_options"] == ["single", "multi"]
+    assert solar_fields["multi_inverter_mode"]["default_value"] == "single"
+    assert solar_fields["multi_hybrid_inverter_pv_mode"]["input"] == "select"
+    assert solar_fields["multi_hybrid_inverter_pv_mode"]["select_options"] == [
+        "legacy",
+        "site_pv",
+        "split_pv",
+    ]
+    assert solar_fields["multi_hybrid_inverter_pv_mode"]["default_value"] == "legacy"
+
+
+def test_config_docs_have_public_multi_inverter_migration_fallback_section():
+    doc = Path("docs/config.md").read_text(encoding="utf-8")
+    start = doc.index("### Multi-inverter configuration")
+    end = doc.index("If your system has a battery", start)
+    section = doc[start:end]
+
+    assert "#### Migration and fallback" in section
+    assert "hybrid_inverter_config_0" not in section
+    assert re.search(r"\bblocks?\b", section, flags=re.IGNORECASE) is None
+    assert re.search(r"\broot\b", section, flags=re.IGNORECASE) is None
+    assert re.search(r"\bzero\b", section, flags=re.IGNORECASE) is None
+
+
 def _resolve_openapi_schema_ref(openapi_doc: dict, schema: dict) -> dict:
     if "$ref" not in schema:
         return schema
@@ -527,6 +558,11 @@ def test_save_configuration_object_type_null_representations(js_src):
         "var capturedBody = null;\n"
         "var document = null;\n"
         "var fetch = async function(url, opts) {\n"
+        "  if (url === 'get-config') {\n"
+        "    return { status: 200, json: async function() { return {\n"
+        "      hybrid_inverter_config_1: { battery_charge_power_max: 4600 }\n"
+        "    }; } };\n"
+        "  }\n"
         "  capturedBody = opts.body;\n"
         "  return { status: 200, json: async function() { return {}; } };\n"
         "};\n"
@@ -575,6 +611,95 @@ def test_save_configuration_object_type_null_representations(js_src):
     proc = _run_node(node_script)
     assert proc.returncode == 0, (
         f"saveConfiguration did not store null for empty/null object input:\n{proc.stderr.strip()}"
+    )
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not in PATH")
+def test_save_configuration_list_view_preserves_unrendered_config_keys(js_src):
+    """Node replay: list-view save must preserve config keys not rendered by the form."""
+    save_fn_src = _extract_function_src(js_src, "saveConfiguration")
+
+    node_script = (
+        "var capturedBody = null;\n"
+        "var document = null;\n"
+        "var fetch = async function(url, opts) {\n"
+        "  if (url === 'get-config') {\n"
+        "    return { status: 200, json: async function() { return {\n"
+        "      battery_charge_power_max: 2400,\n"
+        "      hybrid_inverter_config_1: {\n"
+        "        set_use_pv: true,\n"
+        "        set_use_battery: true,\n"
+        "        inverter_is_hybrid: true,\n"
+        "        inverter_ac_output_max: 5000,\n"
+        "        inverter_ac_input_max: 5000,\n"
+        "        inverter_efficiency_dc_ac: 0.98,\n"
+        "        inverter_efficiency_ac_dc: 0.98,\n"
+        "        battery_charge_power_max: 4600,\n"
+        "        battery_discharge_power_max: 5000,\n"
+        "        battery_discharge_efficiency: 0.95,\n"
+        "        battery_charge_efficiency: 0.95,\n"
+        "        battery_nominal_energy_capacity: 13300,\n"
+        "        battery_minimum_state_of_charge: 0.1,\n"
+        "        battery_maximum_state_of_charge: 0.95,\n"
+        "        battery_target_state_of_charge: 0.9\n"
+        "      }\n"
+        "    }; } };\n"
+        "  }\n"
+        "  capturedBody = opts.body;\n"
+        "  return { status: 200, json: async function() { return {}; } };\n"
+        "};\n"
+        "function showChangeStatus() {}\n"
+        "function errorAlert(msg) { throw new Error('errorAlert: ' + msg); }\n\n"
+        + save_fn_src
+        + "\n\n"
+        "(async () => {\n"
+        "  const paramDefs = {\n"
+        "    Battery: {\n"
+        "      battery_charge_power_max: { input: 'number', default_value: 1000,\n"
+        "                                  friendly_name: 'Charge max', Description: 'test' }\n"
+        "    }\n"
+        "  };\n"
+        "  document = {\n"
+        "    getElementsByClassName: function(cls) {\n"
+        "      return cls === 'section-card' ? { length: 1 } : { length: 0 };\n"
+        "    },\n"
+        "    getElementById: function(id) {\n"
+        "      if (id === 'config-box') return null;\n"
+        "      if (id === 'battery_charge_power_max') return {\n"
+        "        tagName: 'DIV',\n"
+        "        getElementsByClassName: function(cls) {\n"
+        "          return cls === 'param_input'\n"
+        "            ? [{ type: 'number', value: '3200' }]\n"
+        "            : [];\n"
+        "        }\n"
+        "      };\n"
+        "      return null;\n"
+        "    }\n"
+        "  };\n"
+        "  await saveConfiguration(paramDefs);\n"
+        "  const saved = JSON.parse(capturedBody);\n"
+        "  if (saved.battery_charge_power_max !== 3200) {\n"
+        "    process.stderr.write('FAIL: rendered field was not overwritten: '\n"
+        "      + JSON.stringify(saved.battery_charge_power_max) + '\\n');\n"
+        "    process.exit(1);\n"
+        "  }\n"
+        "  if (!saved.hybrid_inverter_config_1) {\n"
+        "    process.stderr.write('FAIL: indexed inverter config was dropped\\n');\n"
+        "    process.exit(1);\n"
+        "  }\n"
+        "  if (saved.hybrid_inverter_config_1.battery_discharge_power_max !== 5000) {\n"
+        "    process.stderr.write('FAIL: indexed inverter config changed: '\n"
+        "      + JSON.stringify(saved.hybrid_inverter_config_1) + '\\n');\n"
+        "    process.exit(1);\n"
+        "  }\n"
+        "  process.exit(0);\n"
+        "})().catch(e => { process.stderr.write('FAIL: ' + e + '\\n'); process.exit(1); });\n"
+    )
+
+    proc = _run_node(node_script)
+    assert proc.returncode == 0, (
+        "saveConfiguration list view did not preserve unrendered indexed inverter config:\n"
+        f"{proc.stderr.strip()}"
     )
 
 
@@ -658,6 +783,9 @@ def test_save_configuration_object_type_invalid_json_shows_error(js_src):
         "var errorAlertMsg = null;\n"
         "var document = null;\n"
         "var fetch = async function(url, opts) {\n"
+        "  if (url === 'get-config') {\n"
+        "    return { status: 200, json: async function() { return {}; } };\n"
+        "  }\n"
         "  capturedBody = opts.body;\n"
         "  return { status: 200, json: async function() { return {}; } };\n"
         "};\n"

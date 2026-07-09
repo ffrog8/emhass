@@ -291,10 +291,10 @@ Then the additional technical parameters:
 
 ### Multi-inverter configuration
 
-Single-inverter mode is the default. In this mode, the existing top-level
-battery and hybrid inverter configuration is used exactly as before, and indexed
-`hybrid_inverter_config_N` sections are ignored unless
-`multi_inverter_mode: multi` is enabled.
+Single-inverter mode is the normal default. In this mode, the existing
+top-level battery, PV, and hybrid inverter settings are used exactly as before,
+and indexed `hybrid_inverter_config_N` sections are ignored unless
+multi-inverter mode is enabled.
 
 Multi-inverter mode is explicit:
 
@@ -303,25 +303,23 @@ multi_inverter_mode: multi
 ```
 
 When multi-inverter mode is enabled, the active inverter configs are the
-one-based static sections `hybrid_inverter_config_1`,
+indexed static sections `hybrid_inverter_config_1`,
 `hybrid_inverter_config_2`, and so on. The top-level battery, hybrid inverter,
-and PV settings are not an active inverter in this mode; they remain available
-for single-inverter operation and site-level settings. Static
-`hybrid_inverter_config_0` is ignored with a warning. Runtime
-`hybrid_inverter_config_0` is invalid.
+and PV settings remain the single-inverter configuration and are not treated as
+a fleet-wide inverter definition. Fleet totals are exposed by the
+multi-inverter result and publish outputs, not by repurposing the top-level
+configuration.
 
-Public multi-inverter solves are admitted only for the supported battery-only
-shape or the supported split-PV hybrid shape. Both require
-`battery_mode_lock: site` so all configured batteries share one site-level
-charge/discharge direction.
+Supported multi-inverter solves are limited to the battery-only shape and the
+split-PV hybrid shape. Both require `battery_mode_lock: site` so all configured
+batteries share one site-level charge/discharge direction.
 
 The battery-only shape requires every active inverter config to be
 battery-backed, non-hybrid, no-PV, and no-curtailment. The hybrid shape requires
 `multi_hybrid_inverter_pv_mode: split_pv`; every active inverter config must be
 battery-backed, hybrid, PV-enabled; and every active PV inverter must receive a
 nested runtime `pv_power_forecast` under `hybrid_inverter_config_N`. Other
-multi-inverter shapes still validate and then raise `multi-block solve not
-enabled` instead of silently running a single-inverter plan.
+multi-inverter shapes are rejected for optimisation.
 
 `multi_hybrid_inverter_pv_mode` controls how PV is interpreted when
 multi-inverter hybrid solving is enabled. Accepted values are `legacy`,
@@ -334,13 +332,13 @@ this release is `site`, which prevents one configured battery from charging
 while another configured battery discharges in the same timestep. `none` is
 reserved and rejected for multi-inverter solving.
 
-Configurations outside the two admitted shapes are rejected for public
-multi-inverter solves.
+Configurations outside the two admitted shapes are rejected for multi-inverter
+solves.
 
 Allowed indexed config keys are the inverter-local battery, hybrid inverter,
 curtailment, and enablement keys. Site-level load sensors, tariffs, grid
 import/export limits, topology flags, secrets, publishing settings, and
-config-time PV source/model keys are rejected. Runtime nested blocks may
+config-time PV source/model keys are rejected. Runtime nested inverter configs may
 override configured inverter-local scalar values, runtime-only SOC keys, and the
 required `split_pv` inverter-local `pv_power_forecast` for existing configured
 inverters only.
@@ -361,11 +359,11 @@ Public battery-only multi-inverter solving admits `set_battery_first_priority`
 with aggregate fleet stored energy, but still rejects
 `set_nocharge_from_grid` and `set_nodischarge_to_grid`.
 
-In `split_pv` multi-inverter mode, each active inverter with
-`set_use_pv: true` must receive its own nested runtime `pv_power_forecast` list
-under `hybrid_inverter_config_N`, where `N >= 1`. The top-level
-`pv_power_forecast` remains the single-inverter runtime shape and is not used as
-an active inverter forecast in multi-inverter mode. Active inverters with
+In `split_pv` multi-inverter mode, each active inverter with `set_use_pv: true`
+must receive its own nested runtime `pv_power_forecast` list under
+`hybrid_inverter_config_N`. The top-level `pv_power_forecast` remains the
+single-inverter runtime shape and is not used as an active inverter forecast in
+multi-inverter mode. Active inverters with
 `set_use_pv: false` remain battery-only and do not need a nested PV forecast.
 
 In `site_pv` mode, and when `multi_hybrid_inverter_pv_mode` is unset or set to
@@ -376,6 +374,64 @@ are rejected outside the `split_pv` hybrid path.
 Timestamp dictionaries for nested PV, inverter-local PV sensors,
 inverter-local PVLib modelling, inverter-local CSV loading, and adjusted-PV
 models remain future work.
+
+#### Migration and fallback
+
+Start from a working single-inverter configuration. Leave the existing
+top-level settings in place so disabling `multi_inverter_mode` returns EMHASS to
+the normal single-inverter path.
+
+Add one indexed section for each physical inverter that should participate in
+the multi-inverter optimisation:
+
+```yaml
+multi_inverter_mode: multi
+multi_hybrid_inverter_pv_mode: split_pv
+battery_mode_lock: site
+
+hybrid_inverter_config_1:
+  set_use_pv: true
+  set_use_battery: true
+  inverter_is_hybrid: true
+  inverter_ac_output_max: 5000
+  inverter_ac_input_max: 5000
+  inverter_efficiency_dc_ac: 0.98
+  inverter_efficiency_ac_dc: 0.98
+  battery_charge_power_max: 4600
+  battery_discharge_power_max: 5000
+  battery_discharge_efficiency: 0.95
+  battery_charge_efficiency: 0.95
+  battery_nominal_energy_capacity: 13300
+  battery_minimum_state_of_charge: 0.10
+  battery_maximum_state_of_charge: 0.95
+  battery_target_state_of_charge: 0.90
+
+hybrid_inverter_config_2:
+  set_use_pv: true
+  set_use_battery: true
+  inverter_is_hybrid: true
+  inverter_ac_output_max: 5000
+  inverter_ac_input_max: 5000
+  inverter_efficiency_dc_ac: 0.98
+  inverter_efficiency_ac_dc: 0.98
+  battery_charge_power_max: 4600
+  battery_discharge_power_max: 5000
+  battery_discharge_efficiency: 0.95
+  battery_charge_efficiency: 0.95
+  battery_nominal_energy_capacity: 13300
+  battery_minimum_state_of_charge: 0.10
+  battery_maximum_state_of_charge: 0.95
+  battery_target_state_of_charge: 0.90
+```
+
+At runtime, pass each PV-enabled inverter's `pv_power_forecast` inside the
+matching `hybrid_inverter_config_N`. Do not put PV sensor or PVLib acquisition
+keys inside indexed static inverter sections in this release.
+
+For fallback, set `multi_inverter_mode: single` or remove the indexed
+`hybrid_inverter_config_N` sections. The existing top-level configuration then
+continues to drive the single-inverter optimiser and existing Home Assistant
+entity names.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 

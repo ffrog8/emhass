@@ -139,6 +139,85 @@ class TestWebServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(f_write.write.called)
 
+    async def test_configuration_routes_round_trip_scalar_config_with_indexed_inverters(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            data_path = tmp_path / "data"
+            data_path.mkdir()
+            defaults_path = tmp_path / "config_defaults.json"
+            associations_path = tmp_path / "associations.csv"
+            config_path = tmp_path / "config.json"
+            legacy_config_path = tmp_path / "missing_legacy.yaml"
+
+            defaults_path.write_bytes(
+                pathlib.Path("src/emhass/data/config_defaults.json").read_bytes()
+            )
+            associations_path.write_text(
+                pathlib.Path("src/emhass/data/associations.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config_path.write_bytes(
+                orjson.dumps(
+                    {
+                        "multi_inverter_mode": "single",
+                        "multi_hybrid_inverter_pv_mode": "split_pv",
+                        "battery_charge_power_max": 2400,
+                        "hybrid_inverter_config_1": {
+                            "set_use_pv": True,
+                            "set_use_battery": True,
+                            "inverter_is_hybrid": True,
+                            "inverter_ac_output_max": 5000,
+                            "inverter_ac_input_max": 5000,
+                            "inverter_efficiency_dc_ac": 0.98,
+                            "inverter_efficiency_ac_dc": 0.98,
+                            "battery_charge_power_max": 4600,
+                            "battery_discharge_power_max": 5000,
+                            "battery_discharge_efficiency": 0.95,
+                            "battery_charge_efficiency": 0.95,
+                            "battery_nominal_energy_capacity": 13300,
+                            "battery_minimum_state_of_charge": 0.1,
+                            "battery_maximum_state_of_charge": 0.95,
+                            "battery_target_state_of_charge": 0.9,
+                        },
+                    }
+                )
+            )
+
+            web_server.emhass_conf = {
+                "data_path": data_path,
+                "config_path": config_path,
+                "defaults_path": defaults_path,
+                "associations_path": associations_path,
+                "legacy_config_path": legacy_config_path,
+                "root_path": tmp_path,
+            }
+            web_server.params_secrets = {}
+
+            response = await self.client.get("/configuration")
+            self.assertEqual(response.status_code, 200)
+
+            response = await self.client.get("/get-config")
+            self.assertEqual(response.status_code, 200)
+            config = await response.get_json()
+            self.assertEqual(config["multi_inverter_mode"], "single")
+            self.assertEqual(config["battery_charge_power_max"], 2400)
+            self.assertEqual(
+                config["hybrid_inverter_config_1"]["inverter_ac_output_max"],
+                5000,
+            )
+
+            config["battery_charge_power_max"] = 3200
+            response = await self.client.post("/set-config", json=config)
+            self.assertEqual(response.status_code, 200)
+
+            saved_config = orjson.loads(config_path.read_bytes())
+            self.assertEqual(saved_config["battery_charge_power_max"], 3200)
+            self.assertEqual(
+                saved_config["hybrid_inverter_config_1"]["battery_discharge_power_max"],
+                5000,
+            )
+            self.assertTrue((data_path / web_server.params_file).exists())
+
     @patch("emhass.web_server.set_input_data_dict")
     @patch("emhass.web_server.perfect_forecast_optim")
     @patch("emhass.web_server._save_injection_dict")

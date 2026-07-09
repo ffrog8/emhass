@@ -363,6 +363,138 @@ def test_merge_runtime_accepts_nested_pv_forecast_without_battery_soc_bounds():
     assert runtime_conf[1]["pv_power_forecast"] == [0, 100, 250]
 
 
+def test_merge_runtime_accepts_nested_battery_cap_overrides():
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "battery_charge_power_max": 4200,
+            "battery_discharge_power_max": 4300,
+        }
+    }
+
+    runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1] == {
+        "soc_init": 0.90,
+        "soc_final": 0.90,
+    }
+    assert params["hybrid_inverter_config_1"]["battery_charge_power_max"] == 4200
+    assert params["hybrid_inverter_config_1"]["battery_discharge_power_max"] == 4300
+
+
+def test_merge_runtime_soc_final_uses_effective_runtime_bounds_and_clamps(caplog):
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "battery_minimum_state_of_charge": 0.25,
+            "battery_maximum_state_of_charge": 1.0,
+            "battery_target_state_of_charge": 0.50,
+            "soc_final": 0.0,
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger="emhass.inverter_blocks"):
+        runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1]["soc_init"] == 0.50
+    assert runtime_conf[1]["soc_final"] == 0.25
+    assert params["hybrid_inverter_config_1"]["battery_minimum_state_of_charge"] == 0.25
+    assert params["hybrid_inverter_config_1"]["battery_maximum_state_of_charge"] == 1.0
+    assert "soc_final=0.0 is lower than soc_min=0.25" in caplog.text
+
+
+def test_merge_runtime_bounds_can_make_static_target_out_of_range_without_hard_fail(caplog):
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "battery_minimum_state_of_charge": 0.95,
+            "battery_maximum_state_of_charge": 1.0,
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger="emhass.inverter_blocks"):
+        runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1]["soc_init"] == 0.90
+    assert runtime_conf[1]["soc_final"] == 0.95
+    assert params["hybrid_inverter_config_1"]["battery_minimum_state_of_charge"] == 0.95
+    assert "soc_init=0.9 is lower than soc_min=0.95" in caplog.text
+    assert "soc_final=0.9 is lower than soc_min=0.95" in caplog.text
+
+    optim_conf = _root_optim_conf()
+    plant_conf = params["plant_conf"]
+    blocks = parse_inverter_block_configs(params, optim_conf, plant_conf, runtime_conf)
+    assert blocks[1].runtime_conf["soc_final"] == 0.95
+    assert blocks[1].plant_conf["battery_target_state_of_charge"] == 0.90
+    assert "_hybrid_inverter_runtime_target_bounds_relaxed_indexes" not in plant_conf
+
+
+def test_merge_runtime_soc_only_does_not_hide_invalid_static_target():
+    params = _base_params_with_extra_block(set_use_pv=False)
+    params["hybrid_inverter_config_1"]["battery_target_state_of_charge"] = 0.05
+
+    with pytest.raises(
+        ValueError,
+        match="battery_target_state_of_charge must be within min/max SOC",
+    ):
+        merge_inverter_block_runtime_overrides(
+            params,
+            {"hybrid_inverter_config_1": {"soc_init": 0.50}},
+        )
+
+
+def test_merge_runtime_soc_init_outside_bounds_warns_and_keeps_value(caplog):
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime = {
+        "hybrid_inverter_config_1": {
+            "battery_minimum_state_of_charge": 0.25,
+            "battery_maximum_state_of_charge": 1.0,
+            "battery_target_state_of_charge": 0.50,
+            "soc_init": 0.10,
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger="emhass.inverter_blocks"):
+        runtime_conf = merge_inverter_block_runtime_overrides(params, runtime)
+
+    assert runtime_conf[1]["soc_init"] == 0.10
+    assert runtime_conf[1]["soc_final"] == 0.50
+    assert "soc_init=0.1 is lower than soc_min=0.25" in caplog.text
+
+
+def test_merge_runtime_missing_soc_fields_default_independently_from_effective_target():
+    params = _base_params_with_extra_block(set_use_pv=False)
+
+    runtime_conf = merge_inverter_block_runtime_overrides(
+        params,
+        {
+            "hybrid_inverter_config_1": {
+                "battery_minimum_state_of_charge": 0.20,
+                "battery_maximum_state_of_charge": 0.90,
+                "battery_target_state_of_charge": 0.40,
+                "soc_init": 0.80,
+            }
+        },
+    )
+    assert runtime_conf[1]["soc_init"] == 0.80
+    assert runtime_conf[1]["soc_final"] == 0.40
+
+    params = _base_params_with_extra_block(set_use_pv=False)
+    runtime_conf = merge_inverter_block_runtime_overrides(
+        params,
+        {
+            "hybrid_inverter_config_1": {
+                "battery_minimum_state_of_charge": 0.20,
+                "battery_maximum_state_of_charge": 0.90,
+                "battery_target_state_of_charge": 0.40,
+                "soc_final": 0.80,
+            }
+        },
+    )
+    assert runtime_conf[1]["soc_init"] == 0.40
+    assert runtime_conf[1]["soc_final"] == 0.80
+
+
 def test_merge_runtime_rejects_nested_pv_forecast_for_non_pv_block():
     params = _base_params_with_extra_block(set_use_pv=False)
     runtime = {
@@ -382,4 +514,14 @@ def test_merge_runtime_rejects_nested_compute_curtailment():
         merge_inverter_block_runtime_overrides(
             params,
             {"hybrid_inverter_config_1": {"compute_curtailment": True}},
+        )
+
+
+def test_merge_runtime_rejects_nested_site_level_key():
+    params = _base_params_with_extra_block()
+
+    with pytest.raises(ValueError, match="maximum_power_from_grid"):
+        merge_inverter_block_runtime_overrides(
+            params,
+            {"hybrid_inverter_config_1": {"maximum_power_from_grid": 5000}},
         )
