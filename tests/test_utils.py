@@ -644,7 +644,10 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
 
         params_out = orjson.loads(params_json)
         assert params_out["plant_conf"][MULTI_INVERTER_MODE_KEY] == MULTI_INVERTER_MODE_MULTI
-        assert plant_conf[INVERTER_BLOCK_CONFIGS_KEY][1].runtime_conf == {"soc_init": 0.51}
+        assert plant_conf[INVERTER_BLOCK_CONFIGS_KEY][1].runtime_conf == {
+            "soc_init": 0.51,
+            "soc_final": 0.9,
+        }
 
     async def test_treat_runtimeparams_failed_nested_scalar_runtime_leaves_configured_block_unchanged(
         self,

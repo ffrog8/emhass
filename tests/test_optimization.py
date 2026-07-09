@@ -1320,6 +1320,47 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(column, opt_res.columns)
 
+    def test_internal_multi_block_extra_battery_recovers_from_initial_soc_below_min(self):
+        df = self._make_multi_block_battery_df(periods=10)
+        df["p_pv_forecast"] = 100.0
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": self._extra_battery_block(
+                    capacity=1000,
+                    charge_power=100,
+                    soc_min=0.50,
+                    soc_max=1.0,
+                    soc_target=0.50,
+                )
+            },
+            optim_conf,
+            plant_conf,
+            {1: {"soc_init": 0.0, "soc_final": 0.50}},
+        )
+        opt = self.create_optimization(
+            optim_conf=optim_conf,
+            plant_conf=plant_conf,
+            _allow_internal_multi_block_battery_model=True,
+        )
+
+        opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+            soc_init=0.5,
+            soc_final=0.5,
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        block_soc = opt._battery_block_diagnostics["blocks"][1]["soc"]
+        self.assertGreater(block_soc[0], 0.0)
+        self.assertLess(block_soc[0], 0.50)
+        self.assertAlmostEqual(block_soc[-1], 0.50, delta=1e-6)
+
     def test_internal_multi_block_battery_62_double_capacity_uses_own_charge_cap_each_timestep(
         self,
     ):

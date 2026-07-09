@@ -723,6 +723,17 @@ async function saveConfiguration(param_definitions) {
 
   //if true, in list view
   if (Boolean(config_card.length)) {
+    // Preserve advanced keys not rendered by the list form, such as indexed
+    // multi-inverter configs. Rendered fields below overwrite this base.
+    const currentConfigResponse = await fetch(`get-config`, {
+      method: "GET",
+    });
+    const currentConfigStatus = currentConfigResponse.status;
+    if (currentConfigStatus !== 200 && currentConfigStatus !== 201) {
+      showChangeStatus(currentConfigStatus, await currentConfigResponse.json());
+      return 0;
+    }
+    config = await currentConfigResponse.json();
     //retrieve params and their input/s by looping though param_definitions list
     //loop through the sections
     for (const [, section_object] of Object.entries(

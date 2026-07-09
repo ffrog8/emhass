@@ -364,10 +364,10 @@ class Optimization:
                 index=index,
                 soc_init=params["soc_init"],
                 soc_final=params["soc_final"],
-                soc_low_gap=None,
-                soc_high_gap=None,
-                soc_low_required=None,
-                soc_high_required=None,
+                soc_low_gap=params["soc_low_gap"],
+                soc_high_gap=params["soc_high_gap"],
+                soc_low_required=params["soc_low_required"],
+                soc_high_required=params["soc_high_required"],
                 soc_target_floor=params["soc_target_floor"],
                 battery_charge_power_max=params["battery_charge_power_max"],
                 battery_discharge_power_max=params["battery_discharge_power_max"],
@@ -428,8 +428,8 @@ class Optimization:
                 index=index,
                 p_sto_pos=block_vars.get(f"p_sto_pos_{index}"),
                 p_sto_neg=block_vars.get(f"p_sto_neg_{index}"),
-                soc_low_recovered=None,
-                soc_high_recovered=None,
+                soc_low_recovered=block_vars.get(f"soc_low_recovered_{index}"),
+                soc_high_recovered=block_vars.get(f"soc_high_recovered_{index}"),
                 soc_deficit_cost=None,
                 soc_surplus_cost=None,
                 p_hybrid_inverter=block_vars.get(f"p_hybrid_inverter_{index}"),
@@ -584,6 +584,16 @@ class Optimization:
             params = {
                 "soc_init": cp.Parameter(nonneg=True, name=f"soc_init_{index}"),
                 "soc_final": cp.Parameter(nonneg=True, name=f"soc_final_{index}"),
+                "soc_low_gap": cp.Parameter(nonneg=True, name=f"soc_low_gap_{index}"),
+                "soc_high_gap": cp.Parameter(nonneg=True, name=f"soc_high_gap_{index}"),
+                "soc_low_required": cp.Parameter(
+                    nonneg=True,
+                    name=f"soc_low_required_{index}",
+                ),
+                "soc_high_required": cp.Parameter(
+                    nonneg=True,
+                    name=f"soc_high_required_{index}",
+                ),
                 "soc_target_floor": cp.Parameter(
                     self.num_timesteps,
                     nonneg=True,
@@ -611,6 +621,7 @@ class Optimization:
             )
             params["soc_init"].value = soc_init
             params["soc_final"].value = float(block.runtime_conf.get("soc_final", soc_init))
+            self._set_extra_block_soc_recovery_params(block, params, soc_init)
             params["soc_target_floor"].value = np.zeros(self.num_timesteps)
             params["battery_charge_power_max"].value = float(
                 block.plant_conf["battery_charge_power_max"]
@@ -638,6 +649,26 @@ class Optimization:
                 forecast = forecast[: self.num_timesteps]
         return forecast
 
+    def _set_extra_block_soc_recovery_params(
+        self,
+        block: InverterBlockConfig,
+        params: dict[str, cp.Parameter],
+        soc_init: float,
+    ) -> None:
+        cap = block.plant_conf["battery_nominal_energy_capacity"]
+        low_gap_wh = max(
+            0.0,
+            (block.plant_conf["battery_minimum_state_of_charge"] - soc_init) * cap,
+        )
+        high_gap_wh = max(
+            0.0,
+            (soc_init - block.plant_conf["battery_maximum_state_of_charge"]) * cap,
+        )
+        params["soc_low_gap"].value = low_gap_wh
+        params["soc_high_gap"].value = high_gap_wh
+        params["soc_low_required"].value = 1.0 if low_gap_wh > 0 else 0.0
+        params["soc_high_required"].value = 1.0 if high_gap_wh > 0 else 0.0
+
     def _is_public_multi_inverter_mode(self) -> bool:
         return (
             not self._allow_internal_multi_block_battery_model
@@ -647,7 +678,7 @@ class Optimization:
     def _apply_public_multi_inverter_root_config(self) -> None:
         parsed_blocks = self.plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
         if (
-            self.plant_conf.get(MULTI_INVERTER_MODE_KEY) != MULTI_INVERTER_MODE_MULTI
+            not self._is_public_multi_inverter_mode()
             or not isinstance(parsed_blocks, Mapping)
             or not isinstance(parsed_blocks.get(1), InverterBlockConfig)
         ):
@@ -790,6 +821,7 @@ class Optimization:
 
             params["soc_init"].value = soc_init
             params["soc_final"].value = soc_final
+            self._set_extra_block_soc_recovery_params(block, params, soc_init)
             params["soc_target_floor"].value = soc_target_floor
             params["battery_charge_power_max"].value = float(
                 block.plant_conf["battery_charge_power_max"]
@@ -1902,6 +1934,16 @@ class Optimization:
                 >= -params["battery_charge_power_max"]
             )
             vars_dict[f"E_{index}"] = cp.Variable(n, boolean=True, name=f"E_{index}")
+            vars_dict[f"soc_low_recovered_{index}"] = cp.Variable(
+                n,
+                boolean=True,
+                name=f"soc_low_recovered_{index}",
+            )
+            vars_dict[f"soc_high_recovered_{index}"] = cp.Variable(
+                n,
+                boolean=True,
+                name=f"soc_high_recovered_{index}",
+            )
             if _block.plant_conf.get("inverter_is_hybrid", False):
                 vars_dict[f"p_hybrid_inverter_{index}"] = cp.Variable(
                     n,
@@ -2578,6 +2620,9 @@ class Optimization:
             extra_max_energy = (
                 block_config.plant_conf["battery_maximum_state_of_charge"] * extra_cap
             )
+            extra_recovery_margin = max(extra_cap * 1e-6, 1e-3)
+            extra_recovery_big_m_low = extra_cap - extra_min_energy + extra_recovery_margin
+            extra_recovery_big_m_high = extra_max_energy + extra_recovery_margin
 
             constraints.append(
                 extra_vars.p_sto_pos
@@ -2591,8 +2636,62 @@ class Optimization:
                 * extra_runtime.battery_charge_power_max
                 * (1 - extra_vars.battery_mode)
             )
-            constraints.append(stored_energy >= extra_min_energy)
-            constraints.append(stored_energy <= extra_max_energy)
+            constraints.append(
+                stored_energy
+                >= extra_min_energy
+                - extra_runtime.soc_low_gap * (1 - extra_vars.soc_low_recovered)
+            )
+            constraints.append(
+                stored_energy
+                <= extra_max_energy
+                + extra_runtime.soc_high_gap * (1 - extra_vars.soc_high_recovered)
+            )
+            if self.num_timesteps > 1:
+                constraints.append(
+                    extra_vars.soc_low_recovered[1:] >= extra_vars.soc_low_recovered[:-1]
+                )
+                constraints.append(
+                    extra_vars.soc_high_recovered[1:] >= extra_vars.soc_high_recovered[:-1]
+                )
+            constraints.append(extra_vars.soc_low_recovered <= extra_runtime.soc_low_required)
+            constraints.append(extra_vars.soc_high_recovered <= extra_runtime.soc_high_required)
+            constraints.append(extra_vars.soc_low_recovered[-1] == extra_runtime.soc_low_required)
+            constraints.append(
+                extra_vars.soc_high_recovered[-1] == extra_runtime.soc_high_required
+            )
+            if self.num_timesteps > 1:
+                constraints.append(
+                    stored_energy[1:]
+                    >= stored_energy[:-1]
+                    - extra_recovery_big_m_low
+                    * (
+                        extra_vars.soc_low_recovered[:-1]
+                        + (1 - extra_runtime.soc_low_required)
+                    )
+                )
+                constraints.append(
+                    stored_energy[1:]
+                    <= stored_energy[:-1]
+                    + extra_recovery_big_m_high
+                    * (
+                        extra_vars.soc_high_recovered[:-1]
+                        + (1 - extra_runtime.soc_high_required)
+                    )
+                )
+            constraints.append(
+                stored_energy
+                <= extra_min_energy
+                - extra_recovery_margin
+                + extra_recovery_big_m_low * extra_vars.soc_low_recovered
+                + extra_recovery_big_m_low * (1 - extra_runtime.soc_low_required)
+            )
+            constraints.append(
+                stored_energy
+                >= extra_max_energy
+                + extra_recovery_margin
+                - extra_recovery_big_m_high * extra_vars.soc_high_recovered
+                - extra_recovery_big_m_high * (1 - extra_runtime.soc_high_required)
+            )
             constraints.append(stored_energy[-1] == extra_runtime.soc_final * extra_cap)
             constraints.append(stored_energy >= extra_runtime.soc_target_floor)
             self._battery_block_expressions[index] = {
