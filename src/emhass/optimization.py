@@ -60,6 +60,7 @@ THERMAL_CONFIG_KEY_HINTS = {
 # act on (above HiGHS dual feasibility tolerance once multiplied by realistic
 # curtailment powers in W).
 CURTAILMENT_TIEBREAK_EPS = 1e-7
+BATTERY_SOC_BALANCE_COST_KEY = "battery_soc_balance_cost"
 
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
 # on, importing from the grid while the battery is still above its minimum SoC is
@@ -188,6 +189,9 @@ class Optimization:
         self.inverter_block_variables = {}
         self._battery_block_diagnostics = {}
         self._battery_block_expressions = {}
+        self._battery_soc_balance_cost = self._validate_battery_soc_balance_cost()
+        self._battery_soc_balance_deviation_vars = {}
+        self._battery_soc_balance_penalty = None
         self._refresh_inverter_block_config()
         self._validate_multi_block_battery_model_scope()
 
@@ -1824,6 +1828,77 @@ class Optimization:
             return 0.0
         return value
 
+    def _validate_battery_soc_balance_cost(self) -> float:
+        """Return the site-level multi-inverter SOC balance cost after validation."""
+        raw = self.optim_conf.get(BATTERY_SOC_BALANCE_COST_KEY, 0.0)
+        if isinstance(raw, bool) or not isinstance(raw, int | float | np.integer | np.floating):
+            raise ValueError(
+                f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0"
+            )
+        value = float(raw)
+        if not isfinite(value) or value < 0:
+            raise ValueError(
+                f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0"
+            )
+        return value
+
+    def _battery_soc_balance_block_items(self):
+        """Return battery blocks that participate in site-level SOC balancing."""
+        if self.plant_conf.get(MULTI_INVERTER_MODE_KEY) != MULTI_INVERTER_MODE_MULTI:
+            return []
+        if self._battery_soc_balance_cost <= 0:
+            return []
+
+        block_items = []
+        for index, block_expressions in sorted(self._battery_block_expressions.items()):
+            block_config = self.inverter_block_config.get(index)
+            if block_config is None or not block_config.set_use_battery:
+                continue
+            stored_energy = block_expressions.get("stored_energy")
+            if stored_energy is None:
+                continue
+            block_items.append((index, block_config, stored_energy))
+        if len(block_items) < 2:
+            return []
+        return block_items
+
+    def _add_battery_soc_balance_constraints(self, constraints) -> None:
+        """Add site-level capacity-weighted SOC balancing soft constraints."""
+        self._battery_soc_balance_deviation_vars = {}
+        self._battery_soc_balance_penalty = None
+
+        block_items = self._battery_soc_balance_block_items()
+        if not block_items:
+            return
+
+        total_capacity = sum(
+            float(block_config.plant_conf["battery_nominal_energy_capacity"])
+            for _index, block_config, _stored_energy in block_items
+        )
+        fleet_stored_energy = sum(
+            stored_energy for _index, _block_config, stored_energy in block_items
+        )
+        fleet_soc = fleet_stored_energy / total_capacity
+
+        deviation_sum = 0
+        for _index, block_config, stored_energy in block_items:
+            public_index = block_config.index
+            capacity = float(block_config.plant_conf["battery_nominal_energy_capacity"])
+            target_energy = capacity * fleet_soc
+            deviation = cp.Variable(
+                self.num_timesteps,
+                nonneg=True,
+                name=f"battery_soc_balance_deviation_{public_index}",
+            )
+            self._battery_soc_balance_deviation_vars[public_index] = deviation
+            constraints.append(deviation >= stored_energy - target_energy)
+            constraints.append(deviation >= target_energy - stored_energy)
+            deviation_sum += cp.sum(deviation / 1000.0)
+
+        self._battery_soc_balance_penalty = (
+            0.5 * self._battery_soc_balance_cost * self.time_step * deviation_sum
+        )
+
     def _initialize_decision_variables(self):
         """
         Initialize all main decision variables for the CVXPY problem.
@@ -2232,6 +2307,9 @@ class Optimization:
                 * BATTERY_FIRST_IMPORT_PENALTY_FACTOR
                 * cp.sum(cp.multiply(self.param_load_cost_pos, battery_first_penalty))
             )
+        if self._battery_soc_balance_penalty is not None:
+            self.logger.debug("Adding multi-inverter battery SOC balance cost to objective")
+            objective_terms.append(-self._battery_soc_balance_penalty)
 
         # Capacity / demand charge (issue #623). A one-time cost on the peak grid
         # import over the optimisation, priced in currency per kW. The peak_import
@@ -2489,6 +2567,8 @@ class Optimization:
     def _add_battery_constraints(self, constraints, batt_stress_conf):
         """Add all battery-related constraints (Vectorized)."""
         self._battery_block_expressions = {}
+        self._battery_soc_balance_deviation_vars = {}
+        self._battery_soc_balance_penalty = None
         if not self.optim_conf["set_use_battery"]:
             return
 
@@ -2749,6 +2829,8 @@ class Optimization:
             constraints.append(self.vars["E"] == site_mode)
             for index, _block in self._extra_battery_block_configs():
                 constraints.append(self.vars[f"E_{index}"] == site_mode)
+
+        self._add_battery_soc_balance_constraints(constraints)
 
         # Battery-first priority (issue #834): on a flat (non time-of-use)
         # tariff, "drain the battery before importing" and "interleave grid

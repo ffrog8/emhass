@@ -1185,6 +1185,42 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(opt.inverter_block_config), [0])
         self.assertEqual(opt.inverter_block_config[0].index, 1)
 
+    def test_battery_soc_balance_cost_rejects_invalid_top_level_values(self):
+        for value in (-0.01, float("nan"), float("inf"), "not-a-number", "1.0"):
+            with self.subTest(value=value):
+                optim_conf, plant_conf = self._battery_only_confs()
+                optim_conf["battery_soc_balance_cost"] = value
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"battery_soc_balance_cost.*finite number >= 0",
+                ):
+                    self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+    def test_battery_soc_balance_cost_single_inverter_positive_is_structure_noop(self):
+        df = self._make_multi_block_battery_df(periods=1)
+        optim_conf, plant_conf = self._battery_only_confs()
+        plant_conf["multi_inverter_mode"] = "single"
+        optim_conf["battery_soc_balance_cost"] = 1.0
+
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+        opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+            soc_init=0.5,
+            soc_final=0.5,
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertEqual(getattr(opt, "_battery_soc_balance_deviation_vars", {}), {})
+        obj_var_names = {var.name() for var in opt.prob.objective.variables()}
+        self.assertFalse(
+            any(name.startswith("battery_soc_balance_deviation") for name in obj_var_names)
+        )
+
     def test_public_multi_block_battery_nocharge_nodischarge_still_disabled(self):
         for flag in ("set_nocharge_from_grid", "set_nodischarge_to_grid"):
             with self.subTest(flag=flag):
@@ -1565,6 +1601,96 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("E_site", opt.vars)
         self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
         self.assertIs(opt.inverter_block_variables[2].battery_mode, opt.vars["E_2"])
+
+    def test_multi_block_battery_soc_balance_cost_zero_is_structure_noop(self):
+        df = self._make_multi_block_battery_df(periods=1)
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        optim_conf["battery_soc_balance_cost"] = 0.0
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": self._extra_battery_block(),
+                "hybrid_inverter_config_2": self._extra_battery_block(),
+            },
+            optim_conf,
+            plant_conf,
+            {
+                1: {"soc_init": 0.5, "soc_final": 0.5},
+                2: {"soc_init": 0.5, "soc_final": 0.5},
+            },
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertEqual(getattr(opt, "_battery_soc_balance_deviation_vars", {}), {})
+
+    def test_multi_block_battery_soc_balance_cost_uses_capacity_weighted_deviations(self):
+        df = self._make_multi_block_battery_df(periods=1)
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf["battery_mode_lock"] = "site"
+        optim_conf["battery_soc_balance_cost"] = 1.0
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": self._extra_battery_block(
+                    capacity=1000,
+                    soc_target=1.0,
+                ),
+                "hybrid_inverter_config_2": self._extra_battery_block(
+                    capacity=3000,
+                    soc_target=0.0,
+                ),
+            },
+            optim_conf,
+            plant_conf,
+            {
+                1: {"soc_init": 1.0, "soc_final": 1.0},
+                2: {"soc_init": 0.0, "soc_final": 0.0},
+            },
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        deviation_vars = opt._battery_soc_balance_deviation_vars
+        self.assertEqual(sorted(deviation_vars), [1, 2])
+
+        diagnostics_by_public_index = {
+            opt.inverter_block_config[index].index: values
+            for index, values in opt._battery_block_diagnostics["blocks"].items()
+        }
+        capacities = {
+            block.index: block.plant_conf["battery_nominal_energy_capacity"]
+            for block in opt.inverter_block_config.values()
+            if block.set_use_battery
+        }
+        total_capacity = sum(capacities.values())
+        fleet_stored_energy = sum(
+            diagnostics_by_public_index[index]["stored_energy"] for index in capacities
+        )
+        fleet_soc = fleet_stored_energy / total_capacity
+
+        for public_index, capacity in capacities.items():
+            expected_deviation = np.abs(
+                diagnostics_by_public_index[public_index]["stored_energy"]
+                - capacity * fleet_soc
+            )
+            actual_deviation = opt._solver_value_array(deviation_vars[public_index])
+            np.testing.assert_allclose(actual_deviation, expected_deviation, atol=1e-6)
 
     def test_multi_block_battery_mode_lock_site_three_blocks_24_steps_performance_smoke(self):
         optim_conf, plant_conf = self._battery_only_confs()

@@ -85,6 +85,62 @@ def test_associations_map_battery_mode_lock_to_optim_conf():
     assert ("optim_conf", "battery_mode_lock", "battery_mode_lock") in associations
 
 
+def test_battery_soc_balance_cost_public_config_surface():
+    config_defaults = json.loads(
+        Path("src/emhass/data/config_defaults.json").read_text(encoding="utf-8")
+    )
+    param_definitions = json.loads(
+        Path("src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
+    )
+    with Path("src/emhass/data/associations.csv").open(newline="", encoding="utf-8") as f:
+        associations = {
+            (row["config_categorie"], row["legacy_parameter_name"], row["parameter"])
+            for row in csv.DictReader(f)
+        }
+
+    assert config_defaults["battery_soc_balance_cost"] == 0.0
+    assert isinstance(config_defaults["battery_soc_balance_cost"], float)
+
+    field = param_definitions["Battery"]["battery_soc_balance_cost"]
+    assert field["input"] == "float"
+    assert field["default_value"] == 0.0
+    assert field["unit"] == "virtual currency/kWh/h"
+    assert ("optim_conf", "battery_soc_balance_cost", "battery_soc_balance_cost") in associations
+
+
+def test_battery_pv_headroom_cost_absent_from_public_surfaces():
+    forbidden = "battery_pv_headroom_cost"
+    config_defaults = json.loads(
+        Path("src/emhass/data/config_defaults.json").read_text(encoding="utf-8")
+    )
+    param_definitions = json.loads(
+        Path("src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
+    )
+    runtime_params = json.loads(
+        Path("src/emhass/static/data/runtime_params.json").read_text(encoding="utf-8")
+    )
+    openapi_doc = json.loads(Path("src/emhass/static/openapi.json").read_text(encoding="utf-8"))
+    with Path("src/emhass/data/associations.csv").open(newline="", encoding="utf-8") as f:
+        association_values = {
+            value
+            for row in csv.DictReader(f)
+            for value in (
+                row["config_categorie"],
+                row["legacy_parameter_name"],
+                row["parameter"],
+            )
+        }
+
+    param_keys = {key for section in param_definitions.values() for key in section}
+    runtime_keys = {key for section in runtime_params.values() for key in section}
+
+    assert forbidden not in config_defaults
+    assert forbidden not in param_keys
+    assert forbidden not in association_values
+    assert forbidden not in runtime_keys
+    assert forbidden not in json.dumps(openapi_doc)
+
+
 def _extract_switch_body(js_src: str, fn_name: str) -> str:
     """Return the body of the first switch block inside fn_name.
 

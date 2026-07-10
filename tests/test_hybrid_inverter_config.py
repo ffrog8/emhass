@@ -208,6 +208,20 @@ def test_extra_block_rejects_site_level_keys(forbidden_key):
         )
 
 
+def test_extra_block_rejects_battery_soc_balance_cost_as_site_level_static_key():
+    block = _valid_block()
+    block["battery_soc_balance_cost"] = 1.0
+
+    with pytest.raises(
+        ValueError,
+        match=r"hybrid_inverter_config_1\.battery_soc_balance_cost.*not block-local",
+    ):
+        _parse(
+            {"hybrid_inverter_config_1": block},
+            multi_inverter_mode=MULTI_INVERTER_MODE_MULTI,
+        )
+
+
 def test_reserved_pv_source_keys_match_expected_contract():
     assert _RESERVED_PV_SOURCE_KEYS == _EXPECTED_RESERVED_PV_SOURCE_KEYS
 
@@ -524,4 +538,17 @@ def test_merge_runtime_rejects_nested_site_level_key():
         merge_inverter_block_runtime_overrides(
             params,
             {"hybrid_inverter_config_1": {"maximum_power_from_grid": 5000}},
+        )
+
+
+def test_merge_runtime_rejects_nested_battery_soc_balance_cost_as_site_level_key():
+    params = _base_params_with_extra_block()
+
+    with pytest.raises(
+        ValueError,
+        match=r"hybrid_inverter_config_1\.battery_soc_balance_cost.*not block-local",
+    ):
+        merge_inverter_block_runtime_overrides(
+            params,
+            {"hybrid_inverter_config_1": {"battery_soc_balance_cost": 1.0}},
         )

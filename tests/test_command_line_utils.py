@@ -4232,6 +4232,40 @@ class TestOptimizationCache(unittest.TestCase):
 
                 self.assertNotEqual(base_key, flag_key)
 
+    def test_cache_key_changes_when_battery_soc_balance_cost_toggles(self):
+        zero_optim_conf = copy.deepcopy(self.optim_conf)
+        positive_optim_conf = copy.deepcopy(self.optim_conf)
+        zero_again_optim_conf = copy.deepcopy(self.optim_conf)
+
+        zero_optim_conf["battery_soc_balance_cost"] = 0.0
+        positive_optim_conf["battery_soc_balance_cost"] = 1.0
+        zero_again_optim_conf["battery_soc_balance_cost"] = 0.0
+
+        zero_key = OptimizationCache._compute_cache_key(
+            zero_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+        positive_key = OptimizationCache._compute_cache_key(
+            positive_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+        zero_again_key = OptimizationCache._compute_cache_key(
+            zero_again_optim_conf,
+            self.plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+            self.num_timesteps,
+        )
+
+        self.assertNotEqual(zero_key, positive_key)
+        self.assertEqual(zero_key, zero_again_key)
+
     def test_cache_clear(self):
         """Test that clear() empties the cache."""
         mock_opt = MagicMock()
