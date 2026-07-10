@@ -148,6 +148,7 @@ _SITE_LEVEL_FORBIDDEN_KEYS = frozenset(
         "photovoltaic_production_sell_price",
         "set_total_pv_sell",
         "capacity_cost_per_kw",
+        "battery_soc_balance_cost",
         "costfun",
         "delta_forecast_daily",
         "optimization_time_step",
