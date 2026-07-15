@@ -33,8 +33,6 @@ _OPTIM_CONF_BLOCK_KEYS = frozenset(
         "battery_dynamic_min",
         "weight_battery_discharge",
         "weight_battery_charge",
-        "battery_stress_cost",
-        "battery_stress_segments",
         "battery_soc_deficit_threshold",
         "battery_soc_deficit_cost",
         "battery_soc_surplus_threshold",
@@ -54,6 +52,8 @@ _PLANT_CONF_BLOCK_KEYS = frozenset(
         "battery_minimum_state_of_charge",
         "battery_maximum_state_of_charge",
         "battery_target_state_of_charge",
+        "battery_stress_cost",
+        "battery_stress_segments",
         "inverter_ac_output_max",
         "inverter_ac_input_max",
         "inverter_efficiency_dc_ac",
@@ -62,6 +62,69 @@ _PLANT_CONF_BLOCK_KEYS = frozenset(
         "inverter_stress_segments",
     }
 )
+
+# Sparse indexed blocks remain sparse. The public-inverter projection owns
+# applying these defaults so omitted indexed values cannot inherit root values.
+_OPTIONAL_OPTIM_CONF_BLOCK_DEFAULTS = {
+    "set_use_pv": False,
+    "set_use_battery": False,
+    "set_battery_dynamic": False,
+    "battery_dynamic_max": 0.9,
+    "battery_dynamic_min": -0.9,
+    "weight_battery_discharge": 0.0,
+    "weight_battery_charge": 0.0,
+    "battery_soc_deficit_threshold": 0.40,
+    "battery_soc_deficit_cost": 0.0,
+    "battery_soc_surplus_threshold": 0.90,
+    "battery_soc_surplus_cost": 0.0,
+}
+
+_OPTIONAL_PLANT_CONF_BLOCK_DEFAULTS = {
+    "inverter_is_hybrid": False,
+    "compute_curtailment": False,
+    "battery_stress_cost": 0.0,
+    "battery_stress_segments": 10,
+    "inverter_stress_cost": 0.0,
+    "inverter_stress_segments": 10,
+}
+
+
+def project_public_inverter_config(
+    optim_conf: Mapping[str, object],
+    plant_conf: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Copy the active public inverter into the flat root configuration.
+
+    Multi-inverter parsing retains indexed blocks for the optimizer, while legacy
+    forecast and setup paths read the flat dictionaries. Projecting block 1 keeps
+    those paths from inheriting inactive root inverter values. Single mode and
+    incomplete parsed mappings retain their flat values unchanged.
+    """
+    projected_optim_conf = dict(optim_conf)
+    projected_plant_conf = dict(plant_conf)
+    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if (
+        resolve_multi_inverter_mode(plant_conf) != MULTI_INVERTER_MODE_MULTI
+        or not isinstance(parsed_blocks, Mapping)
+    ):
+        return projected_optim_conf, projected_plant_conf
+
+    first_inverter = parsed_blocks.get(1)
+    if not isinstance(first_inverter, InverterBlockConfig):
+        return projected_optim_conf, projected_plant_conf
+
+    for key in _OPTIM_CONF_BLOCK_KEYS:
+        projected_optim_conf.pop(key, None)
+    for key in _PLANT_CONF_BLOCK_KEYS:
+        projected_plant_conf.pop(key, None)
+    projected_optim_conf.update(_OPTIONAL_OPTIM_CONF_BLOCK_DEFAULTS)
+    projected_plant_conf.update(_OPTIONAL_PLANT_CONF_BLOCK_DEFAULTS)
+    projected_optim_conf.update(first_inverter.optim_conf)
+    projected_plant_conf.update(first_inverter.plant_conf)
+    projected_plant_conf[MULTI_INVERTER_MODE_KEY] = MULTI_INVERTER_MODE_MULTI
+    projected_plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = parsed_blocks
+    return projected_optim_conf, projected_plant_conf
+
 
 _REQUIRED_BATTERY_KEYS = frozenset(
     {
@@ -439,6 +502,13 @@ def _validate_runtime_soc_final(
     return numeric
 
 
+def _validate_runtime_soc_target(value: object, block_index: int, key: str) -> float:
+    """Validate the raw nested target before the optimizer applies effective bounds."""
+    if isinstance(value, bool | str | bytes):
+        raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be numeric")
+    return _validate_soc(value, block_index, key)
+
+
 def _validate_runtime_timestep(value: object, block_index: int, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"hybrid_inverter_config_{block_index}.{key} must be an integer")
@@ -490,7 +560,7 @@ def _validate_block_runtime_conf(
         elif key == "soc_final":
             validated[key] = _validate_runtime_soc_final(value, index, key, plant_conf)
         elif key == "soc_target":
-            validated[key] = _validate_soc(value, index, key)
+            validated[key] = _validate_runtime_soc_target(value, index, key)
         elif key == "soc_target_timestep":
             validated[key] = _validate_runtime_timestep(value, index, key)
         elif key in _RUNTIME_PV_BLOCK_KEYS:
@@ -733,16 +803,30 @@ def has_extra_inverter_blocks(plant_conf: Mapping[str, object]) -> bool:
     return any(index != 0 for index in blocks)
 
 
+def _active_indexed_inverter_blocks(
+    plant_conf: Mapping[str, object],
+) -> tuple[InverterBlockConfig, ...]:
+    """Return parsed public inverter blocks 1..N, excluding the legacy root."""
+    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
+    if not isinstance(parsed_blocks, Mapping):
+        return ()
+    return tuple(
+        block
+        for index, block in parsed_blocks.items()
+        if isinstance(index, int)
+        and not isinstance(index, bool)
+        and index >= 1
+        and isinstance(block, InverterBlockConfig)
+    )
+
+
 def is_public_safe_multi_block_battery_model(
     optim_conf: Mapping[str, object],
     plant_conf: Mapping[str, object],
 ) -> bool:
     """Return whether parsed extra blocks match the public Step 6 battery scope."""
-    if not has_extra_inverter_blocks(plant_conf):
-        return False
-    if not optim_conf.get("set_use_battery"):
-        return False
-    if optim_conf.get("set_use_pv"):
+    active_blocks = _active_indexed_inverter_blocks(plant_conf)
+    if not active_blocks:
         return False
     if optim_conf.get("battery_mode_lock", "site") != "site":
         return False
@@ -750,18 +834,8 @@ def is_public_safe_multi_block_battery_model(
         return False
     if optim_conf.get("set_nodischarge_to_grid"):
         return False
-    if plant_conf.get("inverter_is_hybrid"):
-        return False
-    if plant_conf.get("compute_curtailment"):
-        return False
 
-    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
-    if not isinstance(parsed_blocks, Mapping):
-        return False
-
-    for index, block in parsed_blocks.items():
-        if index == 0:
-            continue
+    for block in active_blocks:
         if not block.set_use_battery:
             return False
         if block.set_use_pv:
@@ -778,24 +852,15 @@ def is_public_safe_multi_block_hybrid_model(
     plant_conf: Mapping[str, object],
 ) -> bool:
     """Return whether parsed extra blocks match the public split-PV hybrid shape."""
-    if not has_extra_inverter_blocks(plant_conf):
+    active_blocks = _active_indexed_inverter_blocks(plant_conf)
+    if not active_blocks:
         return False
     if optim_conf.get("battery_mode_lock", "site") != "site":
         return False
     if plant_conf.get("multi_hybrid_inverter_pv_mode") != "split_pv":
         return False
-    if not optim_conf.get("set_use_battery"):
-        return False
-    if not plant_conf.get("inverter_is_hybrid"):
-        return False
 
-    parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
-    if not isinstance(parsed_blocks, Mapping):
-        return False
-
-    for index, block in parsed_blocks.items():
-        if index == 0:
-            continue
+    for block in active_blocks:
         if not block.set_use_battery:
             return False
         if not block.plant_conf.get("inverter_is_hybrid"):

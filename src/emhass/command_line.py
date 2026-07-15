@@ -35,6 +35,7 @@ from emhass.inverter_blocks import (
     has_extra_inverter_blocks,
     inverter_block_structure_signature,
     is_public_safe_multi_block_model,
+    project_public_inverter_config,
 )
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
@@ -1479,17 +1480,14 @@ async def set_input_data_dict(
             params = dict(orjson.loads(params))
     else:
         params = {}
-    # Publish-only actions read saved results; they need publishing config but no
-    # optimiser horizon or multi-inverter runtime validation.
+    # publish-data reads saved results and export-influxdb-to-csv retrieves InfluxDB data.
+    # Neither action constructs an optimizer horizon.
     actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
     if set_type == "publish-data":
         params, runtimeparams = _publish_data_input_prep_params(params, runtimeparams, logger)
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
-    has_configured_extra_inverter_blocks = (
-        set_type not in actions_without_fcst_or_opt and has_extra_inverter_blocks(plant_conf)
-    )
     (
         params,
         retrieve_hass_conf,
@@ -1507,17 +1505,25 @@ async def set_input_data_dict(
     )
     if isinstance(params, str):
         params = dict(orjson.loads(params))
-    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
-        battery_mode_lock = optim_conf.get("battery_mode_lock", "site")
-        if battery_mode_lock != "site":
-            raise NotImplementedError(
-                f"battery_mode_lock {battery_mode_lock!r} is not supported "
-                "for multi-block battery solves"
-            )
-        if not is_public_safe_multi_block_model(optim_conf, plant_conf):
-            raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
-    else:
-        plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+    if set_type not in actions_without_fcst_or_opt:
+        if has_extra_inverter_blocks(plant_conf):
+            battery_mode_lock = optim_conf.get("battery_mode_lock", "site")
+            if battery_mode_lock != "site":
+                raise NotImplementedError(
+                    f"battery_mode_lock {battery_mode_lock!r} is not supported "
+                    "for multi-block battery solves"
+                )
+            if not is_public_safe_multi_block_model(optim_conf, plant_conf):
+                raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+        else:
+            plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+        optim_conf, plant_conf = project_public_inverter_config(optim_conf, plant_conf)
+        transport_params = dict(params)
+        transport_params["optim_conf"] = optim_conf
+        transport_plant_conf = dict(plant_conf)
+        transport_plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+        transport_params["plant_conf"] = transport_plant_conf
+        params = orjson.loads(orjson.dumps(transport_params, default=str))
     log_runtime_banner(logger, optim_conf=optim_conf)
     # Initialize Core Objects
     rh = RetrieveHass(
@@ -1546,7 +1552,8 @@ async def set_input_data_dict(
         params = dict(orjson.loads(params))
     costfun = optim_conf.get("costfun", costfun)
     # Two-tier guard:
-    #   - actions_without_fcst_or_opt: read saved results only; build neither.
+    #   - actions_without_fcst_or_opt: publish saved results or retrieve InfluxDB data;
+    #     build neither Forecast nor Optimization.
     #   - actions_skip_optim_cache: need a Forecast object but no Optimization.
     #     Keeping these out of the OptimizationCache path stops them poisoning
     #     the cache key with config-default values that a subsequent
@@ -1737,7 +1744,6 @@ async def weather_forecast_cache(
     """
     # Parsing yaml
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
-    has_configured_extra_inverter_blocks = has_extra_inverter_blocks(plant_conf)
     # Treat runtimeparams
     (
         params,
@@ -1754,8 +1760,9 @@ async def weather_forecast_cache(
         logger,
         emhass_conf,
     )
-    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
+    if has_extra_inverter_blocks(plant_conf):
         raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
     # Make sure weather_forecast_cache is true
     if (params is not None) and (params != "null"):
         params = orjson.loads(params)

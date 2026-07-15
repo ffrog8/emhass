@@ -18,6 +18,7 @@ from emhass import utils
 from emhass.forecast import Forecast
 from emhass.inverter_blocks import (
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
+    merge_inverter_block_runtime_overrides,
     parse_inverter_block_configs,
 )
 from emhass.optimization import Optimization
@@ -540,6 +541,200 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             total_energy += pd.Series(diagnostics["stored_energy"], index=opt_res.index)
             total_capacity += capacity
         return total_energy / total_capacity
+
+    @staticmethod
+    def _capacity_weighted_soc_imbalance(opt):
+        """Calculate the fleet imbalance independently of optimizer internals."""
+        block_diagnostics = opt._battery_block_diagnostics["blocks"]
+        capacities = {
+            index: opt.inverter_block_config[index].plant_conf[
+                "battery_nominal_energy_capacity"
+            ]
+            for index in block_diagnostics
+        }
+        total_capacity = sum(capacities.values())
+        fleet_energy = sum(
+            block_diagnostics[index]["stored_energy"] for index in capacities
+        )
+        fleet_soc = fleet_energy / total_capacity
+        return 0.5 * sum(
+            np.abs(
+                block_diagnostics[index]["stored_energy"]
+                - capacity * fleet_soc
+            ).sum()
+            / 1000.0
+            for index, capacity in capacities.items()
+        )
+
+    @staticmethod
+    def _real_grid_cost(opt, opt_res, df):
+        """Calculate grid economics without the SOC-balance objective term."""
+        return 0.001 * opt.time_step * np.sum(
+            df[opt.var_load_cost].values * opt_res["P_grid_pos"].values
+            + df[opt.var_prod_price].values * opt_res["P_grid_neg"].values
+        )
+
+    @staticmethod
+    def _result_real_grid_cost(opt, opt_res):
+        """Calculate grid economics from published result columns."""
+        return 0.001 * opt.time_step * np.sum(
+            opt_res["unit_load_cost"].values * opt_res["P_grid_pos"].values
+            + opt_res["unit_prod_price"].values * opt_res["P_grid_neg"].values
+        )
+
+    def _run_public_runtime_soc_target_case(
+        self,
+        *,
+        submitted_target,
+        expected_target,
+    ):
+        """Exercise one indexed-root target through merge, parse, and solve."""
+        df = self._make_multi_block_battery_df(periods=2)
+        optim_conf, plant_conf = self._battery_only_confs()
+        first = self._extra_battery_block(
+            soc_min=0.1,
+            soc_max=0.9,
+            soc_target=expected_target,
+        )
+        input_conf = {
+            "plant_conf": {"multi_inverter_mode": "multi"},
+            "hybrid_inverter_config_1": first,
+        }
+        runtime_conf = merge_inverter_block_runtime_overrides(
+            input_conf,
+            {
+                "hybrid_inverter_config_1": {
+                    "battery_minimum_state_of_charge": 0.3,
+                    "battery_maximum_state_of_charge": 0.7,
+                    "soc_init": expected_target,
+                    "soc_final": expected_target,
+                    "soc_target": submitted_target,
+                }
+            },
+        )
+        parse_inverter_block_configs(input_conf, optim_conf, plant_conf, runtime_conf)
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+        with mock.patch.object(opt.logger, "warning") as warning_mock:
+            opt.perform_optimization(
+                df,
+                df["p_pv_forecast"].values,
+                df["p_load_forecast"].values,
+                df[opt.var_load_cost].values,
+                df[opt.var_prod_price].values,
+            )
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        return opt, warning_mock
+
+    def _run_soc_balance_cycle_case(self, *, capacities, balance_cost):
+        """Run a two-step cycle with a small, deterministic efficiency preference."""
+        df = self._make_multi_block_battery_df(periods=2)
+        df["p_load_forecast"] = [0.0, 800.0]
+        df["unit_load_cost"] = [0.10, 1.00]
+        df["unit_prod_price"] = 0.0
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf.update(
+            {
+                "battery_mode_lock": "site",
+                "battery_soc_balance_cost": balance_cost,
+            }
+        )
+        first = self._extra_battery_block(capacity=capacities[0])
+        second = self._extra_battery_block(capacity=capacities[1])
+        # The second inverter is only 1% less efficient. At zero balance cost,
+        # this makes the first inverter's cycle strictly cheaper without relying
+        # on a solver-selected equal-cost vertex.
+        second["battery_charge_efficiency"] = 0.99
+        second["battery_discharge_efficiency"] = 0.99
+        parse_inverter_block_configs(
+            {
+                "hybrid_inverter_config_1": first,
+                "hybrid_inverter_config_2": second,
+            },
+            optim_conf,
+            plant_conf,
+            {
+                1: {"soc_init": 0.5, "soc_final": 0.5},
+                2: {"soc_init": 0.5, "soc_final": 0.5},
+            },
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        np.testing.assert_allclose(
+            opt_res["P_batt"].values,
+            opt._battery_block_diagnostics["p_batt_total"],
+            atol=1e-6,
+        )
+        for block_diagnostics in opt._battery_block_diagnostics["blocks"].values():
+            self.assertAlmostEqual(
+                block_diagnostics["soc"][-1],
+                0.5,
+                delta=1e-6,
+            )
+        return opt, opt_res, df
+
+    def _run_multi_block_curtailment_case(self, *, active_blocks, epsilon=None):
+        """Run a split-PV curtailment case for the requested public blocks."""
+        import emhass.optimization as opt_module
+
+        periods = 8
+        df = self._make_multi_block_hybrid_df(
+            periods=periods,
+            root_pv=0.0,
+            load=200.0 * sum(active_blocks),
+            load_cost=0.2,
+            prod_price=0.0,
+        )
+        optim_conf, plant_conf = self._hybrid_confs()
+        optim_conf["number_of_deferrable_loads"] = 0
+        plant_conf["maximum_power_to_grid"] = 0.0
+        block_confs = {}
+        runtime_confs = {}
+        for index, enabled in enumerate(active_blocks, start=1):
+            block_confs[index] = self._extra_hybrid_block(
+                compute_curtailment=enabled,
+                capacity=2000,
+                charge_power=2000,
+                discharge_power=2000,
+                ac_output=200,
+                ac_input=200,
+            )
+            runtime_confs[index] = {
+                "soc_init": 0.0 if enabled else 0.5,
+                "soc_final": 1.0 if enabled else 0.5,
+                "pv_power_forecast": [1200.0 if enabled else 0.0] * periods,
+            }
+        self._parse_hybrid_blocks(
+            optim_conf,
+            plant_conf,
+            block_confs=block_confs,
+            runtime_confs=runtime_confs,
+        )
+
+        patch_value = (
+            opt_module.CURTAILMENT_TIEBREAK_EPS if epsilon is None else epsilon
+        )
+        with mock.patch.object(
+            opt_module,
+            "CURTAILMENT_TIEBREAK_EPS",
+            patch_value,
+        ):
+            opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+            opt_res = opt.perform_optimization(
+                df,
+                df["p_pv_forecast"].values,
+                df["p_load_forecast"].values,
+                df[opt.var_load_cost].values,
+                df[opt.var_prod_price].values,
+            )
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        return opt, opt_res
 
     def _aggregate_stored_energy_after_each_step(self, opt):
         diagnostics = opt._battery_block_diagnostics
@@ -1185,6 +1380,302 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(opt.inverter_block_config), [0])
         self.assertEqual(opt.inverter_block_config[0].index, 1)
 
+    def test_public_multi_root_projection_drops_legacy_block_values(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        site_grid_import_limit = plant_conf["maximum_power_from_grid"]
+        optim_conf.update(
+            {
+                "set_battery_dynamic": True,
+                "battery_dynamic_min": -0.2,
+                "battery_dynamic_max": 0.2,
+                "weight_battery_charge": 0.7,
+                "weight_battery_discharge": 0.6,
+                "battery_soc_deficit_cost": 0.5,
+                "battery_soc_surplus_cost": 0.4,
+            }
+        )
+        plant_conf.update(
+            {
+                "inverter_is_hybrid": True,
+                "compute_curtailment": True,
+                "battery_stress_cost": 0.9,
+                "battery_stress_segments": 3,
+                "inverter_stress_cost": 0.8,
+                "inverter_stress_segments": 4,
+            }
+        )
+        first = self._extra_battery_block()
+        for key in (
+            "set_battery_dynamic",
+            "battery_dynamic_min",
+            "battery_dynamic_max",
+            "weight_battery_charge",
+            "weight_battery_discharge",
+            "battery_soc_deficit_threshold",
+            "battery_soc_deficit_cost",
+            "battery_soc_surplus_threshold",
+            "battery_soc_surplus_cost",
+            "inverter_is_hybrid",
+            "compute_curtailment",
+            "battery_stress_cost",
+            "battery_stress_segments",
+            "inverter_stress_cost",
+            "inverter_stress_segments",
+        ):
+            first.pop(key, None)
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": first},
+            optim_conf,
+            plant_conf,
+        )
+
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        self.assertFalse(opt.optim_conf["set_battery_dynamic"])
+        self.assertEqual(opt.optim_conf["battery_dynamic_min"], -0.9)
+        self.assertEqual(opt.optim_conf["battery_dynamic_max"], 0.9)
+        self.assertEqual(opt.optim_conf["weight_battery_charge"], 0.0)
+        self.assertEqual(opt.optim_conf["weight_battery_discharge"], 0.0)
+        self.assertEqual(opt.optim_conf["battery_soc_deficit_cost"], 0.0)
+        self.assertEqual(opt.optim_conf["battery_soc_surplus_cost"], 0.0)
+        self.assertFalse(opt.plant_conf["inverter_is_hybrid"])
+        self.assertFalse(opt.plant_conf["compute_curtailment"])
+        self.assertEqual(opt.plant_conf["battery_stress_cost"], 0.0)
+        self.assertEqual(opt.plant_conf["battery_stress_segments"], 10)
+        self.assertEqual(opt.plant_conf["inverter_stress_cost"], 0.0)
+        self.assertEqual(opt.plant_conf["inverter_stress_segments"], 10)
+        self.assertFalse(opt.optim_conf["set_nocharge_from_grid"])
+        self.assertEqual(opt.plant_conf["maximum_power_from_grid"], site_grid_import_limit)
+        self.assertIs(opt.inverter_block_config[0].optim_conf, opt.optim_conf)
+        self.assertIs(opt.inverter_block_config[0].plant_conf, opt.plant_conf)
+
+    def test_public_multi_root_projection_uses_explicit_indexed_values(self):
+        optim_conf, plant_conf = self._battery_only_confs()
+        optim_conf.update(
+            {
+                "weight_battery_charge": 0.7,
+                "weight_battery_discharge": 0.6,
+            }
+        )
+        plant_conf.update({"battery_stress_cost": 0.9, "battery_stress_segments": 3})
+        first = self._extra_battery_block()
+        first.update(
+            {
+                "weight_battery_charge": 0.11,
+                "weight_battery_discharge": 0.22,
+                "battery_stress_cost": 0.33,
+                "battery_stress_segments": 7,
+            }
+        )
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": first},
+            optim_conf,
+            plant_conf,
+        )
+
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        self.assertEqual(opt.optim_conf["weight_battery_charge"], 0.11)
+        self.assertEqual(opt.optim_conf["weight_battery_discharge"], 0.22)
+        self.assertEqual(opt.plant_conf["battery_stress_cost"], 0.33)
+        self.assertEqual(opt.plant_conf["battery_stress_segments"], 7)
+
+    def test_public_inverter_1_inverter_stress_cost_constrains_configured_penalty(self):
+        df = self._make_multi_block_hybrid_df(
+            periods=2,
+            root_pv=0.0,
+            load=500.0,
+            load_cost=0.2,
+            prod_price=0.0,
+        )
+        optim_conf, plant_conf = self._hybrid_confs()
+        optim_conf["number_of_deferrable_loads"] = 0
+        plant_conf["maximum_power_to_grid"] = 0.0
+        first = self._extra_hybrid_block(
+            set_use_pv=True,
+            capacity=1000,
+            ac_output=1000,
+            ac_input=1000,
+        )
+        first.update(
+            {
+                "weight_battery_charge": 1.0,
+                "weight_battery_discharge": 1.0,
+                "inverter_stress_cost": 1.0,
+            }
+        )
+        parse_inverter_block_configs(
+            {"hybrid_inverter_config_1": first},
+            optim_conf,
+            plant_conf,
+            {
+                1: {
+                    "soc_init": 0.5,
+                    "soc_final": 0.5,
+                    "pv_power_forecast": [500.0, 500.0],
+                }
+            },
+        )
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+
+        # At 500 W on a 1 kW inverter, the configured 1.0/kWh quadratic
+        # envelope is exactly 0.125 per half-hour timestep.
+        expected_penalty = np.full(2, 0.125)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        np.testing.assert_allclose(opt.vars["p_hybrid_inverter"].value, 500.0, atol=1e-6)
+        np.testing.assert_allclose(
+            opt.vars["inv_stress_cost"].value,
+            expected_penalty,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            opt_res["inv_stress_cost"].values,
+            expected_penalty,
+            atol=1e-6,
+        )
+        self.assertIn(
+            "inv_stress_cost",
+            {variable.name() for variable in opt.prob.objective.variables()},
+        )
+
+    def test_public_multi_root_runtime_soc_target_clamps_to_effective_bounds(self):
+        df = self._make_multi_block_battery_df(periods=2)
+        optim_conf, plant_conf = self._battery_only_confs()
+        first = self._extra_battery_block(soc_min=0.1, soc_max=0.9, soc_target=0.3)
+        input_conf = {
+            "plant_conf": {"multi_inverter_mode": "multi"},
+            "hybrid_inverter_config_1": first,
+        }
+        runtime_conf = merge_inverter_block_runtime_overrides(
+            input_conf,
+            {
+                "hybrid_inverter_config_1": {
+                    "battery_minimum_state_of_charge": 0.3,
+                    "battery_maximum_state_of_charge": 0.4,
+                    "soc_init": 0.3,
+                    "soc_final": 0.4,
+                    "soc_target": 0.75,
+                }
+            },
+        )
+        parse_inverter_block_configs(input_conf, optim_conf, plant_conf, runtime_conf)
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        with self.assertLogs(level="WARNING") as logs:
+            opt.perform_optimization(
+                df,
+                df["p_pv_forecast"].values,
+                df["p_load_forecast"].values,
+                df[opt.var_load_cost].values,
+                df[opt.var_prod_price].values,
+            )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertEqual(opt.inverter_block_config[0].runtime_conf["soc_target"], 0.4)
+        self.assertAlmostEqual(opt.param_soc_target_floor.value[-1], 400.0)
+        self.assertTrue(
+            any(
+                "hybrid_inverter_config_1.soc_target=0.75" in line
+                and "clamping to soc_target=0.4" in line
+                for line in logs.output
+            ),
+            msg=f"expected indexed target clamp warning, got: {logs.output}",
+        )
+
+    def test_extra_runtime_soc_target_clamps_to_effective_bounds(self):
+        df = self._make_multi_block_battery_df(periods=2)
+        optim_conf, plant_conf = self._battery_only_confs()
+        first = self._extra_battery_block(soc_target=0.5)
+        second = self._extra_battery_block(soc_min=0.1, soc_max=0.9, soc_target=0.3)
+        input_conf = {
+            "plant_conf": {"multi_inverter_mode": "multi"},
+            "hybrid_inverter_config_1": first,
+            "hybrid_inverter_config_2": second,
+        }
+        runtime_conf = merge_inverter_block_runtime_overrides(
+            input_conf,
+            {
+                "hybrid_inverter_config_1": {"soc_init": 0.5, "soc_final": 0.5},
+                "hybrid_inverter_config_2": {
+                    "battery_minimum_state_of_charge": 0.3,
+                    "battery_maximum_state_of_charge": 0.4,
+                    "soc_init": 0.3,
+                    "soc_final": 0.4,
+                    "soc_target": 0.75,
+                },
+            },
+        )
+        parse_inverter_block_configs(input_conf, optim_conf, plant_conf, runtime_conf)
+        opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
+
+        with self.assertLogs(level="WARNING") as logs:
+            opt.perform_optimization(
+                df,
+                df["p_pv_forecast"].values,
+                df["p_load_forecast"].values,
+                df[opt.var_load_cost].values,
+                df[opt.var_prod_price].values,
+            )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertEqual(opt.inverter_block_config[2].runtime_conf["soc_target"], 0.4)
+        self.assertAlmostEqual(
+            opt.param_extra_block_battery[2]["soc_target_floor"].value[-1],
+            400.0,
+        )
+        self.assertTrue(
+            any(
+                "hybrid_inverter_config_2.soc_target=0.75" in line
+                and "clamping to soc_target=0.4" in line
+                for line in logs.output
+            ),
+            msg=f"expected indexed target clamp warning, got: {logs.output}",
+        )
+
+    def test_public_multi_root_runtime_soc_target_clamps_below_effective_minimum(self):
+        opt, warning_mock = self._run_public_runtime_soc_target_case(
+            submitted_target=0.1,
+            expected_target=0.3,
+        )
+
+        self.assertEqual(opt.inverter_block_config[0].runtime_conf["soc_target"], 0.3)
+        self.assertAlmostEqual(opt.param_soc_target_floor.value[-1], 300.0)
+        warning_mock.assert_called_once_with(
+            "Passed hybrid_inverter_config_%s.soc_target=%s is outside [%s, %s], "
+            "clamping to soc_target=%s",
+            1,
+            0.1,
+            0.3,
+            0.7,
+            0.3,
+        )
+
+    def test_public_multi_root_runtime_soc_target_preserves_in_bounds_and_boundaries(self):
+        for target in (0.3, 0.5, 0.7):
+            with self.subTest(target=target):
+                opt, warning_mock = self._run_public_runtime_soc_target_case(
+                    submitted_target=target,
+                    expected_target=target,
+                )
+
+                self.assertEqual(
+                    opt.inverter_block_config[0].runtime_conf["soc_target"],
+                    target,
+                )
+                self.assertAlmostEqual(
+                    opt.param_soc_target_floor.value[-1],
+                    target * 1000.0,
+                )
+                warning_mock.assert_not_called()
+
     def test_battery_soc_balance_cost_rejects_invalid_top_level_values(self):
         for value in (-0.01, float("nan"), float("inf"), "not-a-number", "1.0"):
             with self.subTest(value=value):
@@ -1691,6 +2182,172 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             )
             actual_deviation = opt._solver_value_array(deviation_vars[public_index])
             np.testing.assert_allclose(actual_deviation, expected_deviation, atol=1e-6)
+
+    def test_multi_block_battery_soc_balance_cost_reduces_equal_capacity_dispatch_imbalance(
+        self,
+    ):
+        unbalanced, unbalanced_result, df = self._run_soc_balance_cycle_case(
+            capacities=(1000, 1000),
+            balance_cost=0.0,
+        )
+        balanced, balanced_result, _same_df = self._run_soc_balance_cycle_case(
+            capacities=(1000, 1000),
+            # At the 0.10 tariff, moving 1 W of the cycle to the 99%-efficient
+            # inverter costs at most 1.02e-6 in the real objective. This 1.0
+            # balance cost gains about 2.5e-4 from reducing the first-step
+            # imbalance, so it is analytically stronger than the asymmetry.
+            balance_cost=1.0,
+        )
+
+        unbalanced_imbalance = self._capacity_weighted_soc_imbalance(unbalanced)
+        balanced_imbalance = self._capacity_weighted_soc_imbalance(balanced)
+
+        pd.testing.assert_frame_equal(df, _same_df)
+        self.assertEqual(
+            {
+                key: value
+                for key, value in unbalanced.optim_conf.items()
+                if key != "battery_soc_balance_cost"
+            },
+            {
+                key: value
+                for key, value in balanced.optim_conf.items()
+                if key != "battery_soc_balance_cost"
+            },
+        )
+        self.assertGreater(unbalanced_imbalance, 1e-3)
+        self.assertLess(balanced_imbalance, unbalanced_imbalance - 1e-3)
+        self.assertTrue(np.isfinite(self._real_grid_cost(unbalanced, unbalanced_result, df)))
+        self.assertGreaterEqual(
+            self._real_grid_cost(balanced, balanced_result, _same_df),
+            self._real_grid_cost(unbalanced, unbalanced_result, df) - 1e-8,
+        )
+        self.assertEqual(unbalanced._battery_soc_balance_deviation_vars, {})
+        self.assertEqual(sorted(balanced._battery_soc_balance_deviation_vars), [1, 2])
+
+    def test_multi_block_battery_soc_balance_cost_uses_soc_fraction_for_unequal_capacity(
+        self,
+    ):
+        unbalanced, unbalanced_result, df = self._run_soc_balance_cycle_case(
+            capacities=(1000, 2000),
+            balance_cost=0.0,
+        )
+        balanced, balanced_result, _same_df = self._run_soc_balance_cycle_case(
+            capacities=(1000, 2000),
+            balance_cost=1.0,
+        )
+
+        unbalanced_imbalance = self._capacity_weighted_soc_imbalance(unbalanced)
+        balanced_imbalance = self._capacity_weighted_soc_imbalance(balanced)
+        balanced_blocks = balanced._battery_block_diagnostics["blocks"]
+        first_soc = balanced_blocks[0]["stored_energy"][0] / 1000.0
+        second_soc = balanced_blocks[2]["stored_energy"][0] / 2000.0
+        first_energy = balanced_blocks[0]["stored_energy"][0]
+        second_energy = balanced_blocks[2]["stored_energy"][0]
+
+        pd.testing.assert_frame_equal(df, _same_df)
+        self.assertEqual(
+            {
+                key: value
+                for key, value in unbalanced.optim_conf.items()
+                if key != "battery_soc_balance_cost"
+            },
+            {
+                key: value
+                for key, value in balanced.optim_conf.items()
+                if key != "battery_soc_balance_cost"
+            },
+        )
+        self.assertGreater(unbalanced_imbalance, 1e-3)
+        self.assertLess(balanced_imbalance, unbalanced_imbalance - 1e-3)
+        self.assertTrue(np.isfinite(self._real_grid_cost(unbalanced, unbalanced_result, df)))
+        self.assertGreaterEqual(
+            self._real_grid_cost(balanced, balanced_result, _same_df),
+            self._real_grid_cost(unbalanced, unbalanced_result, df) - 1e-8,
+        )
+        self.assertLess(abs(first_soc - second_soc), 1e-3)
+        self.assertGreater(abs(first_energy - second_energy), 1.0)
+
+    def test_multi_block_curtailment_tiebreak_is_signed_and_energy_cost_invariant(self):
+        import emhass.optimization as opt_module
+
+        positive_epsilon = opt_module.CURTAILMENT_TIEBREAK_EPS
+        for active_blocks in ((True, False), (False, True), (True, True)):
+            with self.subTest(active_blocks=active_blocks):
+                late_opt, late_result = self._run_multi_block_curtailment_case(
+                    active_blocks=active_blocks,
+                    epsilon=positive_epsilon,
+                )
+                early_opt, early_result = self._run_multi_block_curtailment_case(
+                    active_blocks=active_blocks,
+                    epsilon=-positive_epsilon,
+                )
+                zero_opt, zero_result = self._run_multi_block_curtailment_case(
+                    active_blocks=active_blocks,
+                    epsilon=0.0,
+                )
+
+                objective_variable_names = {
+                    variable.name() for variable in late_opt.prob.objective.variables()
+                }
+                for public_index, enabled in enumerate(active_blocks, start=1):
+                    column = f"P_PV_curtailment_{public_index}"
+                    objective_name = (
+                        "p_pv_curtailment"
+                        if public_index == 1
+                        else f"p_pv_curtailment_{public_index}"
+                    )
+                    if not enabled:
+                        self.assertNotIn(objective_name, objective_variable_names)
+                        self.assertNotIn(column, late_result)
+                        self.assertNotIn(column, early_result)
+                        self.assertNotIn(column, zero_result)
+                        continue
+
+                    self.assertIn(objective_name, objective_variable_names)
+                    late_curtailment = late_result[column].values
+                    early_curtailment = early_result[column].values
+                    zero_curtailment = zero_result[column].values
+                    timestep_indexes = np.arange(len(late_curtailment))
+                    late_energy = late_curtailment.sum() * late_opt.time_step
+                    zero_energy = zero_curtailment.sum() * zero_opt.time_step
+                    self.assertGreater(late_energy, 1e-6)
+                    self.assertGreater(early_curtailment.sum(), 1e-6)
+                    self.assertGreater(zero_energy, 1e-6)
+                    self.assertAlmostEqual(late_energy, zero_energy, delta=1e-4)
+                    late_center = (
+                        np.dot(timestep_indexes, late_curtailment)
+                        / late_curtailment.sum()
+                    )
+                    early_center = (
+                        np.dot(timestep_indexes, early_curtailment)
+                        / early_curtailment.sum()
+                    )
+                    self.assertGreater(late_center, early_center + 1e-3)
+
+                self.assertAlmostEqual(
+                    late_result["P_PV_curtailment"].sum() * late_opt.time_step,
+                    zero_result["P_PV_curtailment"].sum() * zero_opt.time_step,
+                    delta=1e-4,
+                )
+                self.assertAlmostEqual(
+                    self._result_real_grid_cost(late_opt, late_result),
+                    self._result_real_grid_cost(zero_opt, zero_result),
+                    delta=1e-7,
+                )
+
+        none_opt, none_result = self._run_multi_block_curtailment_case(
+            active_blocks=(False, False),
+            epsilon=positive_epsilon,
+        )
+        objective_variable_names = {
+            variable.name() for variable in none_opt.prob.objective.variables()
+        }
+        self.assertNotIn("p_pv_curtailment", objective_variable_names)
+        self.assertNotIn("p_pv_curtailment_2", objective_variable_names)
+        self.assertNotIn("P_PV_curtailment_1", none_result)
+        self.assertNotIn("P_PV_curtailment_2", none_result)
+        self.assertNotIn("P_PV_curtailment", none_result)
 
     def test_multi_block_battery_mode_lock_site_three_blocks_24_steps_performance_smoke(self):
         optim_conf, plant_conf = self._battery_only_confs()
@@ -2734,18 +3391,25 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         for key, value in unsupported_overrides.items():
             with self.subTest(key=key):
                 optim_conf, plant_conf = self._hybrid_confs()
+                root = self._extra_hybrid_block(set_use_pv=True)
                 extra = self._extra_hybrid_block(set_use_pv=True)
                 extra[key] = value
-                self._parse_extra_hybrid_block(
+                self._parse_hybrid_blocks(
                     optim_conf,
                     plant_conf,
-                    extra_block=extra,
-                    extra_runtime={
-                        "soc_init": 0.5,
-                        "soc_final": 0.5,
-                        "pv_power_forecast": [0.0] * 2,
+                    block_confs={1: root, 2: extra},
+                    runtime_confs={
+                        1: {
+                            "soc_init": 0.5,
+                            "soc_final": 0.5,
+                            "pv_power_forecast": [0.0] * 2,
+                        },
+                        2: {
+                            "soc_init": 0.5,
+                            "soc_final": 0.5,
+                            "pv_power_forecast": [0.0] * 2,
+                        },
                     },
-                    periods=2,
                 )
 
                 with self.assertRaisesRegex(NotImplementedError, "multi-block battery model"):
@@ -2759,18 +3423,25 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         for key, value in unsupported_overrides.items():
             with self.subTest(key=key):
                 optim_conf, plant_conf = self._hybrid_confs()
+                root = self._extra_hybrid_block(set_use_pv=True)
                 extra = self._extra_hybrid_block(set_use_pv=True)
                 extra[key] = value
-                self._parse_extra_hybrid_block(
+                self._parse_hybrid_blocks(
                     optim_conf,
                     plant_conf,
-                    extra_block=extra,
-                    extra_runtime={
-                        "soc_init": 0.5,
-                        "soc_final": 0.5,
-                        "pv_power_forecast": [0.0] * 2,
+                    block_confs={1: root, 2: extra},
+                    runtime_confs={
+                        1: {
+                            "soc_init": 0.5,
+                            "soc_final": 0.5,
+                            "pv_power_forecast": [0.0] * 2,
+                        },
+                        2: {
+                            "soc_init": 0.5,
+                            "soc_final": 0.5,
+                            "pv_power_forecast": [0.0] * 2,
+                        },
                     },
-                    periods=2,
                 )
 
                 with self.assertRaisesRegex(NotImplementedError, "inverter_stress"):

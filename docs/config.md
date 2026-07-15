@@ -318,9 +318,10 @@ batteries share one site-level charge/discharge direction.
 The battery-only shape requires every active inverter config to be
 battery-backed, non-hybrid, no-PV, and no-curtailment. The hybrid shape requires
 `multi_hybrid_inverter_pv_mode: split_pv`; every active inverter config must be
-battery-backed, hybrid, PV-enabled; and every active PV inverter must receive a
-nested runtime `pv_power_forecast` under `hybrid_inverter_config_N`. Other
-multi-inverter shapes are rejected for optimisation.
+battery-backed and hybrid. Each PV-enabled inverter configuration must receive a
+nested runtime `pv_power_forecast` under `hybrid_inverter_config_N`; PV-disabled
+hybrid battery inverters do not require one. Other multi-inverter shapes are
+rejected for optimisation.
 
 `multi_hybrid_inverter_pv_mode` controls how PV is interpreted when
 multi-inverter hybrid solving is enabled. Accepted values are `legacy`,
@@ -429,10 +430,16 @@ At runtime, pass each PV-enabled inverter's `pv_power_forecast` inside the
 matching `hybrid_inverter_config_N`. Do not put PV sensor or PVLib acquisition
 keys inside indexed static inverter sections in this release.
 
-For fallback, set `multi_inverter_mode: single` or remove the indexed
-`hybrid_inverter_config_N` sections. The existing top-level configuration then
-continues to drive the single-inverter optimiser and existing Home Assistant
-entity names.
+For a one-request fallback without changing stored configuration, set runtime
+`multi_inverter_mode: single` and omit all nested
+`hybrid_inverter_config_N` runtime configurations. The request then uses the
+existing top-level single-inverter configuration. A runtime `single` request
+that also includes a nested indexed runtime configuration is rejected.
+
+To change stored configuration, set `multi_inverter_mode: single` or remove the
+indexed `hybrid_inverter_config_N` sections. The existing top-level
+configuration then continues to drive the single-inverter optimiser and
+existing Home Assistant entity names.
 
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 

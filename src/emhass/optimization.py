@@ -23,6 +23,7 @@ from emhass.inverter_blocks import (
     has_extra_inverter_blocks,
     is_public_safe_multi_block_battery_model,
     is_public_safe_multi_block_hybrid_model,
+    project_public_inverter_config,
 )
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
@@ -410,7 +411,12 @@ class Optimization:
         ):
             root_block = parsed_blocks[1]
         if root_block is not None:
-            self.inverter_block_config[0] = root_block
+            self.inverter_block_config[0] = InverterBlockConfig(
+                index=root_block.index,
+                optim_conf=self.optim_conf,
+                plant_conf=self.plant_conf,
+                runtime_conf=root_block.runtime_conf,
+            )
         else:
             self.inverter_block_config[0] = InverterBlockConfig(
                 index=0,
@@ -536,7 +542,7 @@ class Optimization:
         }
 
         for _index, block in sorted(self.inverter_block_config.items()):
-            if block.index == 0:
+            if _index == 0:
                 continue
             if not block.optim_conf.get("set_use_battery", False):
                 self._unsupported_multi_block_battery_feature(block.index, "set_use_battery=false")
@@ -568,8 +574,8 @@ class Optimization:
                 ):
                     self._unsupported_multi_block_battery_feature(block.index, key)
             for key, default in stress_defaults.items():
-                if key in block.optim_conf and not self._is_default_scalar_or_vector(
-                    block.optim_conf[key],
+                if key in block.plant_conf and not self._is_default_scalar_or_vector(
+                    block.plant_conf[key],
                     default,
                 ):
                     self._unsupported_multi_block_battery_feature(block.index, key)
@@ -582,7 +588,7 @@ class Optimization:
             "inverter_stress_segments": 10.0,
         }
         for _index, block in sorted(self.inverter_block_config.items()):
-            if block.index == 0:
+            if _index == 0:
                 continue
             for key, default in inverter_stress_defaults.items():
                 if key in block.plant_conf and not self._is_default_scalar_or_vector(
@@ -707,13 +713,10 @@ class Optimization:
             or not isinstance(parsed_blocks.get(1), InverterBlockConfig)
         ):
             return
-        first_inverter = parsed_blocks[1]
-        self.optim_conf = copy.copy(self.optim_conf)
-        self.plant_conf = copy.copy(self.plant_conf)
-        self.optim_conf.update(first_inverter.optim_conf)
-        self.plant_conf.update(first_inverter.plant_conf)
-        self.plant_conf[MULTI_INVERTER_MODE_KEY] = MULTI_INVERTER_MODE_MULTI
-        self.plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = parsed_blocks
+        self.optim_conf, self.plant_conf = project_public_inverter_config(
+            self.optim_conf,
+            self.plant_conf,
+        )
 
     def _root_inverter_runtime_conf(self) -> Mapping[str, object]:
         if not self._is_public_multi_inverter_mode():
@@ -817,6 +820,27 @@ class Optimization:
         tolerance_energy = 0.01 * total_capacity
         return stored_energy, min_energy, total_capacity, tolerance_energy
 
+    def _effective_nested_soc_target(self, block: InverterBlockConfig) -> float | None:
+        """Clamp a validated indexed target after scalar runtime bounds apply."""
+        if "soc_target" not in block.runtime_conf:
+            return None
+        submitted_target = float(block.runtime_conf["soc_target"])
+        soc_min = float(block.plant_conf["battery_minimum_state_of_charge"])
+        soc_max = float(block.plant_conf["battery_maximum_state_of_charge"])
+        effective_target = min(max(submitted_target, soc_min), soc_max)
+        if effective_target != submitted_target:
+            self.logger.warning(
+                "Passed hybrid_inverter_config_%s.soc_target=%s is outside [%s, %s], "
+                "clamping to soc_target=%s",
+                block.index,
+                submitted_target,
+                soc_min,
+                soc_max,
+                effective_target,
+            )
+        block.runtime_conf["soc_target"] = effective_target
+        return effective_target
+
     def _update_extra_inverter_block_battery_params(self) -> None:
         if not self._multi_block_battery_model_enabled:
             return
@@ -832,7 +856,8 @@ class Optimization:
             )
             soc_final = float(runtime_conf.get("soc_final", soc_init))
             soc_target_floor = np.zeros(self.num_timesteps)
-            if "soc_target" in runtime_conf:
+            soc_target = self._effective_nested_soc_target(block)
+            if soc_target is not None:
                 target_timestep = runtime_conf.get(
                     "soc_target_timestep",
                     self.num_timesteps - 1,
@@ -841,7 +866,7 @@ class Optimization:
                     max(int(target_timestep), 0),
                     self.num_timesteps - 1,
                 )
-                soc_target_floor[target_timestep] = float(runtime_conf["soc_target"]) * cap
+                soc_target_floor[target_timestep] = soc_target * cap
 
             params["soc_init"].value = soc_init
             params["soc_final"].value = soc_final
@@ -2329,9 +2354,15 @@ class Optimization:
         # The weight is normalized by the horizon length and the epsilon is orders of
         # magnitude below any real tariff coefficient, so it breaks ties without ever
         # flipping a real economic decision.
+        tiebreak_weights = np.arange(self.num_timesteps, 0, -1) / self.num_timesteps
+        curtailment_variables = []
         if self.plant_conf["compute_curtailment"]:
-            p_pv_curtailment = self.vars["p_pv_curtailment"]
-            tiebreak_weights = np.arange(self.num_timesteps, 0, -1) / self.num_timesteps
+            curtailment_variables.append(self.vars["p_pv_curtailment"])
+        if self._multi_block_hybrid_model_enabled:
+            for index, block_config in self._extra_battery_block_configs():
+                if block_config.plant_conf.get("compute_curtailment", False):
+                    curtailment_variables.append(self.vars[f"p_pv_curtailment_{index}"])
+        for p_pv_curtailment in curtailment_variables:
             objective_terms.append(
                 -CURTAILMENT_TIEBREAK_EPS * cp.sum(cp.multiply(tiebreak_weights, p_pv_curtailment))
             )
@@ -2551,7 +2582,7 @@ class Optimization:
         constraints.append(p_ac_dc <= (1 - is_dc_sourcing) * p_ac_dc_max)
         constraints.append(p_dc_ac <= is_dc_sourcing * p_dc_ac_max)
 
-        if block_config.index == 0 and inv_stress_conf and inv_stress_conf["active"]:
+        if is_root_block and inv_stress_conf and inv_stress_conf["active"]:
             seg_params = self._build_stress_segments(
                 inv_stress_conf["max_power"],
                 inv_stress_conf["unit_cost"],
@@ -4870,6 +4901,7 @@ class Optimization:
         # Data Validation & Defaults
         if self._is_public_multi_inverter_mode() and self.optim_conf["set_use_battery"]:
             root_runtime_conf = self._root_inverter_runtime_conf()
+            root_block = self.inverter_block_config[0]
             soc_init = float(
                 root_runtime_conf.get(
                     "soc_init",
@@ -4877,7 +4909,7 @@ class Optimization:
                 )
             )
             soc_final = float(root_runtime_conf.get("soc_final", soc_init))
-            soc_target = root_runtime_conf.get("soc_target")
+            soc_target = self._effective_nested_soc_target(root_block)
             soc_target_timestep = root_runtime_conf.get("soc_target_timestep")
         if self.optim_conf["set_use_battery"]:
             if soc_init is None:

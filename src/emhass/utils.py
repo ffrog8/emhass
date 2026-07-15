@@ -1881,11 +1881,13 @@ async def treat_runtimeparams(
             else:
                 params["passed_data"][forecast_key] = None
 
-        _validate_nested_inverter_block_pv_runtime(
-            params=params,
-            block_runtime_conf=block_runtime_conf,
-            forecast_dates=forecast_dates,
-        )
+        # Export retrieves historical InfluxDB data and never builds a forecast horizon.
+        if set_type != "export-influxdb-to-csv":
+            _validate_nested_inverter_block_pv_runtime(
+                params=params,
+                block_runtime_conf=block_runtime_conf,
+                forecast_dates=forecast_dates,
+            )
 
         # Explicitly handle historic_days_to_retrieve from runtimeparams BEFORE validation
         if "historic_days_to_retrieve" in runtimeparams:
@@ -2255,7 +2257,9 @@ async def treat_runtimeparams(
     retrieve_hass_conf = params["retrieve_hass_conf"]
     optim_conf = params["optim_conf"]
     plant_conf = params["plant_conf"]
-    _validate_inverter_block_pv_mode(params, block_runtime_conf)
+    # Export still parses indexed blocks, but split-PV runtime data is optimizer-only.
+    if set_type != "export-influxdb-to-csv":
+        _validate_inverter_block_pv_mode(params, block_runtime_conf)
     parse_inverter_block_configs(params, optim_conf, plant_conf, block_runtime_conf)
     if block_runtime_conf:
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]

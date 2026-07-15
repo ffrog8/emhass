@@ -3,12 +3,17 @@ import logging
 import pytest
 
 from emhass.inverter_blocks import (
+    _OPTIONAL_OPTIM_CONF_BLOCK_DEFAULTS,
+    _OPTIONAL_PLANT_CONF_BLOCK_DEFAULTS,
     _RESERVED_PV_SOURCE_KEYS,
     INVERTER_BLOCK_CONFIGS_KEY,
     MULTI_INVERTER_MODE_KEY,
     MULTI_INVERTER_MODE_MULTI,
+    is_public_safe_multi_block_battery_model,
+    is_public_safe_multi_block_hybrid_model,
     merge_inverter_block_runtime_overrides,
     parse_inverter_block_configs,
+    project_public_inverter_config,
 )
 
 _EXPECTED_RESERVED_PV_SOURCE_KEYS = frozenset(
@@ -127,6 +132,65 @@ def test_valid_extra_block_is_parsed_without_inheriting_root_values_in_multi_mod
     assert "sensor_power_load_no_var_loads" not in blocks[1].plant_conf
 
 
+def test_optional_block_defaults_are_canonical_and_sparse_blocks_remain_sparse():
+    blocks = _parse(
+        {"hybrid_inverter_config_1": _valid_block()},
+        multi_inverter_mode=MULTI_INVERTER_MODE_MULTI,
+    )
+
+    assert _OPTIONAL_OPTIM_CONF_BLOCK_DEFAULTS == {
+        "set_use_pv": False,
+        "set_use_battery": False,
+        "set_battery_dynamic": False,
+        "battery_dynamic_max": 0.9,
+        "battery_dynamic_min": -0.9,
+        "weight_battery_discharge": 0.0,
+        "weight_battery_charge": 0.0,
+        "battery_soc_deficit_threshold": 0.40,
+        "battery_soc_deficit_cost": 0.0,
+        "battery_soc_surplus_threshold": 0.90,
+        "battery_soc_surplus_cost": 0.0,
+    }
+    assert _OPTIONAL_PLANT_CONF_BLOCK_DEFAULTS == {
+        "inverter_is_hybrid": False,
+        "compute_curtailment": False,
+        "battery_stress_cost": 0.0,
+        "battery_stress_segments": 10,
+        "inverter_stress_cost": 0.0,
+        "inverter_stress_segments": 10,
+    }
+    assert (
+        set(_OPTIONAL_OPTIM_CONF_BLOCK_DEFAULTS) - {"set_use_pv", "set_use_battery"}
+    ).isdisjoint(blocks[1].optim_conf)
+    assert (
+        set(_OPTIONAL_PLANT_CONF_BLOCK_DEFAULTS) - {"inverter_is_hybrid", "compute_curtailment"}
+    ).isdisjoint(blocks[1].plant_conf)
+
+
+def test_extra_block_stress_configuration_uses_plant_conf():
+    block = _valid_block()
+    block.update(
+        {
+            "battery_stress_cost": 0.3,
+            "battery_stress_segments": 7,
+            "inverter_stress_cost": 0.5,
+            "inverter_stress_segments": 9,
+        }
+    )
+
+    blocks = _parse(
+        {"hybrid_inverter_config_1": block},
+        multi_inverter_mode=MULTI_INVERTER_MODE_MULTI,
+    )
+
+    assert blocks[1].plant_conf["battery_stress_cost"] == 0.3
+    assert blocks[1].plant_conf["battery_stress_segments"] == 7
+    assert blocks[1].plant_conf["inverter_stress_cost"] == 0.5
+    assert blocks[1].plant_conf["inverter_stress_segments"] == 9
+    assert "battery_stress_cost" not in blocks[1].optim_conf
+    assert "battery_stress_segments" not in blocks[1].optim_conf
+
+
 def test_default_single_mode_ignores_indexed_config():
     blocks = _parse({"hybrid_inverter_config_1": _valid_block()})
 
@@ -137,6 +201,146 @@ def test_default_single_mode_ignores_indexed_config_holes():
     blocks = _parse({"hybrid_inverter_config_2": _valid_block()})
 
     assert list(blocks) == [0]
+
+
+def test_public_safe_battery_model_uses_indexed_topology_not_legacy_root_flags():
+    indexed_block = _valid_block()
+    indexed_block.update(
+        {
+            "set_use_pv": False,
+            "set_use_battery": True,
+            "inverter_is_hybrid": False,
+            "compute_curtailment": False,
+        }
+    )
+    optim_conf = _root_optim_conf()
+    optim_conf["set_use_battery"] = False
+    optim_conf["set_use_pv"] = True
+    plant_conf = _root_plant_conf()
+    plant_conf.update(
+        {
+            MULTI_INVERTER_MODE_KEY: MULTI_INVERTER_MODE_MULTI,
+            "inverter_is_hybrid": True,
+            "compute_curtailment": True,
+        }
+    )
+    parse_inverter_block_configs(
+        {"hybrid_inverter_config_1": indexed_block},
+        optim_conf,
+        plant_conf,
+    )
+
+    assert is_public_safe_multi_block_battery_model(optim_conf, plant_conf)
+
+
+def test_public_safe_hybrid_model_uses_indexed_topology_not_legacy_root_flags():
+    indexed_block = _valid_block()
+    indexed_block["set_use_pv"] = False
+    optim_conf = _root_optim_conf()
+    optim_conf["set_use_battery"] = False
+    plant_conf = _root_plant_conf()
+    plant_conf.update(
+        {
+            MULTI_INVERTER_MODE_KEY: MULTI_INVERTER_MODE_MULTI,
+            "multi_hybrid_inverter_pv_mode": "split_pv",
+            "inverter_is_hybrid": False,
+        }
+    )
+    parse_inverter_block_configs(
+        {"hybrid_inverter_config_1": indexed_block},
+        optim_conf,
+        plant_conf,
+    )
+
+    assert is_public_safe_multi_block_hybrid_model(optim_conf, plant_conf)
+
+
+@pytest.mark.parametrize(
+    "model_admission",
+    [
+        is_public_safe_multi_block_battery_model,
+        is_public_safe_multi_block_hybrid_model,
+    ],
+)
+def test_public_safe_multi_block_models_preserve_site_direction_lock(model_admission):
+    optim_conf = _root_optim_conf()
+    optim_conf["battery_mode_lock"] = "per_inverter"
+    plant_conf = _root_plant_conf()
+    plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = {1: object()}
+
+    assert not model_admission(optim_conf, plant_conf)
+
+
+def test_project_public_inverter_config_copies_block_one_without_root_fallbacks():
+    optim_conf = _root_optim_conf()
+    optim_conf.update(
+        {
+            "set_battery_dynamic": True,
+            "weight_battery_charge": 0.7,
+        }
+    )
+    plant_conf = _root_plant_conf()
+    plant_conf.update(
+        {
+            MULTI_INVERTER_MODE_KEY: MULTI_INVERTER_MODE_MULTI,
+            "maximum_power_from_grid": 6000,
+            "battery_stress_cost": 0.8,
+            "inverter_stress_cost": 0.6,
+        }
+    )
+    indexed_block = _valid_block()
+    indexed_block.update(
+        {
+            "set_use_pv": False,
+            "set_use_battery": True,
+            "inverter_is_hybrid": False,
+            "compute_curtailment": False,
+            "battery_charge_power_max": 4200,
+        }
+    )
+    parsed_blocks = parse_inverter_block_configs(
+        {"hybrid_inverter_config_1": indexed_block},
+        optim_conf,
+        plant_conf,
+    )
+
+    projected_optim_conf, projected_plant_conf = project_public_inverter_config(
+        optim_conf,
+        plant_conf,
+    )
+
+    assert projected_optim_conf is not optim_conf
+    assert projected_plant_conf is not plant_conf
+    assert projected_optim_conf["set_use_pv"] is False
+    assert projected_optim_conf["set_use_battery"] is True
+    assert projected_optim_conf["set_battery_dynamic"] is False
+    assert projected_optim_conf["weight_battery_charge"] == 0.0
+    assert projected_plant_conf["inverter_is_hybrid"] is False
+    assert projected_plant_conf["battery_charge_power_max"] == 4200
+    assert projected_plant_conf["battery_stress_cost"] == 0.0
+    assert projected_plant_conf["inverter_stress_cost"] == 0.0
+    assert projected_plant_conf["maximum_power_from_grid"] == 6000
+    assert projected_plant_conf[INVERTER_BLOCK_CONFIGS_KEY] is parsed_blocks
+    assert optim_conf["set_battery_dynamic"] is True
+    assert plant_conf["battery_stress_cost"] == 0.8
+    assert plant_conf["inverter_stress_cost"] == 0.6
+
+
+def test_project_public_inverter_config_leaves_single_mode_values_unchanged():
+    optim_conf = _root_optim_conf()
+    plant_conf = _root_plant_conf()
+    parsed_blocks = parse_inverter_block_configs({}, optim_conf, plant_conf)
+
+    projected_optim_conf, projected_plant_conf = project_public_inverter_config(
+        optim_conf,
+        plant_conf,
+    )
+
+    assert projected_optim_conf == optim_conf
+    assert projected_plant_conf == plant_conf
+    assert projected_optim_conf is not optim_conf
+    assert projected_plant_conf is not plant_conf
+    assert projected_plant_conf[INVERTER_BLOCK_CONFIGS_KEY] is parsed_blocks
 
 
 def test_multi_mode_requires_hybrid_inverter_config_1():
@@ -247,11 +451,34 @@ def test_extra_block_rejects_reserved_pv_source_keys_for_step_2(reserved_pv_key)
         "battery_nominal_energy_capacity",
         "battery_charge_power_max",
         "battery_discharge_power_max",
+        "battery_charge_efficiency",
+        "battery_discharge_efficiency",
         "battery_minimum_state_of_charge",
         "battery_maximum_state_of_charge",
+        "battery_target_state_of_charge",
     ],
 )
 def test_battery_enabled_extra_block_requires_required_battery_fields(missing_key):
+    block = _valid_block()
+    del block[missing_key]
+
+    with pytest.raises(ValueError, match=missing_key):
+        _parse(
+            {"hybrid_inverter_config_1": block},
+            multi_inverter_mode=MULTI_INVERTER_MODE_MULTI,
+        )
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "inverter_ac_output_max",
+        "inverter_ac_input_max",
+        "inverter_efficiency_dc_ac",
+        "inverter_efficiency_ac_dc",
+    ],
+)
+def test_hybrid_extra_block_requires_required_hybrid_inverter_fields(missing_key):
     block = _valid_block()
     del block[missing_key]
 
@@ -394,6 +621,37 @@ def test_merge_runtime_accepts_nested_battery_cap_overrides():
     }
     assert params["hybrid_inverter_config_1"]["battery_charge_power_max"] == 4200
     assert params["hybrid_inverter_config_1"]["battery_discharge_power_max"] == 4300
+
+
+@pytest.mark.parametrize(
+    "soc_target",
+    [True, "0.50", float("nan"), float("inf"), -0.01, 1.01],
+)
+def test_merge_runtime_rejects_invalid_nested_soc_target(soc_target):
+    params = _base_params_with_extra_block(set_use_pv=False)
+
+    with pytest.raises(ValueError, match=r"soc_target.*(numeric|finite|\[0, 1\])"):
+        merge_inverter_block_runtime_overrides(
+            params,
+            {"hybrid_inverter_config_1": {"soc_target": soc_target}},
+        )
+
+
+def test_merge_runtime_preserves_valid_nested_soc_target_for_effective_limit_clamp():
+    params = _base_params_with_extra_block(set_use_pv=False)
+
+    runtime_conf = merge_inverter_block_runtime_overrides(
+        params,
+        {
+            "hybrid_inverter_config_1": {
+                "battery_minimum_state_of_charge": 0.25,
+                "battery_maximum_state_of_charge": 0.50,
+                "soc_target": 0.75,
+            }
+        },
+    )
+
+    assert runtime_conf[1]["soc_target"] == 0.75
 
 
 def test_merge_runtime_soc_final_uses_effective_runtime_bounds_and_clamps(caplog):

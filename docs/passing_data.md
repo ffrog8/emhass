@@ -115,14 +115,21 @@ Here is the list of the other additional dictionary keys that can be passed at r
 
 - `current_period_peak` the peak grid import (in Watts) already incurred during the current billing period. Only used by `naive-mpc-optim`, and only when a capacity/demand charge (`capacity_cost_per_kw`) is configured. See the dedicated section below.
 
-### Nested hybrid inverter runtime blocks
+### Nested hybrid inverter runtime configurations
 
 In single-inverter mode, the existing flat runtime payload continues to address
 the top-level inverter configuration. Do not send `hybrid_inverter_config_0`;
-runtime block `0` is invalid.
+inverter index `0` is invalid.
+
+To use this legacy single-inverter path for one request when stored
+configuration includes indexed inverters, send `multi_inverter_mode: "single"`
+with only flat runtime keys. This does not change stored configuration. A
+runtime `single` request that also includes a nested
+`hybrid_inverter_config_N` configuration is rejected.
 
 ```json
 {
+  "multi_inverter_mode": "single",
   "soc_init": 0.42,
   "soc_final": 0.90,
   "battery_charge_power_max": 4600,
@@ -143,9 +150,9 @@ When multi-inverter mode is active, the active inverters are the one-based
 static configs `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so
 on. The top-level battery, hybrid inverter, and PV runtime keys are not an
 active inverter in this mode. Nested runtime objects are named
-`hybrid_inverter_config_N`, where `N >= 1`. A nested runtime block is valid only
-when the matching static config block already exists; runtime payloads cannot
-create new inverters.
+`hybrid_inverter_config_N`, where `N >= 1`. A nested runtime inverter
+configuration is valid only when the matching static inverter configuration
+already exists; runtime payloads cannot create new inverters.
 
 ```json
 {
@@ -170,12 +177,18 @@ battery-only shape or the supported split-PV hybrid shape. Both require
 parameter. Runtime payloads may override inverter SOC and scalar battery caps as
 before, but they cannot switch the site lock mode.
 
+Nested `soc_target` must be a finite numeric fraction in `[0, 1]`; nonnumeric,
+nonfinite, and out-of-range values are rejected. After runtime overrides are
+applied, a valid target is clamped to that inverter's effective
+`battery_minimum_state_of_charge` and `battery_maximum_state_of_charge`, with a
+warning when clamping occurs.
+
 For the split-PV hybrid shape, static config must use
 `multi_hybrid_inverter_pv_mode: split_pv`, and every active inverter config must
-be battery-backed, hybrid, and PV-enabled. Every active PV inverter must include
-nested runtime `pv_power_forecast` data under its matching
-`hybrid_inverter_config_N` object. Other multi-inverter shapes still raise
-`multi-block solve not enabled` after validation.
+be battery-backed and hybrid. Each PV-enabled inverter must include nested runtime
+`pv_power_forecast` data under its matching `hybrid_inverter_config_N` object;
+PV-disabled hybrid battery inverters do not require a nested forecast. Other
+multi-inverter shapes are rejected after validation.
 
 Topology flags remain top-level site config only. Do not send
 `set_nocharge_from_grid`, `set_nodischarge_to_grid`, or
