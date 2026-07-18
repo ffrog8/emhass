@@ -3,12 +3,14 @@
 import argparse
 import asyncio
 import copy
+import json
 import logging
 import os
 import pathlib
 import pickle
 import threading
 import time as _time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
@@ -18,14 +20,22 @@ import numpy as np
 import orjson
 import pandas as pd
 
-from emhass import last_run, utils
+from emhass import last_run, plan_store, utils
+from emhass.battery_identification import BatteryIdentification
 from emhass.forecast import Forecast
+from emhass.forecast_calibration import (
+    CALIBRATION_DEFAULT_DAYS,
+    CALIBRATION_TEST_DAYS,
+    CALIBRATION_VAL_DAYS,
+    compute_forecast_calibration,
+)
 from emhass.inverter_blocks import (
     INVERTER_BLOCK_CONFIGS_KEY,
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     has_extra_inverter_blocks,
     inverter_block_structure_signature,
     is_public_safe_multi_block_model,
+    project_public_inverter_config,
 )
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
@@ -118,7 +128,7 @@ def _record_optim_snapshot(
             if isinstance(opt_res, pd.DataFrame) and "optim_status" in opt_res
             else "Unknown"
         )
-        last_run.record(
+        ts = last_run.record(
             input_data_dict["emhass_conf"]["data_path"],
             action=action,
             stage_times=input_data_dict["stage_times"],
@@ -127,6 +137,21 @@ def _record_optim_snapshot(
             duration_total_seconds=_time.monotonic() - t0_monotonic,
             schema_version=EMHASS_SCHEMA_VERSION,
         )
+        # Publish the structured plan ONLY for a successful (Optimal) run, reusing
+        # the SAME timestamp last_run stamped so /api/v1/plan's generated_at matches
+        # /api/v1/last-run for that run. Only the timestamp is shared, not the
+        # verdict: a failed/infeasible run is still recorded by last_run (status
+        # error/infeasible) but must not surface on /api/v1/plan as status "ok" —
+        # the plan endpoint keeps serving the last VALID plan (or no-run). Gating on
+        # optim_status == "Optimal" mirrors last_run's own "ok" criterion, so the
+        # two endpoints stay consistent (plan published iff last-run is "ok").
+        if optim_status == "Optimal":
+            plan_store.record(
+                input_data_dict["emhass_conf"]["data_path"],
+                plan=plan_store.serialize(opt_res),
+                generated_at=ts,
+                schema_version=EMHASS_SCHEMA_VERSION,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("last_run: failed to record %s snapshot", action, exc_info=exc)
 
@@ -618,14 +643,22 @@ async def _retrieve_from_hass(
 ) -> tuple[bool, object]:
     """Helper to retrieve live data from Home Assistant."""
     # Determine days_list based on set_type
-    if set_type == "perfect-optim" or set_type == "adjust_pv":
+    if set_type in ("perfect-optim", "adjust_pv", "battery_id"):
         days_list = utils.get_days_list(retrieve_hass_conf["historic_days_to_retrieve"])
     elif set_type == "naive-mpc-optim":
         days_list = utils.get_days_list(1)
     else:
         days_list = None  # Not needed for dayahead
     var_list = [retrieve_hass_conf["sensor_power_load_no_var_loads"]]
-    if optim_conf.get("set_use_pv", True):
+    if set_type == "battery_id":
+        # Battery identification needs signed battery power and measured SoC.
+        # The load sensor stays at var_list[0] so prepare_data's load handling
+        # is unchanged; the battery columns pass through untouched.
+        var_list.append(retrieve_hass_conf["sensor_power_battery"])
+        var_list.append(retrieve_hass_conf["sensor_battery_state_of_charge"])
+        if logger:
+            logger.debug(f"Variable list for battery_id retrieval: {var_list}")
+    elif optim_conf.get("set_use_pv", True):
         var_list.append(retrieve_hass_conf["sensor_power_photovoltaics"])
         if optim_conf.get("set_use_adjusted_pv", True):
             var_list.append(retrieve_hass_conf["sensor_power_photovoltaics_forecast"])
@@ -669,9 +702,17 @@ async def retrieve_home_assistant_data(
     return True, rh.df_final.copy(), days_list
 
 
-def is_model_outdated(model_path: pathlib.Path, max_age_hours: int, logger: logging.Logger) -> bool:
+def is_model_outdated(
+    model_path: pathlib.Path,
+    max_age_hours: int,
+    logger: logging.Logger,
+    label: str = "Adjusted PV model",
+) -> bool:
     """
     Check if the saved model file is outdated based on its modification time.
+
+    Format-agnostic: only the file mtime is inspected, so this serves both the
+    adjusted-PV regressor pickle and the battery-identification JSON.
 
     :param model_path: Path to the saved model file.
     :type model_path: pathlib.Path
@@ -679,15 +720,18 @@ def is_model_outdated(model_path: pathlib.Path, max_age_hours: int, logger: logg
     :type max_age_hours: int
     :param logger: Logger object for logging information.
     :type logger: logging.Logger
+    :param label: Human-readable name of the artifact, used in the log lines so
+        the message matches the caller (e.g. "Battery identification model").
+    :type label: str
     :return: True if model is outdated or doesn't exist, False otherwise.
     :rtype: bool
     """
     if not model_path.exists():
-        logger.info("Adjusted PV model file does not exist, will train new model")
+        logger.info(f"{label} file does not exist, will train new model")
         return True
 
     if max_age_hours <= 0:
-        logger.info("adjusted_pv_model_max_age is set to 0, forcing model re-fit")
+        logger.info(f"{label} max age is set to 0, forcing model re-fit")
         return True
 
     model_mtime = datetime.fromtimestamp(model_path.stat().st_mtime)
@@ -696,13 +740,13 @@ def is_model_outdated(model_path: pathlib.Path, max_age_hours: int, logger: logg
 
     if model_age > max_age:
         logger.info(
-            f"Adjusted PV model is outdated (age: {model_age.total_seconds() / 3600:.1f}h, "
+            f"{label} is outdated (age: {model_age.total_seconds() / 3600:.1f}h, "
             f"max: {max_age_hours}h), will train new model"
         )
         return True
     else:
         logger.info(
-            f"Using existing adjusted PV model (age: {model_age.total_seconds() / 3600:.1f}h, "
+            f"Using existing {label} (age: {model_age.total_seconds() / 3600:.1f}h, "
             f"max: {max_age_hours}h)"
         )
         return False
@@ -866,6 +910,257 @@ async def adjust_pv_forecast(
     p_pv_forecast = fcst.adjust_pv_forecast_predict(forecasted_pv=p_pv_forecast)
     # Update the PV forecast
     return p_pv_forecast["adjusted_forecast"].rename(None)
+
+
+# Suggest-tier HA sensor entity ids (fixed; not user-configurable).
+BATTERY_ID_CAPACITY_SENSOR = "sensor.battery_identified_capacity"
+BATTERY_ID_RTE_SENSOR = "sensor.battery_identified_round_trip_efficiency"
+
+
+def _log_battery_identification_summary(
+    logger: logging.Logger, payload: dict, plant_conf: dict
+) -> None:
+    """Log the identified values and, in reported units, how they compare to config."""
+    cap = payload.get("capacity_kwh", {})
+    rte = payload.get("round_trip_efficiency", {})
+    configured_cap_kwh = float(plant_conf.get("battery_nominal_energy_capacity", 0)) / 1000.0
+    configured_eta = float(plant_conf.get("battery_charge_efficiency", 0))
+    logger.info(
+        "Battery identification: capacity %.2f kWh (CI [%s, %s]) vs configured %.2f kWh; "
+        "round-trip efficiency %.3f (one-way %.3f) vs configured one-way %.3f.",
+        cap.get("value") or float("nan"),
+        cap.get("ci_low"),
+        cap.get("ci_high"),
+        configured_cap_kwh,
+        rte.get("value") or float("nan"),
+        payload.get("eta_charge_symmetric") or float("nan"),
+        configured_eta,
+    )
+
+
+def _log_battery_identification_recommendation(
+    logger: logging.Logger, payload: dict, plant_conf: dict
+) -> None:
+    """Log a plain 'consider updating X from A to B' recommendation (suggest tier)."""
+    cap = payload.get("capacity_kwh", {})
+    identified_cap_kwh = cap.get("value")
+    configured_cap_kwh = float(plant_conf.get("battery_nominal_energy_capacity", 0) or 0) / 1000.0
+    identified_eta = payload.get("eta_charge_symmetric")
+    configured_eta = plant_conf.get("battery_charge_efficiency")
+    logger.info(
+        "Battery identification recommendation: consider updating "
+        "battery_nominal_energy_capacity from %.2f kWh to %.2f kWh, and "
+        "battery_charge_efficiency / battery_discharge_efficiency from %s to %s "
+        "(symmetric sqrt of the identified round-trip efficiency).",
+        configured_cap_kwh,
+        identified_cap_kwh if identified_cap_kwh is not None else float("nan"),
+        configured_eta,
+        identified_eta,
+    )
+
+
+async def _publish_battery_identification(
+    rh: RetrieveHass, payload: dict, logger: logging.Logger
+) -> None:
+    """
+    Publish the two read-only advisory sensors (suggest tier only).
+
+    Attributes carry the confidence interval, sample counts, the last successful
+    fit time, and the assumptions, so a user can judge trust from the sensor
+    itself. ``fitted_at`` reflects the last SUCCESSFUL fit, never the publish time.
+    """
+    cap = payload.get("capacity_kwh", {})
+    rte = payload.get("round_trip_efficiency", {})
+    common = {
+        "fitted_at": payload.get("fitted_at"),
+        "assumptions": payload.get("assumptions"),
+        "n_charge_segments": payload.get("n_charge_segments"),
+        "n_discharge_segments": payload.get("n_discharge_segments"),
+    }
+    await rh.post_scalar_sensor(
+        BATTERY_ID_CAPACITY_SENSOR,
+        cap.get("value"),
+        {
+            "friendly_name": "Battery identified capacity",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy_storage",
+            "ci_low": cap.get("ci_low"),
+            "ci_high": cap.get("ci_high"),
+            "method": cap.get("method"),
+            "crosscheck_theil_sen_kwh": cap.get("crosscheck_theil_sen_kwh"),
+            **common,
+        },
+    )
+    await rh.post_scalar_sensor(
+        BATTERY_ID_RTE_SENSOR,
+        rte.get("value"),
+        {
+            "friendly_name": "Battery identified round-trip efficiency",
+            "one_way_efficiency_sqrt": payload.get("eta_charge_symmetric"),
+            "ci_low": rte.get("ci_low"),
+            "ci_high": rte.get("ci_high"),
+            "crosscheck_energy_balance": rte.get("crosscheck_energy_balance"),
+            **common,
+        },
+    )
+
+
+async def identify_battery(
+    logger: logging.Logger,
+    optim_conf: dict,
+    plant_conf: dict,
+    retrieve_hass_conf: dict,
+    rh: RetrieveHass,
+    emhass_conf: dict,
+    get_data_from_file: bool,
+    test_df_literal: str,
+) -> None:
+    """
+    Opt-in battery self-identification (observe/suggest). Structural twin of
+    :func:`adjust_pv_forecast`: cadence-gated on a persisted artifact, retrieves
+    HA history only when the estimate is stale, and NEVER raises - any failure
+    logs a warning and returns, leaving the configured battery values in force.
+
+    v1 never touches ``plant_conf``. In the ``observe`` tier it writes the
+    estimate to a JSON under ``data_path`` and logs it; in the ``suggest`` tier
+    it additionally publishes two read-only HA sensors.
+
+    :param logger: Logger.
+    :type logger: logging.Logger
+    :param optim_conf: Optimization config (holds the three feature params).
+    :type optim_conf: dict
+    :param plant_conf: Plant config; read-only here, used for the sanity bound
+        and the "configured vs identified" comparison.
+    :type plant_conf: dict
+    :param retrieve_hass_conf: Retrieve config (holds the two sensor entity ids).
+    :type retrieve_hass_conf: dict
+    :param rh: RetrieveHass instance.
+    :type rh: RetrieveHass
+    :param emhass_conf: emhass paths.
+    :type emhass_conf: dict
+    :param get_data_from_file: Whether history comes from a file instead of HA.
+    :type get_data_from_file: bool
+    :param test_df_literal: Test data filename for file mode.
+    :type test_df_literal: str
+    :rtype: None
+    """
+    # Never-raise boundary: this is an advisory side-feature and must never be
+    # able to break an optimization run, so ANY unexpected error is swallowed
+    # with a warning, leaving the configured battery values in force.
+    try:
+        await _identify_battery_impl(
+            logger,
+            optim_conf,
+            plant_conf,
+            retrieve_hass_conf,
+            rh,
+            emhass_conf,
+            get_data_from_file,
+            test_df_literal,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Battery identification failed unexpectedly ({type(e).__name__}: {e}); "
+            "keeping configured battery values.",
+            exc_info=True,
+        )
+
+
+async def _identify_battery_impl(
+    logger: logging.Logger,
+    optim_conf: dict,
+    plant_conf: dict,
+    retrieve_hass_conf: dict,
+    rh: RetrieveHass,
+    emhass_conf: dict,
+    get_data_from_file: bool,
+    test_df_literal: str,
+) -> None:
+    """Implementation of :func:`identify_battery`; wrapped for the never-raise guarantee."""
+    data_path = pathlib.Path(emhass_conf["data_path"])
+    json_path = data_path / "battery_identification.json"
+    max_age_hours = optim_conf.get("battery_identification_model_max_age", 24)
+    tier = optim_conf.get("battery_identification_trust_tier", "observe")
+
+    # Cadence: reuse the fresh estimate if it is not stale.
+    if not is_model_outdated(
+        json_path, max_age_hours, logger, label="Battery identification model"
+    ):
+        try:
+            with open(json_path, "rb") as inp:
+                payload = json.loads(inp.read())
+        except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
+            logger.warning(
+                f"Battery identification result unreadable ({type(e).__name__}); will re-fit."
+            )
+            payload = None
+        if payload is not None and payload.get("status") == "ok":
+            _log_battery_identification_summary(logger, payload, plant_conf)
+            if tier == "suggest":
+                _log_battery_identification_recommendation(logger, payload, plant_conf)
+                await _publish_battery_identification(rh, payload, logger)
+            return
+        # Fall through to a re-fit on an unreadable or non-ok cached file.
+
+    # Retrieve history and run a fresh fit.
+    logger.info("Battery identification: retrieving history for a fresh fit")
+    success, df, _ = await retrieve_home_assistant_data(
+        "battery_id",
+        get_data_from_file,
+        retrieve_hass_conf,
+        optim_conf,
+        rh,
+        emhass_conf,
+        test_df_literal,
+        logger,
+    )
+    if not success or df is None:
+        logger.warning(
+            "Battery identification: could not retrieve history; keeping configured battery values."
+        )
+        return
+    power_col = retrieve_hass_conf.get("sensor_power_battery")
+    soc_col = retrieve_hass_conf.get("sensor_battery_state_of_charge")
+    if power_col not in df.columns or soc_col not in df.columns:
+        logger.warning(
+            f"Battery identification: sensors '{power_col}'/'{soc_col}' missing from retrieved "
+            "history; keeping configured battery values."
+        )
+        return
+    configured_capacity_wh = float(plant_conf.get("battery_nominal_energy_capacity", 0) or 0)
+    result = BatteryIdentification(logger).identify(df, power_col, soc_col, configured_capacity_wh)
+    for msg in result.messages:
+        logger.info("Battery identification: %s", msg)
+    if not result.is_ok:
+        logger.warning(
+            f"Battery identification did not pass guardrails (status={result.status}); "
+            "keeping configured battery values. Existing results file left untouched."
+        )
+        return
+
+    # Persist ONLY a successful estimate, atomically. A failed fit must not bump
+    # the file mtime (which would suppress retries for max_age_hours).
+    payload = result.to_dict()
+    payload["fitted_at"] = datetime.now(UTC).isoformat()
+    payload["trust_tier"] = tier
+    payload["configured_at_fit_time"] = {
+        "battery_nominal_energy_capacity": plant_conf.get("battery_nominal_energy_capacity"),
+        "battery_charge_efficiency": plant_conf.get("battery_charge_efficiency"),
+        "battery_discharge_efficiency": plant_conf.get("battery_discharge_efficiency"),
+    }
+    # Unique temp name (pid + uuid) so overlapping identify_battery calls in the
+    # same process never share a tmp file before the atomic os.replace.
+    tmp_path = json_path.with_name(
+        f"battery_identification.json.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    with open(tmp_path, "w", encoding="utf-8") as outp:
+        json.dump(payload, outp, indent=2)
+    os.replace(tmp_path, json_path)
+
+    _log_battery_identification_summary(logger, payload, plant_conf)
+    if tier == "suggest":
+        _log_battery_identification_recommendation(logger, payload, plant_conf)
+        await _publish_battery_identification(rh, payload, logger)
 
 
 async def _prepare_perfect_optim(ctx: SetupContext):
@@ -1185,17 +1480,14 @@ async def set_input_data_dict(
             params = dict(orjson.loads(params))
     else:
         params = {}
-    # Publish-only actions read saved results; they need publishing config but no
-    # optimiser horizon or multi-inverter runtime validation.
+    # publish-data reads saved results and export-influxdb-to-csv retrieves InfluxDB data.
+    # Neither action constructs an optimizer horizon.
     actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
     if set_type == "publish-data":
         params, runtimeparams = _publish_data_input_prep_params(params, runtimeparams, logger)
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
-    has_configured_extra_inverter_blocks = (
-        set_type not in actions_without_fcst_or_opt and has_extra_inverter_blocks(plant_conf)
-    )
     (
         params,
         retrieve_hass_conf,
@@ -1213,17 +1505,25 @@ async def set_input_data_dict(
     )
     if isinstance(params, str):
         params = dict(orjson.loads(params))
-    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
-        battery_mode_lock = optim_conf.get("battery_mode_lock", "site")
-        if battery_mode_lock != "site":
-            raise NotImplementedError(
-                f"battery_mode_lock {battery_mode_lock!r} is not supported "
-                "for multi-block battery solves"
-            )
-        if not is_public_safe_multi_block_model(optim_conf, plant_conf):
-            raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
-    else:
-        plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+    if set_type not in actions_without_fcst_or_opt:
+        if has_extra_inverter_blocks(plant_conf):
+            battery_mode_lock = optim_conf.get("battery_mode_lock", "site")
+            if battery_mode_lock != "site":
+                raise NotImplementedError(
+                    f"battery_mode_lock {battery_mode_lock!r} is not supported "
+                    "for multi-block battery solves"
+                )
+            if not is_public_safe_multi_block_model(optim_conf, plant_conf):
+                raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+        else:
+            plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+        optim_conf, plant_conf = project_public_inverter_config(optim_conf, plant_conf)
+        transport_params = dict(params)
+        transport_params["optim_conf"] = optim_conf
+        transport_plant_conf = dict(plant_conf)
+        transport_plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
+        transport_params["plant_conf"] = transport_plant_conf
+        params = orjson.loads(orjson.dumps(transport_params, default=str))
     log_runtime_banner(logger, optim_conf=optim_conf)
     # Initialize Core Objects
     rh = RetrieveHass(
@@ -1252,7 +1552,8 @@ async def set_input_data_dict(
         params = dict(orjson.loads(params))
     costfun = optim_conf.get("costfun", costfun)
     # Two-tier guard:
-    #   - actions_without_fcst_or_opt: read saved results only; build neither.
+    #   - actions_without_fcst_or_opt: publish saved results or retrieve InfluxDB data;
+    #     build neither Forecast nor Optimization.
     #   - actions_skip_optim_cache: need a Forecast object but no Optimization.
     #     Keeping these out of the OptimizationCache path stops them poisoning
     #     the cache key with config-default values that a subsequent
@@ -1261,6 +1562,7 @@ async def set_input_data_dict(
         "forecast-model-fit",
         "forecast-model-predict",
         "forecast-model-tune",
+        "forecast-calibration",
     ]
     if set_type in actions_without_fcst_or_opt:
         fcst = None
@@ -1367,6 +1669,10 @@ async def set_input_data_dict(
         result = await _prepare_naive_mpc_optim(ctx, stage_times=stage_times)
     elif set_type in ["forecast-model-fit", "forecast-model-predict", "forecast-model-tune"]:
         result = await _prepare_ml_fit_predict(ctx)
+    elif set_type == "forecast-calibration":
+        # The calibration action retrieves its own (longer) history window inside
+        # forecast_calibration(); no ML-prep here.
+        result = {}
     elif set_type == "regressor-model-fit":
         result = _prepare_regressor_fit(ctx)
     elif set_type == "regressor-model-predict":
@@ -1381,6 +1687,25 @@ async def set_input_data_dict(
         result = {}
     if result is None:
         return False
+    # Opt-in battery self-identification (observe/suggest). Runs alongside the
+    # optimization prep for the two live optim actions; never affects the
+    # optimizer in v1. Cadence-gated and never raises, so it cannot break an
+    # optimization run.
+    if (
+        set_type in ("dayahead-optim", "naive-mpc-optim")
+        and optim_conf.get("set_use_battery", False)
+        and optim_conf.get("set_use_battery_identification", False)
+    ):
+        await identify_battery(
+            logger,
+            optim_conf,
+            plant_conf,
+            retrieve_hass_conf,
+            rh,
+            emhass_conf,
+            get_data_from_file,
+            test_df_literal,
+        )
     data_results.update(result)
     # Build Final Dictionary
     input_data_dict = {
@@ -1419,7 +1744,6 @@ async def weather_forecast_cache(
     """
     # Parsing yaml
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
-    has_configured_extra_inverter_blocks = has_extra_inverter_blocks(plant_conf)
     # Treat runtimeparams
     (
         params,
@@ -1436,8 +1760,9 @@ async def weather_forecast_cache(
         logger,
         emhass_conf,
     )
-    if has_configured_extra_inverter_blocks or has_extra_inverter_blocks(plant_conf):
+    if has_extra_inverter_blocks(plant_conf):
         raise NotImplementedError(MULTI_BLOCK_SOLVE_DISABLED_MESSAGE)
+    plant_conf.pop(INVERTER_BLOCK_CONFIGS_KEY, None)
     # Make sure weather_forecast_cache is true
     if (params is not None) and (params != "null"):
         params = orjson.loads(params)
@@ -1707,7 +2032,10 @@ async def dayahead_forecast_optim(
     """
     _t0 = _time.monotonic()
     soc_init = input_data_dict["params"]["passed_data"].get("soc_init")
-    logger.info(f"Performing day-ahead forecast optimization with soc_init: {soc_init}")
+    soc_final = input_data_dict["params"]["passed_data"].get("soc_final")
+    logger.info(
+        f"Performing day-ahead forecast optimization with soc_init: {soc_init}, soc_final: {soc_final}"
+    )
     # Prepare forecast data with costs, prices, outdoor temp, and GHI
     with stage_timer(input_data_dict["stage_times"], "price_prep", logger):
         df_input_data_dayahead = prepare_forecast_and_weather_data(
@@ -1721,6 +2049,7 @@ async def dayahead_forecast_optim(
             input_data_dict["p_pv_forecast"],
             input_data_dict["p_load_forecast"],
             soc_init=soc_init,
+            soc_final=soc_final,
             stage_times=input_data_dict["stage_times"],
         )
     # Save CSV file for publish_data
@@ -1927,6 +2256,75 @@ async def forecast_model_fit(
             await outp.write(pickle.dumps(mlf, pickle.HIGHEST_PROTOCOL))
             logger.debug("saved model to " + str(filename_path))
     return df_pred, df_pred_backtest, mlf
+
+
+async def forecast_calibration(input_data_dict: dict, logger: logging.Logger) -> dict | None:
+    """Compute an on-demand load forecast calibration report from HA history.
+
+    Retrieves the load history, then compares the built-in load forecast methods
+    (naive, typical, mlforecaster) against the realised load over held-out
+    test/val windows. Reporting only: no model or artifact is saved and no
+    optimization is affected.
+
+    :param input_data_dict: A dictionnary with multiple data used by the action functions
+    :type input_data_dict: dict
+    :param logger: The passed logger object
+    :type logger: logging.Logger
+    :return: The calibration result dict, or None when there is not enough history
+    :rtype: dict | None
+    """
+    passed_data = input_data_dict["params"]["passed_data"]
+    retrieve_hass_conf = input_data_dict["retrieve_hass_conf"]
+    rh = input_data_dict["rh"]
+    var_model = passed_data.get("var_model") or retrieve_hass_conf.get(
+        "sensor_power_load_no_var_loads", "sensor.power_load_no_var_loads"
+    )
+
+    # The calibration day windows are runtime-overridable, report-only knobs (never
+    # read from the config GUI). Each falls back to its module default, so an empty
+    # request reproduces the standard 90 / 14 / 14 day report. A non-positive value
+    # is treated as "not set" and falls back to the default; an over-short retrieval
+    # window is caught by compute_forecast_calibration's minimum-history gate, which
+    # returns a clean error rather than crashing.
+    def _positive_or_default(key: str, default: int) -> int:
+        value = int(passed_data.get(key) or 0)
+        return value if value > 0 else default
+
+    days_to_retrieve = _positive_or_default(
+        "calibration_days_to_retrieve", CALIBRATION_DEFAULT_DAYS
+    )
+    test_days = _positive_or_default("calibration_test_days", CALIBRATION_TEST_DAYS)
+    val_days = _positive_or_default("calibration_val_days", CALIBRATION_VAL_DAYS)
+
+    days_list = utils.get_days_list(days_to_retrieve)
+    if not await rh.get_data(days_list, [var_model]):
+        logger.error("Forecast calibration: failed to retrieve load history from Home Assistant")
+        return None
+    rh.prepare_data(
+        var_model,
+        load_negative=retrieve_hass_conf.get("load_negative", False),
+        set_zero_min=retrieve_hass_conf.get("set_zero_min", True),
+        var_replace_zero=retrieve_hass_conf.get("sensor_replace_zero", []),
+        var_interp=retrieve_hass_conf.get("sensor_linear_interp", []),
+        skip_renaming=True,
+    )
+    load = rh.df_final[var_model].copy()
+    # The mlforecaster row is fit fresh in memory with a fast, stable
+    # LinearRegression (not the user's configured/saved model), so the report is
+    # quick and reproducible and never depends on a slow estimator (e.g. SVR/MLP).
+    result = await compute_forecast_calibration(
+        load,
+        rh.freq,
+        input_data_dict["emhass_conf"],
+        logger,
+        sklearn_model="LinearRegression",
+        test_days=test_days,
+        val_days=val_days,
+        var_model=var_model,
+    )
+    if result.get("error"):
+        return None
+    return result
 
 
 async def forecast_model_predict(
@@ -3057,7 +3455,8 @@ async def main():
     This function may take several arguments as inputs. You can type `emhass --help` to see the list of options:
 
     - action: Set the desired action, options are: perfect-optim, dayahead-optim,
-      naive-mpc-optim, publish-data, forecast-model-fit, forecast-model-predict, forecast-model-tune
+      naive-mpc-optim, publish-data, forecast-model-fit, forecast-model-predict, forecast-model-tune,
+      forecast-calibration
 
     - config: Define path to the config.yaml file
 
@@ -3078,7 +3477,8 @@ async def main():
         "--action",
         type=str,
         help="Set the desired action, options are: perfect-optim, dayahead-optim,\
-        naive-mpc-optim, publish-data, forecast-model-fit, forecast-model-predict, forecast-model-tune",
+        naive-mpc-optim, publish-data, forecast-model-fit, forecast-model-predict, forecast-model-tune,\
+        forecast-calibration",
     )
     parser.add_argument(
         "--config", type=str, help="Define path to the config.json/defaults.json file"
@@ -3276,6 +3676,9 @@ async def main():
             input_data_dict, logger, debug=args.debug, mlf=mlf
         )
         opt_res = None
+    elif args.action == "forecast-calibration":
+        await forecast_calibration(input_data_dict, logger)
+        opt_res = None
     elif args.action == "regressor-model-fit":
         mlr = await regressor_model_fit(input_data_dict, logger, debug=args.debug)
         opt_res = None
@@ -3296,7 +3699,7 @@ async def main():
     else:
         logger.error("The passed action argument is not valid")
         logger.error(
-            "Try setting --action: perfect-optim, dayahead-optim, naive-mpc-optim, forecast-model-fit, forecast-model-predict, forecast-model-tune, export-influxdb-to-csv or publish-data"
+            "Try setting --action: perfect-optim, dayahead-optim, naive-mpc-optim, forecast-model-fit, forecast-model-predict, forecast-model-tune, forecast-calibration, export-influxdb-to-csv or publish-data"
         )
         opt_res = None
     logger.info(opt_res)

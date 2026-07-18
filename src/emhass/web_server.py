@@ -20,12 +20,13 @@ from markupsafe import Markup
 from quart import Quart, make_response, request
 from quart import logging as log
 
-from emhass import last_run
+from emhass import last_run, plan_store
 from emhass.command_line import (
     EMHASS_SCHEMA_VERSION,
     continual_publish,
     dayahead_forecast_optim,
     export_influxdb_to_csv,
+    forecast_calibration,
     forecast_model_fit,
     forecast_model_predict,
     forecast_model_tune,
@@ -44,6 +45,7 @@ from emhass.utils import (
     build_params,
     build_secrets,
     get_injection_dict,
+    get_injection_dict_forecast_calibration,
     get_injection_dict_forecast_model_fit,
     get_injection_dict_forecast_model_tune,
     get_keys_to_mask,
@@ -211,7 +213,7 @@ async def index():
             content = await fid.read()
             try:
                 injection_dict = pickle.loads(content)
-            except (EOFError, pickle.UnpicklingError):
+            except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                 app.logger.warning(
                     "The data container file is empty or incomplete (possible write race condition). "
                     "Please launch an optimization task."
@@ -290,7 +292,7 @@ async def configuration():
             content = await fid.read()
             try:
                 _, params = pickle.loads(content)  # Don't overwrite emhass_conf["config_path"]
-            except (EOFError, pickle.UnpicklingError):
+            except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                 params = {}
     else:
         params = {}
@@ -312,7 +314,7 @@ async def template_action():
             content = await fid.read()
             try:
                 injection_dict = pickle.loads(content)
-            except (EOFError, pickle.UnpicklingError):
+            except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                 app.logger.warning(
                     "The data container file is empty or incomplete (possible write race condition). "
                     "Please launch an optimization task."
@@ -490,7 +492,7 @@ async def _load_params_and_runtime(request, emhass_conf, logger):
             content = await fid.read()
             try:
                 _, params = pickle.loads(content)  # Don't overwrite emhass_conf["config_path"]
-            except (EOFError, pickle.UnpicklingError):
+            except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                 logger.error(
                     "params.pkl is corrupted or truncated (race condition); cannot proceed"
                 )
@@ -617,6 +619,18 @@ async def _handle_ml_actions(action_name, input_data_dict, emhass_conf, logger):
         await _save_injection_dict(injection_dict, emhass_conf["data_path"])
         return "EMHASS >> Action forecast-model-tune executed... \n", 200
 
+    # forecast-calibration
+    if action_name == "forecast-calibration":
+        action_str = " >> Performing a load forecast calibration..."
+        logger.info(action_str)
+        result = await forecast_calibration(input_data_dict, logger)
+        if result is None:
+            return await grab_log(action_str), 400
+
+        injection_dict = get_injection_dict_forecast_calibration(result)
+        await _save_injection_dict(injection_dict, emhass_conf["data_path"])
+        return "EMHASS >> Action forecast-calibration executed... \n", 200
+
     # regressor-model-fit
     if action_name == "regressor-model-fit":
         action_str = " >> Performing a machine learning regressor fit..."
@@ -670,6 +684,33 @@ async def api_v1_last_run():
         }
     else:
         response_body = snap
+
+    response = await make_response(orjson.dumps(response_body))
+    response.headers["Content-Type"] = "application/json"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/v1/plan", methods=["GET"])
+async def api_v1_plan():
+    """Return the latest optimization plan as structured JSON.
+
+    Always-200 envelope with status enum:
+      - "no-run": no optim has completed yet (state lost on restart with no disk file)
+      - "ok": a plan is available
+
+    Schema: docs/api/v1/plan.schema.json (JSON Schema draft 2020-12).
+    """
+    snap = plan_store.read(emhass_conf["data_path"])
+    if snap is None:
+        response_body = {
+            "status": "no-run",
+            "generated_at": None,
+            "emhass_schema_version": EMHASS_SCHEMA_VERSION,
+            "plan": None,
+        }
+    else:
+        response_body = {"status": "ok", **snap}
 
     response = await make_response(orjson.dumps(response_body))
     response.headers["Content-Type"] = "application/json"
@@ -907,7 +948,7 @@ async def _load_injection_dict() -> dict | None:
             content = await fid.read()
             try:
                 return pickle.loads(content)
-            except (EOFError, pickle.UnpicklingError):
+            except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                 # File truncated due to write race condition; treat as not yet available
                 return None
     else:

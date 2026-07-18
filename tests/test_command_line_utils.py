@@ -47,6 +47,7 @@ from emhass.command_line import (
 )
 from emhass.forecast import Forecast
 from emhass.inverter_blocks import (
+    INVERTER_BLOCK_CONFIGS_KEY,
     MULTI_BLOCK_SOLVE_DISABLED_MESSAGE,
     parse_inverter_block_configs,
 )
@@ -203,6 +204,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             params,
             battery_mode_lock="site",
         )
+        params["hybrid_inverter_config_1"]["battery_charge_power_max"] = 4321
         runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
         params["passed_data"] = runtimeparams
         forecast_instance = MagicMock()
@@ -223,7 +225,9 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             "p_load_forecast": None,
         }
 
-        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+        with patch(
+            "emhass.command_line.Forecast", return_value=forecast_instance
+        ) as forecast:
             with patch("emhass.command_line.OptimizationCache.get", return_value=None):
                 with patch("emhass.command_line.OptimizationCache.put") as cache_put:
                     with patch(
@@ -233,7 +237,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                         with patch(
                             "emhass.command_line._prepare_naive_mpc_optim",
                             new=AsyncMock(return_value=prepared_data),
-                        ):
+                        ) as prepare_naive_mpc:
                             input_data_dict = await set_input_data_dict(
                                 emhass_conf,
                                 "profit",
@@ -252,6 +256,29 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         cache_put.assert_called_once()
         self.assertIs(input_data_dict["opt"], optimization_instance)
         self.assertEqual(input_data_dict["optim_conf"]["battery_mode_lock"], "site")
+        self.assertIn(INVERTER_BLOCK_CONFIGS_KEY, input_data_dict["plant_conf"])
+        self.assertIs(forecast.call_args.args[1], input_data_dict["optim_conf"])
+        self.assertIs(forecast.call_args.args[2], input_data_dict["plant_conf"])
+        self.assertIs(optimization.call_args.args[1], input_data_dict["optim_conf"])
+        self.assertIs(optimization.call_args.args[2], input_data_dict["plant_conf"])
+        self.assertIs(cache_put.call_args.args[1], input_data_dict["optim_conf"])
+        self.assertIs(cache_put.call_args.args[2], input_data_dict["plant_conf"])
+        self.assertIs(prepare_naive_mpc.await_args.args[0].optim_conf, input_data_dict["optim_conf"])
+        self.assertIs(prepare_naive_mpc.await_args.args[0].plant_conf, input_data_dict["plant_conf"])
+        self.assertNotIn(INVERTER_BLOCK_CONFIGS_KEY, input_data_dict["params"]["plant_conf"])
+        self.assertNotIn(INVERTER_BLOCK_CONFIGS_KEY, input_data_dict["rh"].params["plant_conf"])
+        self.assertEqual(input_data_dict["plant_conf"]["battery_charge_power_max"], 4321)
+        self.assertEqual(
+            input_data_dict["params"]["plant_conf"]["battery_charge_power_max"],
+            input_data_dict["plant_conf"]["battery_charge_power_max"],
+        )
+        self.assertEqual(
+            input_data_dict["rh"].params["plant_conf"]["battery_charge_power_max"],
+            input_data_dict["plant_conf"]["battery_charge_power_max"],
+        )
+        self.assertIsInstance(input_data_dict["optim_conf"]["delta_forecast_daily"], pd.Timedelta)
+        self.assertIsInstance(input_data_dict["params"]["optim_conf"]["delta_forecast_daily"], str)
+        orjson.dumps(input_data_dict["params"])
 
     async def test_split_pv_hybrid_block_with_runtime_pv_reaches_public_optimization(
         self,
@@ -306,6 +333,262 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         )
         cache_put.assert_called_once()
         self.assertIs(input_data_dict["opt"], optimization_instance)
+
+    async def test_battery_only_indexed_blocks_ignore_conflicting_root_topology(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(params)
+        params["optim_conf"]["set_use_pv"] = True
+        params["plant_conf"].update(
+            {
+                "inverter_is_hybrid": True,
+                "compute_curtailment": True,
+            }
+        )
+        runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
+        params["passed_data"] = runtimeparams
+        forecast_instance = MagicMock()
+        forecast_instance.forecast_dates = pd.date_range(
+            "2024-01-01", periods=10, freq="30min"
+        )
+        forecast_instance.var_load_cost = "unit_load_cost"
+        forecast_instance.var_prod_price = "unit_prod_price"
+        prepared_data = {
+            "df_input_data": None,
+            "days_list": [],
+            "df_input_data_dayahead": pd.DataFrame(),
+            "df_weather": None,
+            "p_pv_forecast": None,
+            "p_load_forecast": None,
+        }
+
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+            with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                with patch("emhass.command_line.OptimizationCache.put"):
+                    with patch("emhass.command_line.Optimization") as optimization:
+                        with patch(
+                            "emhass.command_line._prepare_naive_mpc_optim",
+                            new=AsyncMock(return_value=prepared_data),
+                        ):
+                            await set_input_data_dict(
+                                emhass_conf,
+                                "profit",
+                                orjson.dumps(params).decode("utf-8"),
+                                orjson.dumps(runtimeparams).decode("utf-8"),
+                                "naive-mpc-optim",
+                                logger,
+                                get_data_from_file=True,
+                            )
+
+        optimization.assert_called_once()
+
+    async def test_split_pv_indexed_blocks_ignore_conflicting_root_topology(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        params["optim_conf"].update(
+            {
+                "set_use_pv": False,
+                "set_use_battery": False,
+            }
+        )
+        params["plant_conf"].update(
+            {
+                "inverter_is_hybrid": False,
+                "compute_curtailment": True,
+            }
+        )
+        runtimeparams = TestCommandLineAsyncUtils._split_pv_hybrid_runtimeparams()
+        params["passed_data"] = runtimeparams
+        forecast_instance = MagicMock()
+        forecast_instance.forecast_dates = pd.date_range(
+            "2024-01-01", periods=10, freq="30min"
+        )
+        forecast_instance.var_load_cost = "unit_load_cost"
+        forecast_instance.var_prod_price = "unit_prod_price"
+        prepared_data = {
+            "df_input_data": None,
+            "days_list": [],
+            "df_input_data_dayahead": pd.DataFrame(),
+            "df_weather": None,
+            "p_pv_forecast": None,
+            "p_load_forecast": None,
+        }
+
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+            with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                with patch("emhass.command_line.OptimizationCache.put"):
+                    with patch("emhass.command_line.Optimization") as optimization:
+                        with patch(
+                            "emhass.command_line._prepare_naive_mpc_optim",
+                            new=AsyncMock(return_value=prepared_data),
+                        ):
+                            await set_input_data_dict(
+                                emhass_conf,
+                                "profit",
+                                orjson.dumps(params).decode("utf-8"),
+                                orjson.dumps(runtimeparams).decode("utf-8"),
+                                "naive-mpc-optim",
+                                logger,
+                                get_data_from_file=True,
+                            )
+
+        optimization.assert_called_once()
+
+    async def test_runtime_single_uses_legacy_input_setup_despite_static_extra_blocks(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(params)
+        runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
+        runtimeparams["multi_inverter_mode"] = "single"
+        params["passed_data"] = runtimeparams
+        forecast_instance = MagicMock()
+        forecast_instance.forecast_dates = pd.date_range(
+            "2024-01-01", periods=10, freq="30min"
+        )
+        forecast_instance.var_load_cost = "unit_load_cost"
+        forecast_instance.var_prod_price = "unit_prod_price"
+        prepared_data = {
+            "df_input_data": None,
+            "days_list": [],
+            "df_input_data_dayahead": pd.DataFrame(),
+            "df_weather": None,
+            "p_pv_forecast": None,
+            "p_load_forecast": None,
+        }
+
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+            with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                with patch("emhass.command_line.OptimizationCache.put"):
+                    with patch("emhass.command_line.Optimization") as optimization:
+                        with patch(
+                            "emhass.command_line._prepare_naive_mpc_optim",
+                            new=AsyncMock(return_value=prepared_data),
+                        ):
+                            input_data_dict = await set_input_data_dict(
+                                emhass_conf,
+                                "profit",
+                                orjson.dumps(params).decode("utf-8"),
+                                orjson.dumps(runtimeparams).decode("utf-8"),
+                                "naive-mpc-optim",
+                                logger,
+                                get_data_from_file=True,
+                            )
+
+        optimization.assert_called_once()
+        self.assertEqual(input_data_dict["plant_conf"]["multi_inverter_mode"], "single")
+
+    async def test_weather_cache_runtime_single_uses_legacy_path_despite_static_extra_blocks(
+        self,
+    ):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(params)
+        runtimeparams = {"multi_inverter_mode": "single"}
+        forecast_instance = MagicMock()
+        forecast_instance.get_weather_forecast = AsyncMock(return_value=pd.DataFrame())
+
+        with patch(
+            "emhass.command_line.Forecast", return_value=forecast_instance
+        ) as forecast:
+            result = await weather_forecast_cache(
+                emhass_conf,
+                orjson.dumps(params).decode("utf-8"),
+                orjson.dumps(runtimeparams).decode("utf-8"),
+                logger,
+            )
+
+        self.assertTrue(result)
+        forecast.assert_called_once()
+
+    async def test_export_input_prep_skips_split_pv_forecast_validation(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        runtimeparams = {
+            "sensor_list": ["sensor.grid_power"],
+            "csv_filename": "export.csv",
+            "start_time": "2024-01-01T00:00:00+00:00",
+        }
+
+        with patch("emhass.command_line.Forecast") as forecast:
+            with patch("emhass.command_line.Optimization") as optimization:
+                input_data_dict = await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    orjson.dumps(runtimeparams).decode("utf-8"),
+                    "export-influxdb-to-csv",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        self.assertIsNone(input_data_dict["fcst"])
+        self.assertIsNone(input_data_dict["opt"])
+        self.assertEqual(
+            input_data_dict["params"]["passed_data"]["sensor_list"],
+            runtimeparams["sensor_list"],
+        )
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
+    async def test_direct_export_skips_split_pv_forecast_validation(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        runtimeparams = {
+            "sensor_list": ["sensor.grid_power"],
+            "csv_filename": "export.csv",
+            "start_time": "2024-01-01T00:00:00+00:00",
+        }
+        retrieve_hass = MagicMock()
+        retrieve_hass.use_influxdb = False
+
+        with patch(
+            "emhass.command_line.RetrieveHass", return_value=retrieve_hass
+        ) as retrieve_hass_constructor:
+            result = await export_influxdb_to_csv(
+                None,
+                logger,
+                emhass_conf,
+                orjson.dumps(params).decode("utf-8"),
+                orjson.dumps(runtimeparams).decode("utf-8"),
+            )
+
+        self.assertFalse(result)
+        retrieve_hass_constructor.assert_called_once()
+        self.assertEqual(
+            retrieve_hass_constructor.call_args.args[4]["passed_data"]["sensor_list"],
+            runtimeparams["sensor_list"],
+        )
+
+    async def test_export_with_split_pv_config_still_rejects_missing_sensor_list(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)
+        input_data_dict = await set_input_data_dict(
+            emhass_conf,
+            "profit",
+            orjson.dumps(params).decode("utf-8"),
+            "{}",
+            "export-influxdb-to-csv",
+            logger,
+            get_data_from_file=True,
+        )
+
+        self.assertFalse(await export_influxdb_to_csv(input_data_dict, logger))
+
+    async def test_export_with_malformed_static_block_still_fails_validation(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
+        params["hybrid_inverter_config_1"] = "not-a-dictionary"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "hybrid_inverter_config_1 must be a dictionary",
+        ):
+            await set_input_data_dict(
+                emhass_conf,
+                "profit",
+                orjson.dumps(params).decode("utf-8"),
+                "{}",
+                "export-influxdb-to-csv",
+                logger,
+                get_data_from_file=True,
+            )
 
     async def test_battery_only_extra_block_rejects_none_mode_lock_with_clear_error(
         self,
@@ -977,6 +1260,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len(input_data_dict["df_input_data_dayahead"]), 10
         )  # The default value for prediction_horizon
+
         # Test Naive mpc with a shorter forecast =
         runtimeparams = {
             "pv_power_forecast": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -1051,6 +1335,125 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             input_data_dict["fcst"].optim_conf["production_price_forecast_method"], "list"
         )
+
+    @staticmethod
+    def _make_conflicting_public_inverter_params(params):
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(params)
+        params["optim_conf"].update(
+            {
+                "set_use_pv": True,
+                "set_use_battery": False,
+                "set_battery_dynamic": True,
+                "weather_forecast_method": "open-meteo",
+                "load_forecast_method": "list",
+            }
+        )
+        params["plant_conf"].update(
+            {
+                "inverter_is_hybrid": True,
+                "compute_curtailment": True,
+                "battery_stress_cost": 0.8,
+            }
+        )
+        return params
+
+    @staticmethod
+    def _public_inverter_runtimeparams():
+        return {
+            "load_power_forecast": [200.0] * 10,
+            "load_cost_forecast": [0.20] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+        }
+
+    @staticmethod
+    def _forecast_without_pv_acquisition():
+        forecast_instance = MagicMock()
+        forecast_instance.forecast_dates = pd.date_range(
+            "2024-01-01", periods=10, freq="30min"
+        )
+        forecast_instance.var_load_cost = "unit_load_cost"
+        forecast_instance.var_prod_price = "unit_prod_price"
+        forecast_instance.get_weather_forecast = AsyncMock(
+            side_effect=AssertionError("inactive root PV must not acquire weather")
+        )
+        forecast_instance.get_power_from_weather = Mock(
+            side_effect=AssertionError("inactive root PV must not generate a PV forecast")
+        )
+        forecast_instance.get_load_forecast = AsyncMock(
+            return_value=pd.Series(
+                np.zeros(10),
+                index=forecast_instance.forecast_dates,
+            )
+        )
+        return forecast_instance
+
+    async def _set_conflicting_public_inverter_input(self, set_type):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_conflicting_public_inverter_params(params)
+        runtimeparams = TestCommandLineAsyncUtils._public_inverter_runtimeparams()
+        params["passed_data"] = runtimeparams
+        forecast_instance = TestCommandLineAsyncUtils._forecast_without_pv_acquisition()
+
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance):
+            with patch("emhass.command_line.OptimizationCache.get", return_value=None):
+                with patch("emhass.command_line.OptimizationCache.put"):
+                    with patch("emhass.command_line.Optimization"):
+                        input_data_dict = await set_input_data_dict(
+                            emhass_conf,
+                            "profit",
+                            orjson.dumps(params).decode("utf-8"),
+                            orjson.dumps(runtimeparams).decode("utf-8"),
+                            set_type,
+                            logger,
+                            get_data_from_file=True,
+                        )
+
+        self.assertFalse(input_data_dict["optim_conf"]["set_use_pv"])
+        self.assertTrue(input_data_dict["optim_conf"]["set_use_battery"])
+        self.assertFalse(input_data_dict["optim_conf"]["set_battery_dynamic"])
+        self.assertFalse(input_data_dict["plant_conf"]["inverter_is_hybrid"])
+        self.assertFalse(input_data_dict["plant_conf"]["compute_curtailment"])
+        self.assertEqual(input_data_dict["plant_conf"]["battery_stress_cost"], 0.0)
+        self.assertEqual(
+            input_data_dict["params"]["optim_conf"]["set_use_pv"],
+            input_data_dict["optim_conf"]["set_use_pv"],
+        )
+        self.assertEqual(
+            input_data_dict["params"]["plant_conf"]["inverter_is_hybrid"],
+            input_data_dict["plant_conf"]["inverter_is_hybrid"],
+        )
+        return input_data_dict, forecast_instance
+
+    async def test_dayahead_preparation_uses_public_inverter_one_before_pv_acquisition(self):
+        _, forecast_instance = await self._set_conflicting_public_inverter_input(
+            "dayahead-optim"
+        )
+
+        forecast_instance.get_weather_forecast.assert_not_awaited()
+        forecast_instance.get_power_from_weather.assert_not_called()
+        forecast_instance.get_load_forecast.assert_awaited_once()
+
+    async def test_naive_mpc_preparation_uses_public_inverter_one_before_pv_acquisition(self):
+        _, forecast_instance = await self._set_conflicting_public_inverter_input(
+            "naive-mpc-optim"
+        )
+
+        forecast_instance.get_weather_forecast.assert_not_awaited()
+        forecast_instance.get_power_from_weather.assert_not_called()
+        forecast_instance.get_load_forecast.assert_awaited_once()
+
+    async def test_perfect_preparation_uses_public_inverter_one_before_file_acquisition(self):
+        input_data_dict, forecast_instance = await self._set_conflicting_public_inverter_input(
+            "perfect-optim"
+        )
+
+        self.assertEqual(
+            input_data_dict["retrieve_hass_conf"]["sensor_linear_interp"],
+            [input_data_dict["retrieve_hass_conf"]["sensor_power_load_no_var_loads"]],
+        )
+        forecast_instance.get_weather_forecast.assert_not_awaited()
+        forecast_instance.get_power_from_weather.assert_not_called()
 
     async def test_naive_mpc_flat_runtime_payload_preserves_scalar_battery_inputs(self):
         """Flat MPC runtime battery inputs remain scalar values in legacy config locations."""

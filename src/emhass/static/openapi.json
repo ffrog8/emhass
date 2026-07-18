@@ -157,6 +157,23 @@
         }
       }
     },
+    "/api/v1/plan": {
+      "get": {
+        "summary": "Latest optimization plan",
+        "responses": {
+          "200": {
+            "description": "Plan envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "summary": "Liveness/readiness probe",
@@ -212,6 +229,18 @@
             "default": "sensor.p_pv_forecast",
             "title": "Sensor power photovoltaic forecast",
             "description": "This is the name of the photovoltaic forecast sensor in Watts from Home Assistant. For example: ‘sensor.p_pv_forecast’."
+          },
+          "sensor_power_battery": {
+            "type": "string",
+            "default": "sensor.power_battery",
+            "title": "Sensor signed battery power",
+            "description": "The name of the signed AC-side battery power sensor in Watts from Home Assistant, used by battery self-identification. Either sign convention works (it is auto-detected). Only retrieved when set_use_battery_identification is true. For example: ‘sensor.power_battery’."
+          },
+          "sensor_battery_state_of_charge": {
+            "type": "string",
+            "default": "sensor.battery_state_of_charge",
+            "title": "Sensor battery state of charge",
+            "description": "The name of the measured battery state of charge sensor in percent from Home Assistant, used by battery self-identification. Only retrieved when set_use_battery_identification is true. For example: ‘sensor.battery_state_of_charge’."
           },
           "sensor_power_load_no_var_loads": {
             "type": "string",
@@ -633,6 +662,29 @@
             "x-unit": "h",
             "description": "Maximum age in hours before the adjusted PV regression model is re-fitted. If the saved model is older than this value, a new model will be trained using fresh historical data. Set to 0 to force re-fitting on every call. Defaults to 24 hours (1 day). (unit: h)"
           },
+          "set_use_battery_identification": {
+            "type": "boolean",
+            "default": false,
+            "title": "Use battery self-identification",
+            "description": "Opt-in, default off. When enabled, EMHASS learns the battery usable capacity and round-trip efficiency from Home Assistant history (signed battery power and measured state of charge) instead of relying only on the hand-entered values. It requires set_use_battery to be true and the sensor_power_battery and sensor_battery_state_of_charge sensors. In v1 this is advisory only: it never changes the configured battery values used by the optimizer. Defaults to false."
+          },
+          "battery_identification_trust_tier": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "suggest"
+            ],
+            "default": "observe",
+            "title": "Battery identification trust tier",
+            "description": "Controls what battery self-identification does with its estimate. 'observe' (default) writes the estimate to a JSON file and the log only. 'suggest' additionally publishes two read-only Home Assistant sensors (identified capacity and round-trip efficiency) and logs a recommendation. Neither tier changes the configured battery values used by the optimizer. Defaults to 'observe'."
+          },
+          "battery_identification_model_max_age": {
+            "type": "integer",
+            "default": 24,
+            "title": "Battery identification model maximum age",
+            "x-unit": "h",
+            "description": "Maximum age in hours before the battery identification estimate is re-fitted from fresh Home Assistant history. If the saved result is older than this value, a new estimate is produced. Set to 0 to force re-fitting on every call. Defaults to 24 hours (1 day). (unit: h)"
+          },
           "pv_module_model": {
             "type": "array",
             "items": {
@@ -871,7 +923,7 @@
             "type": "boolean",
             "default": false,
             "title": "Drain battery before grid import",
-            "description": "Set this to true to forbid importing from the grid while the battery is still above its minimum SoC, so stored energy is used before any import. Useful on a flat (non time-of-use) tariff. Note: this can make the problem infeasible in a timestep where the load minus PV exceeds the battery maximum discharge power. In public battery-only and split-PV hybrid multi-inverter solving this top-level site topology flag uses aggregate fleet stored energy."
+            "description": "Set this to true to prefer draining stored battery energy before importing from the grid, so the battery is used up before any import while it is still above its minimum SoC. Useful on a flat (non time-of-use) tariff. This is a soft penalty, not a hard constraint: importing while the battery is charged is heavily penalized so drain-first wins on a flat tariff, but the optimizer can still import when that is the only feasible option, so it will not make the problem infeasible. In public battery-only and split-PV hybrid multi-block solving this top-level site topology flag uses aggregate fleet stored energy."
           },
           "set_battery_dynamic": {
             "type": "boolean",
@@ -1000,6 +1052,13 @@
             "default": 0.0,
             "title": "Battery SOC surplus cost",
             "description": "A virtual cost (Currency/kWh/h) applied for each kWh of SOC above the surplus threshold per hour. This penalizes periods when the battery SOC sits above the surplus threshold, delaying charging into expected solar peaks and reducing time spent near full charge (battery longevity). Defaults to 0.0 (disabled)."
+          },
+          "battery_soc_balance_cost": {
+            "type": "number",
+            "default": 0.0,
+            "title": "Battery SOC balance cost",
+            "x-unit": "virtual currency/kWh/h",
+            "description": "A site-level virtual cost applied in multi-inverter mode for each kWh-hour of absolute deviation between each battery's stored energy and the capacity-weighted fleet SOC target. Defaults to 0.0 (disabled). (unit: virtual currency/kWh/h)"
           },
           "capacity_cost_per_kw": {
             "type": "number",
@@ -1275,6 +1334,76 @@
                   "const": null
                 },
                 "error_message": {
+                  "const": null
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Plan": {
+        "title": "EMHASS /api/v1/plan response",
+        "description": "Response shape for GET /api/v1/plan. The latest optimization plan as JSON records. Columns follow docs/plan_output_schema.md (versioned by emhass_schema_version).",
+        "type": "object",
+        "required": [
+          "status",
+          "generated_at",
+          "emhass_schema_version",
+          "plan"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "no-run",
+              "ok"
+            ],
+            "description": "Discriminator: 'no-run' before any optimization, 'ok' once a plan exists."
+          },
+          "generated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "ISO 8601 UTC instant the optimization that produced this plan completed. Equals /api/v1/last-run's timestamp for the same run. Null when status='no-run'."
+          },
+          "emhass_schema_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "EMHASS_SCHEMA_VERSION. The plan columns follow docs/plan_output_schema.md at this version."
+          },
+          "plan": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object"
+            },
+            "description": "Per-timestep optimization records (one object per timestep; columns per docs/plan_output_schema.md, plus a 'timestamp' field). Each record's 'timestamp' is an ISO 8601 UTC instant (Z suffix), the same instant the CSV export and HA publish use, not the configured local timezone — align consumers on UTC, like generated_at. Null when status='no-run'."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "no-run"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "generated_at": {
+                  "const": null
+                },
+                "plan": {
                   "const": null
                 }
               }

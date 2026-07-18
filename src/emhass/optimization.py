@@ -23,6 +23,7 @@ from emhass.inverter_blocks import (
     has_extra_inverter_blocks,
     is_public_safe_multi_block_battery_model,
     is_public_safe_multi_block_hybrid_model,
+    project_public_inverter_config,
 )
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
@@ -61,6 +62,17 @@ THERMAL_CONFIG_KEY_HINTS = {
 # curtailment powers in W).
 CURTAILMENT_TIEBREAK_EPS = 1e-7
 BATTERY_SOC_BALANCE_COST_KEY = "battery_soc_balance_cost"
+
+# Battery-first priority (issue #834/#1002): when set_battery_first_priority is
+# on, importing from the grid while the battery is still above its minimum SoC is
+# penalized at this multiple of the prevailing import tariff. Making it a soft
+# penalty rather than a hard constraint means the optimizer still prefers to drain
+# the battery before importing (the penalty dwarfs any realistic tariff gradient,
+# so drain-first wins at any currency/price scale) but can always fall back to
+# importing when that is the only feasible option (e.g. recharging to a terminal
+# SoC target with no PV), instead of returning infeasible. The gate confines the
+# penalty to genuinely avoidable import, so an aggressive factor is safe.
+BATTERY_FIRST_IMPORT_PENALTY_FACTOR = 100.0
 
 
 class Optimization:
@@ -237,6 +249,15 @@ class Optimization:
         self.param_pv_forecast = cp.Parameter(self.num_timesteps, name="pv_forecast")
         self.param_load_forecast = cp.Parameter(self.num_timesteps, name="load_forecast")
         self.param_load_cost = cp.Parameter(self.num_timesteps, name="load_cost")
+        # Non-negative clip of the import tariff, used only by the battery-first
+        # priority penalty (issue #1002). Pricing that penalty off the raw signed
+        # tariff would turn it into an unbounded reward in a negative-price slot
+        # (routine on day-ahead markets), making the penalty variable run to
+        # infinity. A dedicated Parameter (rather than max() baked in at build
+        # time) keeps the clip correct across warm-started re-solves.
+        self.param_load_cost_pos = cp.Parameter(
+            self.num_timesteps, nonneg=True, name="load_cost_pos"
+        )
         self.param_prod_price = cp.Parameter(self.num_timesteps, name="prod_price")
 
         # Per-deferrable-load cost override parameters. When the user supplies a
@@ -390,7 +411,12 @@ class Optimization:
         ):
             root_block = parsed_blocks[1]
         if root_block is not None:
-            self.inverter_block_config[0] = root_block
+            self.inverter_block_config[0] = InverterBlockConfig(
+                index=root_block.index,
+                optim_conf=self.optim_conf,
+                plant_conf=self.plant_conf,
+                runtime_conf=root_block.runtime_conf,
+            )
         else:
             self.inverter_block_config[0] = InverterBlockConfig(
                 index=0,
@@ -516,7 +542,7 @@ class Optimization:
         }
 
         for _index, block in sorted(self.inverter_block_config.items()):
-            if block.index == 0:
+            if _index == 0:
                 continue
             if not block.optim_conf.get("set_use_battery", False):
                 self._unsupported_multi_block_battery_feature(block.index, "set_use_battery=false")
@@ -548,8 +574,8 @@ class Optimization:
                 ):
                     self._unsupported_multi_block_battery_feature(block.index, key)
             for key, default in stress_defaults.items():
-                if key in block.optim_conf and not self._is_default_scalar_or_vector(
-                    block.optim_conf[key],
+                if key in block.plant_conf and not self._is_default_scalar_or_vector(
+                    block.plant_conf[key],
                     default,
                 ):
                     self._unsupported_multi_block_battery_feature(block.index, key)
@@ -562,7 +588,7 @@ class Optimization:
             "inverter_stress_segments": 10.0,
         }
         for _index, block in sorted(self.inverter_block_config.items()):
-            if block.index == 0:
+            if _index == 0:
                 continue
             for key, default in inverter_stress_defaults.items():
                 if key in block.plant_conf and not self._is_default_scalar_or_vector(
@@ -687,13 +713,10 @@ class Optimization:
             or not isinstance(parsed_blocks.get(1), InverterBlockConfig)
         ):
             return
-        first_inverter = parsed_blocks[1]
-        self.optim_conf = copy.copy(self.optim_conf)
-        self.plant_conf = copy.copy(self.plant_conf)
-        self.optim_conf.update(first_inverter.optim_conf)
-        self.plant_conf.update(first_inverter.plant_conf)
-        self.plant_conf[MULTI_INVERTER_MODE_KEY] = MULTI_INVERTER_MODE_MULTI
-        self.plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = parsed_blocks
+        self.optim_conf, self.plant_conf = project_public_inverter_config(
+            self.optim_conf,
+            self.plant_conf,
+        )
 
     def _root_inverter_runtime_conf(self) -> Mapping[str, object]:
         if not self._is_public_multi_inverter_mode():
@@ -797,6 +820,27 @@ class Optimization:
         tolerance_energy = 0.01 * total_capacity
         return stored_energy, min_energy, total_capacity, tolerance_energy
 
+    def _effective_nested_soc_target(self, block: InverterBlockConfig) -> float | None:
+        """Clamp a validated indexed target after scalar runtime bounds apply."""
+        if "soc_target" not in block.runtime_conf:
+            return None
+        submitted_target = float(block.runtime_conf["soc_target"])
+        soc_min = float(block.plant_conf["battery_minimum_state_of_charge"])
+        soc_max = float(block.plant_conf["battery_maximum_state_of_charge"])
+        effective_target = min(max(submitted_target, soc_min), soc_max)
+        if effective_target != submitted_target:
+            self.logger.warning(
+                "Passed hybrid_inverter_config_%s.soc_target=%s is outside [%s, %s], "
+                "clamping to soc_target=%s",
+                block.index,
+                submitted_target,
+                soc_min,
+                soc_max,
+                effective_target,
+            )
+        block.runtime_conf["soc_target"] = effective_target
+        return effective_target
+
     def _update_extra_inverter_block_battery_params(self) -> None:
         if not self._multi_block_battery_model_enabled:
             return
@@ -812,7 +856,8 @@ class Optimization:
             )
             soc_final = float(runtime_conf.get("soc_final", soc_init))
             soc_target_floor = np.zeros(self.num_timesteps)
-            if "soc_target" in runtime_conf:
+            soc_target = self._effective_nested_soc_target(block)
+            if soc_target is not None:
                 target_timestep = runtime_conf.get(
                     "soc_target_timestep",
                     self.num_timesteps - 1,
@@ -821,7 +866,7 @@ class Optimization:
                     max(int(target_timestep), 0),
                     self.num_timesteps - 1,
                 )
-                soc_target_floor[target_timestep] = float(runtime_conf["soc_target"]) * cap
+                soc_target_floor[target_timestep] = soc_target * cap
 
             params["soc_init"].value = soc_init
             params["soc_final"].value = soc_final
@@ -1967,11 +2012,18 @@ class Optimization:
             vars_dict["soc_deficit_cost"] = cp.Variable(n, nonneg=True, name="soc_deficit_cost")
             vars_dict["soc_surplus_cost"] = cp.Variable(n, nonneg=True, name="soc_surplus_cost")
             # Battery-first priority gate (issue #834): binary per timestep,
-            # 1 = grid import allowed in this slot. Only created when the
-            # feature is enabled; otherwise it never enters self.vars.
+            # 1 = grid import is "free" (unpenalized) in this slot. Only created
+            # when the feature is enabled; otherwise it never enters self.vars.
+            # battery_first_penalty (issue #1002): nonneg slack = the amount of
+            # grid import that happens while the battery is still charged (the
+            # gate is 0). Penalized in the objective instead of forbidden, so the
+            # feature can never make the problem infeasible.
             if self.optim_conf.get("set_battery_first_priority", False):
                 vars_dict["battery_first_import_gate"] = cp.Variable(
                     n, boolean=True, name="battery_first_import_gate"
+                )
+                vars_dict["battery_first_penalty"] = cp.Variable(
+                    n, nonneg=True, name="battery_first_penalty"
                 )
         else:
             # Create dummy zero variables to preserve logic structure without conditional checks everywhere
@@ -2264,6 +2316,22 @@ class Optimization:
                 )
                 objective_terms.append(-cp.sum(soc_surplus_cost))
 
+        # Battery-first priority penalty (issue #834/#1002). battery_first_penalty
+        # is the grid import that occurs while the battery is still above its
+        # minimum SoC. Priced at BATTERY_FIRST_IMPORT_PENALTY_FACTOR times the
+        # import tariff so draining the battery first is preferred at any tariff
+        # scale, while keeping the feature a soft penalty that can never make the
+        # problem infeasible. Only present when the feature is enabled. The tariff
+        # is clipped to non-negative (param_load_cost_pos): a negative-price slot
+        # must not turn this penalty into an unbounded reward on the otherwise
+        # upper-unbounded penalty variable.
+        battery_first_penalty = self.vars.get("battery_first_penalty")
+        if battery_first_penalty is not None:
+            objective_terms.append(
+                -scale
+                * BATTERY_FIRST_IMPORT_PENALTY_FACTOR
+                * cp.sum(cp.multiply(self.param_load_cost_pos, battery_first_penalty))
+            )
         if self._battery_soc_balance_penalty is not None:
             self.logger.debug("Adding multi-inverter battery SOC balance cost to objective")
             objective_terms.append(-self._battery_soc_balance_penalty)
@@ -2286,9 +2354,15 @@ class Optimization:
         # The weight is normalized by the horizon length and the epsilon is orders of
         # magnitude below any real tariff coefficient, so it breaks ties without ever
         # flipping a real economic decision.
+        tiebreak_weights = np.arange(self.num_timesteps, 0, -1) / self.num_timesteps
+        curtailment_variables = []
         if self.plant_conf["compute_curtailment"]:
-            p_pv_curtailment = self.vars["p_pv_curtailment"]
-            tiebreak_weights = np.arange(self.num_timesteps, 0, -1) / self.num_timesteps
+            curtailment_variables.append(self.vars["p_pv_curtailment"])
+        if self._multi_block_hybrid_model_enabled:
+            for index, block_config in self._extra_battery_block_configs():
+                if block_config.plant_conf.get("compute_curtailment", False):
+                    curtailment_variables.append(self.vars[f"p_pv_curtailment_{index}"])
+        for p_pv_curtailment in curtailment_variables:
             objective_terms.append(
                 -CURTAILMENT_TIEBREAK_EPS * cp.sum(cp.multiply(tiebreak_weights, p_pv_curtailment))
             )
@@ -2508,7 +2582,7 @@ class Optimization:
         constraints.append(p_ac_dc <= (1 - is_dc_sourcing) * p_ac_dc_max)
         constraints.append(p_dc_ac <= is_dc_sourcing * p_dc_ac_max)
 
-        if block_config.index == 0 and inv_stress_conf and inv_stress_conf["active"]:
+        if is_root_block and inv_stress_conf and inv_stress_conf["active"]:
             seg_params = self._build_stress_segments(
                 inv_stress_conf["max_power"],
                 inv_stress_conf["unit_cost"],
@@ -2793,18 +2867,24 @@ class Optimization:
         # tariff, "drain the battery before importing" and "interleave grid
         # import with discharge" are cost-equivalent, so the solver may plan
         # grid imports while the battery is still well above its minimum SoC.
-        # When enabled, forbid grid import in any timestep where the battery
-        # still has usable energy. This uses a dedicated binary gate, not the
-        # grid-direction binary D: with set_nodischarge_to_grid the constraint
-        # E <= D would otherwise force the battery to stop discharging, which is
-        # exactly what we want to avoid. Same Big-M style as the discharge/import
-        # coupling in #796.
-        # WARNING: this is a hard constraint. It can make the problem infeasible
-        # in a timestep where (load - PV) exceeds the battery maximum discharge
-        # power, since grid import is then the only way to balance power. Only
-        # enable it when the battery discharge power can cover the load.
+        # When enabled, prefer to drain stored energy before importing. This uses
+        # a dedicated binary gate, not the grid-direction binary D: with
+        # set_nodischarge_to_grid the constraint E <= D would otherwise force the
+        # battery to stop discharging, which is exactly what we want to avoid.
+        #
+        # This is a SOFT penalty, not a hard constraint (issue #1002). The gate is
+        # forced to 0 in any slot where the battery is still above min SoC, and
+        # any grid import in such a slot is charged battery_first_penalty and
+        # penalized in the objective at BATTERY_FIRST_IMPORT_PENALTY_FACTOR times
+        # the import tariff. That dwarfs any realistic tariff gradient, so the
+        # solver still drains the battery before importing, but it can always fall
+        # back to importing when that is the only feasible option (recharging to a
+        # terminal SoC target with no PV, or a load that exceeds the battery's
+        # discharge power) instead of returning infeasible as the old hard bound
+        # `p_grid_pos <= max_from_grid * import_gate` did.
         if self.optim_conf.get("set_battery_first_priority", False):
             import_gate = self.vars["battery_first_import_gate"]
+            battery_first_penalty = self.vars["battery_first_penalty"]
             p_grid_pos = self.vars["p_grid_pos"]
             max_from_grid = self._prepare_power_limit_array(
                 self.plant_conf.get("maximum_power_from_grid", 9000),
@@ -2819,16 +2899,20 @@ class Optimization:
             ) = self._site_battery_first_energy_terms()
             # 1% SoC tolerance so the gate opens cleanly once the battery has
             # numerically reached its minimum, avoiding chatter at the floor.
-            # import_gate = 1 (import allowed) is only possible once the stored
-            # energy is at/below min + tolerance; otherwise the gate is forced
-            # to 0 and no grid import is allowed in that slot.
+            # import_gate = 1 (import unpenalized) is only possible once the
+            # stored energy is at/below min + tolerance; otherwise the gate is
+            # forced to 0 and any grid import in that slot is penalized.
             constraints.append(
                 stored_energy
                 - min_energy
                 - soc_tolerance_energy
                 <= total_capacity * (1 - import_gate)
             )
-            constraints.append(p_grid_pos <= cp.multiply(max_from_grid, import_gate))
+            # battery_first_penalty >= import beyond the free (gated) allowance;
+            # nonneg, so it equals max(0, import while the battery is charged).
+            constraints.append(
+                battery_first_penalty >= p_grid_pos - cp.multiply(max_from_grid, import_gate)
+            )
 
         # Stress Cost
         if batt_stress_conf and batt_stress_conf["active"]:
@@ -3734,7 +3818,7 @@ class Optimization:
         penalty_expr = 0
         desired_temps_raw = tank.get("desired_temperatures", [])
         # The compiler may store a scalar desired_temperature; broadcast to horizon.
-        if isinstance(desired_temps_raw, (int, float)):
+        if isinstance(desired_temps_raw, int | float):
             desired_temps_list = [float(desired_temps_raw)] * required_len
         else:
             desired_temps_list = list(desired_temps_raw)
@@ -4784,6 +4868,7 @@ class Optimization:
             self.param_pv_forecast = cp.Parameter(current_n, name="pv_forecast")
             self.param_load_forecast = cp.Parameter(current_n, name="load_forecast")
             self.param_load_cost = cp.Parameter(current_n, name="load_cost")
+            self.param_load_cost_pos = cp.Parameter(current_n, nonneg=True, name="load_cost_pos")
             self.param_prod_price = cp.Parameter(current_n, name="prod_price")
             self.param_cost_per_load = [
                 cp.Parameter(current_n, name=f"cost_per_load_{k}")
@@ -4816,6 +4901,7 @@ class Optimization:
         # Data Validation & Defaults
         if self._is_public_multi_inverter_mode() and self.optim_conf["set_use_battery"]:
             root_runtime_conf = self._root_inverter_runtime_conf()
+            root_block = self.inverter_block_config[0]
             soc_init = float(
                 root_runtime_conf.get(
                     "soc_init",
@@ -4823,7 +4909,7 @@ class Optimization:
                 )
             )
             soc_final = float(root_runtime_conf.get("soc_final", soc_init))
-            soc_target = root_runtime_conf.get("soc_target")
+            soc_target = self._effective_nested_soc_target(root_block)
             soc_target_timestep = root_runtime_conf.get("soc_target_timestep")
         if self.optim_conf["set_use_battery"]:
             if soc_init is None:
@@ -4971,6 +5057,7 @@ class Optimization:
         self.param_pv_forecast.value = self._root_pv_forecast_values(p_pv)
         self.param_load_forecast.value = p_load
         self.param_load_cost.value = unit_load_cost
+        self.param_load_cost_pos.value = np.maximum(np.asarray(unit_load_cost, dtype=float), 0.0)
         self.param_prod_price.value = unit_prod_price
 
         # Per-load cost forecast overrides. Default each load's per-timestep cost
@@ -5944,6 +6031,7 @@ class Optimization:
         p_pv: pd.Series,
         p_load: pd.Series,
         soc_init: float | None = None,
+        soc_final: float | None = None,
         stage_times: dict[str, float] | None = None,
     ) -> pd.DataFrame:
         r"""
@@ -5958,6 +6046,18 @@ class Optimization:
         :param p_load: The forecasted Load power consumption. This power should \
             not include the power from the deferrable load that we want to find.
         :type p_load: pandas.DataFrame
+        :param soc_init: Optional initial battery SOC for the optimization. \
+            When ``None`` (the default), falls back to ``soc_final`` if set, \
+            otherwise to ``battery_target_state_of_charge`` from the plant config.
+        :type soc_init: float, optional
+        :param soc_final: Optional final battery SOC for the optimization. \
+            When ``None`` (the default), falls back to ``soc_init`` if set, \
+            otherwise to ``battery_target_state_of_charge``. Passing an explicit \
+            ``soc_final`` distinct from ``soc_init`` is required to plan a \
+            net battery charge / discharge across the horizon — notably when \
+            ``set_battery_first_priority`` is enabled and the horizon starts \
+            at a high SOC.
+        :type soc_final: float, optional
         :param stage_times: Optional dict to record nested sub-stage timings
             (``optim_solve.build`` / ``optim_solve.solve`` / ``optim_solve.extract``).
         :type stage_times: dict, optional
@@ -5965,7 +6065,9 @@ class Optimization:
         :rtype: pandas.DataFrame
 
         """
-        self.logger.info(f"Perform optimization for the day-ahead with soc_init: {soc_init}")
+        self.logger.info(
+            f"Perform optimization for the day-ahead with soc_init: {soc_init}, soc_final: {soc_final}"
+        )
 
         # Extract cost arrays (ensure they are flat numpy arrays)
         unit_load_cost = df_input_data[self.var_load_cost].values
@@ -5980,6 +6082,7 @@ class Optimization:
             unit_load_cost,
             unit_prod_price,
             soc_init=soc_init,
+            soc_final=soc_final,
             stage_times=stage_times,
         )
         return self.opt_res

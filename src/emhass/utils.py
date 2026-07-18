@@ -21,6 +21,7 @@ import pandas as pd
 import plotly.express as px
 import pytz
 import yaml
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from emhass.inverter_blocks import (
     HYBRID_INVERTER_CONFIG_PREFIX,
@@ -1820,16 +1821,35 @@ async def treat_runtimeparams(
                         forecast_data_df["time"], format="ISO8601", utc=True
                     ).dt.tz_convert(time_zone)
 
-                    # align index with forecast_dates
-                    forecast_data_df = (
-                        forecast_data_df.resample(
-                            pd.to_timedelta(optimization_time_step, "minutes"),
-                            on="time",
-                        )
-                        .aggregate({"value": "mean"})
-                        .reindex(forecast_dates, method="nearest")
-                    )
+                    # Aggregate any sub-step points to the optimization time step.
+                    # Resample in the local time_zone so the buckets line up with the
+                    # forecast grid, which get_forecast_dates floors in local time
+                    # (this matters for sub-hour UTC offsets such as +05:30).
+                    forecast_data_df = forecast_data_df.resample(
+                        pd.to_timedelta(optimization_time_step, "minutes"),
+                        on="time",
+                    ).aggregate({"value": "mean"})
+                    # Now move to UTC so the union/reindex below align by instant
+                    # across DST edges without mixing two differently-localized
+                    # indexes. forecast_dates is a list of ISO strings; parse it to
+                    # the same UTC index. tz_convert only relabels, the instants are
+                    # unchanged, so the local-time aggregation above is preserved.
+                    forecast_data_df.index = forecast_data_df.index.tz_convert("UTC")
+                    target_dates = pd.to_datetime(forecast_dates, utc=True)
+                    # Align with forecast_dates using hold-last (step) semantics: each
+                    # value holds until the next provided point. Union the provided
+                    # index with the horizon first so points defined before
+                    # forecast_dates[0] still anchor the forward-fill; reindexing
+                    # straight onto forecast_dates with method="nearest" dropped that
+                    # anchor and let the trailing bfill fill the leading slots with the
+                    # NEXT value instead (issue #1003).
+                    combined_index = forecast_data_df.index.union(target_dates)
+                    forecast_data_df = forecast_data_df.reindex(combined_index)
+                    # ffill applies the hold-last; bfill then covers any slots before
+                    # the first provided point (a dict that starts after the window
+                    # start) by extending that first value back over them.
                     forecast_data_df["value"] = forecast_data_df["value"].ffill().bfill()
+                    forecast_data_df = forecast_data_df.reindex(target_dates)
                     forecast_input = forecast_data_df["value"].tolist()
                 if isinstance(forecast_input, list) and len(forecast_input) >= len(forecast_dates):
                     params["passed_data"][forecast_key] = forecast_input
@@ -1861,11 +1881,13 @@ async def treat_runtimeparams(
             else:
                 params["passed_data"][forecast_key] = None
 
-        _validate_nested_inverter_block_pv_runtime(
-            params=params,
-            block_runtime_conf=block_runtime_conf,
-            forecast_dates=forecast_dates,
-        )
+        # Export retrieves historical InfluxDB data and never builds a forecast horizon.
+        if set_type != "export-influxdb-to-csv":
+            _validate_nested_inverter_block_pv_runtime(
+                params=params,
+                block_runtime_conf=block_runtime_conf,
+                forecast_dates=forecast_dates,
+            )
 
         # Explicitly handle historic_days_to_retrieve from runtimeparams BEFORE validation
         if "historic_days_to_retrieve" in runtimeparams:
@@ -2161,6 +2183,23 @@ async def treat_runtimeparams(
         if "solar_forecast_kwp" in runtimeparams.keys():
             params["retrieve_hass_conf"]["solar_forecast_kwp"] = runtimeparams["solar_forecast_kwp"]
         # Treat custom entities id's and friendly names for variables
+        # Runtime-only day windows for the forecast-calibration report. These are
+        # report knobs (not config settings), so they live in passed_data next to
+        # the custom_* ids and never touch retrieve_hass_conf / optim_conf. Each is
+        # optional; the calibration action falls back to its default when unset.
+        for calibration_key in (
+            "calibration_days_to_retrieve",
+            "calibration_test_days",
+            "calibration_val_days",
+        ):
+            if calibration_key in runtimeparams.keys():
+                try:
+                    params["passed_data"][calibration_key] = int(runtimeparams[calibration_key])
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"Ignoring non-integer runtime value for {calibration_key}: "
+                        f"{runtimeparams[calibration_key]}"
+                    )
         if "custom_pv_forecast_id" in runtimeparams.keys():
             params["passed_data"]["custom_pv_forecast_id"] = runtimeparams["custom_pv_forecast_id"]
         if "custom_load_forecast_id" in runtimeparams.keys():
@@ -2218,7 +2257,9 @@ async def treat_runtimeparams(
     retrieve_hass_conf = params["retrieve_hass_conf"]
     optim_conf = params["optim_conf"]
     plant_conf = params["plant_conf"]
-    _validate_inverter_block_pv_mode(params, block_runtime_conf)
+    # Export still parses indexed blocks, but split-PV runtime data is optimizer-only.
+    if set_type != "export-influxdb-to-csv":
+        _validate_inverter_block_pv_mode(params, block_runtime_conf)
     parse_inverter_block_configs(params, optim_conf, plant_conf, block_runtime_conf)
     if block_runtime_conf:
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
@@ -2468,6 +2509,74 @@ def get_injection_dict(df: pd.DataFrame, plot_size: int | None = 1366) -> dict:
     return injection_dict
 
 
+def compute_forecast_metrics(
+    actual: pd.Series | np.ndarray,
+    predicted: pd.Series | np.ndarray,
+    logger: logging.Logger | None = None,
+) -> dict:
+    """
+    Compute goodness-of-fit metrics for a forecast against realised values.
+
+    Only rows where both the actual and the predicted value are present are
+    used; any leading warm-up NaNs are excluded. The guards mirror the degenerate
+    cases the metrics can hit: r2_score requires at least 2 samples, MAE/RMSE
+    require at least 1, and MAPE excludes zero actuals to avoid division by zero.
+
+    :param actual: The realised values.
+    :type actual: pd.Series | np.ndarray
+    :param predicted: The forecasted values (same index/length as ``actual``).
+    :type predicted: pd.Series | np.ndarray
+    :param logger: Optional logger for the degenerate-case warning.
+    :type logger: logging.Logger, optional
+    :return: A dict with keys mae, rmse, r2, mape, n_samples.
+    :rtype: dict
+    """
+    actual_values = pd.Series(np.asarray(actual, dtype=float))
+    predicted_values = pd.Series(np.asarray(predicted, dtype=float))
+    valid_mask = predicted_values.notna() & actual_values.notna()
+    n_valid_samples = int(valid_mask.sum())
+    actual_valid = actual_values[valid_mask]
+    predicted_valid = predicted_values[valid_mask]
+
+    # Guard against degenerate cases (all-NaN predictions or single sample).
+    # r2_score requires at least 2 samples; MAE/RMSE require at least 1.
+    if n_valid_samples == 0:
+        if logger is not None:
+            logger.warning("Forecast metrics: no valid predictions - metrics set to NaN")
+        return {
+            "mae": float("nan"),
+            "rmse": float("nan"),
+            "r2": float("nan"),
+            "mape": float("nan"),
+            "n_samples": 0,
+        }
+    mae = float(mean_absolute_error(actual_valid, predicted_valid))
+    rmse = float(np.sqrt(mean_squared_error(actual_valid, predicted_valid)))
+    # r2_score is undefined for a single sample (variance == 0)
+    r2 = float(r2_score(actual_valid, predicted_valid)) if n_valid_samples > 1 else float("nan")
+    # MAPE: exclude zero actuals to avoid division by zero
+    nonzero_mask = actual_valid != 0
+    if nonzero_mask.sum() > 0:
+        mape = float(
+            np.mean(
+                np.abs(
+                    (actual_valid[nonzero_mask] - predicted_valid[nonzero_mask])
+                    / actual_valid[nonzero_mask]
+                )
+            )
+            * 100
+        )
+    else:
+        mape = float("nan")
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "mape": mape,
+        "n_samples": n_valid_samples,
+    }
+
+
 def get_injection_dict_forecast_model_fit(df_fit_pred: pd.DataFrame, mlf: MLForecaster) -> dict:
     """
     Build a dictionary with graphs and tables for the webui for special MLF fit case.
@@ -2496,6 +2605,39 @@ def get_injection_dict_forecast_model_fit(df_fit_pred: pd.DataFrame, mlf: MLFore
         + "</h4>"
     )
     injection_dict["figure_0"] = image_path_0
+    return injection_dict
+
+
+def get_injection_dict_forecast_calibration(result: dict) -> dict:
+    """
+    Build the webui graph + metrics table for the forecast-calibration action.
+
+    :param result: The dict returned by ``compute_forecast_calibration``
+        (keys: ``table``, ``plot``, ``val_window``, ``caveats``).
+    :type result: dict
+    :return: A dictionary containing the graph and table in html format
+    :rtype: dict
+    """
+    plot_df = result["plot"]
+    fig = plot_df.plot()
+    fig.layout.template = "presentation"
+    fig.update_yaxes(title_text="Load")
+    fig.update_xaxes(title_text="Time")
+    figure_0 = fig.to_html(full_html=False, default_width="75%")
+    table1 = result["table"].to_html(classes="mystyle", index=False)
+    val_start, val_end = result["val_window"]
+    injection_dict = {}
+    injection_dict["title"] = "<h2>Load forecast calibration</h2>"
+    injection_dict["subsubtitle0"] = (
+        "<h4>Actual vs forecast methods over the validation window "
+        + f"({val_start} to {val_end})</h4>"
+    )
+    injection_dict["figure_0"] = figure_0
+    injection_dict["subsubtitle1"] = (
+        "<h4>Accuracy metrics by method and split (train / test / val)</h4>"
+    )
+    injection_dict["table1"] = table1
+    injection_dict["subsubtitle2"] = "<h5>" + result["caveats"] + "</h5>"
     return injection_dict
 
 
