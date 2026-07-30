@@ -38,6 +38,11 @@ import orjson
 
 from emhass import utils
 from emhass.command_line import OptimizationCache, naive_mpc_optim, set_input_data_dict
+from emhass.soc_power_profiles import (
+    BENCHMARK_MAX_ADDED_ROWS,
+    BENCHMARK_MAX_SELECTORS,
+    model_size_increase,
+)
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "benchmarks" / "soc_power_profiles" / "payloads.json"
@@ -374,10 +379,16 @@ async def _run_payload(
     logger: logging.Logger,
     warning_capture: _WarningCapture,
     emhass_conf: dict[str, pathlib.Path],
+    apply_profiles: bool,
 ) -> dict[str, Any]:
-    OptimizationCache.clear()
+    profiles = (
+        copy.deepcopy(payload.get("candidate_profiles")) if apply_profiles else None
+    )
+    configuration = copy.deepcopy(payload["configuration"])
+    if profiles is not None:
+        configuration["battery_soc_power_profiles"] = profiles
     params = await build_benchmark_params(
-        payload["configuration"],
+        configuration,
         corpus["solver"],
         payload["runtime"],
         logger,
@@ -388,67 +399,193 @@ async def _run_payload(
     runs = []
     cold_optimization = None
 
-    for repetition in range(repetitions):
-        had_cached_instance = OptimizationCache.get_stats()["has_instance"]
-        end_to_end_start = time.perf_counter()
-        setup_start = time.perf_counter()
-        input_data = await set_input_data_dict(
-            emhass_conf,
-            payload["configuration"]["costfun"],
-            params_json,
-            runtime_json,
-            corpus["mode"],
-            logger,
-            get_data_from_file=True,
-        )
-        setup_seconds = time.perf_counter() - setup_start
-        if not isinstance(input_data, dict):
-            raise RuntimeError(f"input preparation failed for payload {payload['name']!r}")
-
-        warning_start = len(warning_capture.messages)
-        result = await naive_mpc_optim(input_data, logger, debug=True)
-        end_to_end_seconds = time.perf_counter() - end_to_end_start
-        if not hasattr(result, "columns"):
-            raise RuntimeError(f"optimization failed for payload {payload['name']!r}")
-
-        cache_state, cache_reused, cold_optimization = verify_cache_transition(
-            repetition=repetition,
-            had_cached_instance=had_cached_instance,
-            cold_optimization=cold_optimization,
-            current_optimization=input_data["opt"],
-        )
-        primary_status, relaxed_fallback_used = primary_solve_outcome(
-            warning_capture.messages[warning_start:],
-            final_status=str(input_data["opt"].prob.status),
-        )
-        runs.append(
-            build_run_record(
-                repetition=repetition + 1,
-                cache_state=cache_state,
-                cache_reused=cache_reused,
-                result=result,
-                optimization=input_data["opt"],
-                stage_times=input_data["stage_times"],
-                setup_seconds=setup_seconds,
-                end_to_end_seconds=end_to_end_seconds,
-                primary_solver_status=primary_status,
-                relaxed_fallback_used=relaxed_fallback_used,
+    for sample in range(repetitions):
+        OptimizationCache.clear()
+        cold_optimization = None
+        for cache_repetition in range(2):
+            had_cached_instance = OptimizationCache.get_stats()["has_instance"]
+            end_to_end_start = time.perf_counter()
+            setup_start = time.perf_counter()
+            input_data = await set_input_data_dict(
+                emhass_conf,
+                configuration["costfun"],
+                params_json,
+                runtime_json,
+                corpus["mode"],
+                logger,
+                get_data_from_file=True,
             )
-        )
+            setup_seconds = time.perf_counter() - setup_start
+            if not isinstance(input_data, dict):
+                raise RuntimeError(
+                    f"input preparation failed for payload {payload['name']!r}"
+                )
 
+            warning_start = len(warning_capture.messages)
+            result = await naive_mpc_optim(input_data, logger, debug=True)
+            end_to_end_seconds = time.perf_counter() - end_to_end_start
+            if not hasattr(result, "columns"):
+                raise RuntimeError(f"optimization failed for payload {payload['name']!r}")
+
+            cache_state, cache_reused, cold_optimization = verify_cache_transition(
+                repetition=cache_repetition,
+                had_cached_instance=had_cached_instance,
+                cold_optimization=cold_optimization,
+                current_optimization=input_data["opt"],
+            )
+            primary_status, relaxed_fallback_used = primary_solve_outcome(
+                warning_capture.messages[warning_start:],
+                final_status=str(input_data["opt"].prob.status),
+            )
+            runs.append(
+                build_run_record(
+                    repetition=sample + 1,
+                    cache_state=cache_state,
+                    cache_reused=cache_reused,
+                    result=result,
+                    optimization=input_data["opt"],
+                    stage_times=input_data["stage_times"],
+                    setup_seconds=setup_seconds,
+                    end_to_end_seconds=end_to_end_seconds,
+                    primary_solver_status=primary_status,
+                    relaxed_fallback_used=relaxed_fallback_used,
+                )
+            )
+
+    profile_model_size = model_size_increase(
+        profiles, payload["runtime"]["prediction_horizon"]
+    )
     return {
         "name": payload["name"],
         "description": payload["description"],
         "prediction_horizon": payload["runtime"]["prediction_horizon"],
-        "profile_state": "absent",
+        "profile_state": "configured" if profiles is not None else "absent",
+        "benchmark_envelope": bool(payload.get("benchmark_envelope")),
+        "profile_model_size": profile_model_size,
         "runs": runs,
         **summarize_runs(runs),
+    }
+
+
+def _maximum_absolute_difference(
+    first: dict[str, list[float | None]], second: dict[str, list[float | None]]
+) -> float:
+    if first.keys() != second.keys():
+        return float("inf")
+    differences = []
+    for key in first:
+        if len(first[key]) != len(second[key]):
+            return float("inf")
+        for left, right in zip(first[key], second[key], strict=True):
+            if left is None or right is None:
+                if left != right:
+                    return float("inf")
+            else:
+                differences.append(abs(left - right))
+    return max(differences, default=0.0)
+
+
+def compare_paired_reports(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    tolerance: float = 1e-6,
+) -> dict[str, Any]:
+    """Compare reports produced from one corpus under identical environments."""
+    parity_fields = {
+        "corpus_sha256": (baseline["corpus_sha256"], candidate["corpus_sha256"]),
+        "repetitions": (baseline["repetitions"], candidate["repetitions"]),
+        "solver": (
+            baseline["reproduction"]["solver"],
+            candidate["reproduction"]["solver"],
+        ),
+        "offline_inputs": (
+            baseline["reproduction"]["offline_inputs"],
+            candidate["reproduction"]["offline_inputs"],
+        ),
+        "environment": (
+            baseline["reproduction"]["environment"],
+            candidate["reproduction"]["environment"],
+        ),
+        "resolved_packages": (
+            baseline["reproduction"]["resolved_packages"],
+            candidate["reproduction"]["resolved_packages"],
+        ),
+    }
+    mismatches = [name for name, values in parity_fields.items() if values[0] != values[1]]
+    if mismatches:
+        raise RuntimeError(
+            "paired benchmark environment mismatch: " + ", ".join(mismatches)
+        )
+
+    baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
+    candidate_payloads = {payload["name"]: payload for payload in candidate["payloads"]}
+    if baseline_payloads.keys() != candidate_payloads.keys():
+        raise RuntimeError("paired benchmark payload names differ")
+
+    comparisons = []
+    for name, candidate_payload in candidate_payloads.items():
+        baseline_payload = baseline_payloads[name]
+        if len(baseline_payload["runs"]) != len(candidate_payload["runs"]):
+            raise RuntimeError(f"paired benchmark run count differs for {name!r}")
+        run_comparisons = []
+        for baseline_run, candidate_run in zip(
+            baseline_payload["runs"], candidate_payload["runs"], strict=True
+        ):
+            if (
+                baseline_run["cache_state"] != candidate_run["cache_state"]
+                or baseline_run["repetition"] != candidate_run["repetition"]
+            ):
+                raise RuntimeError(f"paired benchmark cache samples differ for {name!r}")
+            objective_delta = (
+                None
+                if baseline_run["objective"] is None or candidate_run["objective"] is None
+                else candidate_run["objective"] - baseline_run["objective"]
+            )
+            power_delta = _maximum_absolute_difference(
+                baseline_run["power_schedule_w"], candidate_run["power_schedule_w"]
+            )
+            soc_delta = _maximum_absolute_difference(
+                baseline_run["soc_schedule_fraction"],
+                candidate_run["soc_schedule_fraction"],
+            )
+            if candidate_payload["profile_state"] == "absent" and (
+                objective_delta is None
+                or abs(objective_delta) > tolerance
+                or power_delta > tolerance
+                or soc_delta > tolerance
+            ):
+                raise RuntimeError(
+                    f"absent-profile result differs from unchanged base for {name!r}"
+                )
+            run_comparisons.append(
+                {
+                    "repetition": candidate_run["repetition"],
+                    "cache_state": candidate_run["cache_state"],
+                    "objective_delta": objective_delta,
+                    "maximum_power_schedule_delta_w": power_delta,
+                    "maximum_soc_schedule_delta_fraction": soc_delta,
+                }
+            )
+        comparisons.append(
+            {
+                "name": name,
+                "profile_state": candidate_payload["profile_state"],
+                "runs": run_comparisons,
+            }
+        )
+    return {
+        "environment_parity": True,
+        "absent_profile_tolerance": tolerance,
+        "payloads": comparisons,
     }
 
 
 async def run_benchmarks(
     corpus_path: pathlib.Path = DEFAULT_CORPUS_PATH,
     repetitions: int | None = None,
+    *,
+    apply_profiles: bool = True,
 ) -> dict[str, Any]:
     """Execute every corpus payload through set_input_data_dict and naive_mpc_optim."""
     corpus_path = corpus_path.resolve()
@@ -488,6 +625,7 @@ async def run_benchmarks(
                             logger,
                             warning_capture,
                             emhass_conf,
+                            apply_profiles,
                         )
                     )
     finally:
@@ -507,6 +645,15 @@ async def run_benchmarks(
     return {
         "schema_version": corpus["schema_version"],
         "repetitions": repetitions,
+        "benchmark_variant": "candidate" if apply_profiles else "unchanged_base",
+        "retained_warning_envelope": {
+            "boolean_selectors": BENCHMARK_MAX_SELECTORS,
+            "added_linear_rows": BENCHMARK_MAX_ADDED_ROWS,
+        },
+        "repetition_note": (
+            "Each repetition contains one cold construction followed by one "
+            "warm-cache solve of the same payload."
+        ),
         "corpus_sha256": _sha256(corpus_path),
         "reproduction": {
             **provenance,
@@ -566,7 +713,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repetitions",
         type=int,
-        help="Runs per payload; first is cold and remaining runs are warm-cache.",
+        help="Cold/warm sample pairs per payload.",
+    )
+    parser.add_argument(
+        "--baseline-report",
+        type=pathlib.Path,
+        help="Unchanged-base JSON report to validate and include as a paired comparison.",
+    )
+    parser.add_argument(
+        "--unchanged-base",
+        action="store_true",
+        help="Ignore candidate profiles while benchmarking an unchanged optimizer checkout.",
     )
     parser.add_argument(
         "--output",
@@ -578,7 +735,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    report = asyncio.run(run_benchmarks(args.corpus, args.repetitions))
+    report = asyncio.run(
+        run_benchmarks(
+            args.corpus,
+            args.repetitions,
+            apply_profiles=not args.unchanged_base,
+        )
+    )
+    if args.baseline_report:
+        baseline = json.loads(args.baseline_report.read_text(encoding="utf-8"))
+        report["paired_comparison"] = compare_paired_reports(baseline, report)
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(f"{rendered}\n", encoding="utf-8")

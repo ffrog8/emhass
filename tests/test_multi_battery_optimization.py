@@ -21,22 +21,133 @@ import pandas as pd
 
 from emhass.command_line import OptimizationCache
 from emhass.optimization import Optimization
+from emhass.soc_power_profiles import (
+    BENCHMARK_MAX_ADDED_ROWS,
+    BENCHMARK_MAX_SELECTORS,
+    log_model_size_increase,
+    model_size_increase,
+)
 
 TEST_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 VALID_OPTIMAL_STATUSES = ["Optimal", "Optimal (Relaxed)"]
 
 
+class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
+    def test_full_three_battery_shape_reports_exact_formula(self):
+        profiles = [
+            {
+                "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
+                "discharge": {"soc_breakpoints": [0.1], "power_max": [1700, 4200]},
+            },
+            {
+                "charge": {
+                    "soc_breakpoints": [0.9, 0.98],
+                    "power_max": [4500, 3200, 1000],
+                }
+            },
+            {
+                "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
+                "discharge": {"soc_breakpoints": [0.1], "power_max": [2000, 4200]},
+            },
+        ]
+
+        assert model_size_increase(profiles, 48) == {
+            "horizon": 48,
+            "battery_count": 3,
+            "direction_presence": [
+                {"charge": True, "discharge": True},
+                {"charge": True, "discharge": False},
+                {"charge": True, "discharge": True},
+            ],
+            "band_counts": [
+                {"charge": 2, "discharge": 2},
+                {"charge": 3, "discharge": 0},
+                {"charge": 2, "discharge": 2},
+            ],
+            "breakpoint_count": 6,
+            "profile_direction_count": 5,
+            "boolean_selectors": 288,
+            "added_linear_rows": 816,
+        }
+
+    def test_shape_above_benchmark_warns_once_without_rejection(self):
+        profile = {
+            "charge": {
+                "soc_breakpoints": list(np.linspace(0.1, 0.9, 9)),
+                "power_max": list(np.linspace(5000, 500, 10)),
+            }
+        }
+        logger = logging.getLogger("soc_profile_size_warning_test")
+        with self.assertLogs(logger, logging.INFO) as captured:
+            model_size = log_model_size_increase(logger, [profile, profile, profile], 48)
+
+        self.assertGreater(model_size["boolean_selectors"], BENCHMARK_MAX_SELECTORS)
+        self.assertGreater(model_size["added_linear_rows"], BENCHMARK_MAX_ADDED_ROWS)
+        warnings = [message for message in captured.output if message.startswith("WARNING:")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("remains accepted", warnings[0])
+
+    def test_shape_at_benchmark_boundary_logs_counts_without_warning(self):
+        profile = {
+            direction: {
+                "soc_breakpoints": [0.2, 0.4, 0.6, 0.8],
+                "power_max": powers,
+            }
+            for direction, powers in (
+                ("charge", [5000, 4000, 3000, 2000, 1000]),
+                ("discharge", [1000, 2000, 3000, 4000, 5000]),
+            )
+        }
+        logger = logging.getLogger("soc_profile_size_boundary_test")
+        with self.assertLogs(logger, logging.INFO) as captured:
+            model_size = log_model_size_increase(logger, [profile, profile, profile], 48)
+
+        self.assertEqual(model_size["boolean_selectors"], BENCHMARK_MAX_SELECTORS)
+        self.assertEqual(model_size["added_linear_rows"], BENCHMARK_MAX_ADDED_ROWS)
+        self.assertEqual(len(captured.output), 1)
+        self.assertTrue(captured.output[0].startswith("INFO:"))
+        self.assertIn("1152 Boolean selectors", captured.output[0])
+
+    def test_optimizer_logs_counts_before_profile_model_construction(self):
+        profiles = [
+            {
+                "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
+                "discharge": {"soc_breakpoints": [0.1], "power_max": [1700, 4200]},
+            }
+        ]
+        logger = logging.getLogger("soc_profile_normal_execution_test")
+        logger.handlers = []
+
+        with self.assertLogs(logger, logging.INFO) as captured:
+            build_optimization(
+                optim_overrides={"delta_forecast_daily": pd.Timedelta(hours=24)},
+                plant_overrides={"battery_soc_power_profiles": profiles},
+                logger=logger,
+            )
+
+        self.assertTrue(
+            any(
+                "96 Boolean selectors and 288 linear rows" in message
+                for message in captured.output
+            )
+        )
+
+
 def build_optimization(
-    optim_overrides=None, plant_overrides=None, opt_time_delta=5
+    optim_overrides=None,
+    plant_overrides=None,
+    opt_time_delta=5,
+    logger: logging.Logger | None = None,
 ) -> Optimization:
     """Self-contained Optimization builder, mirroring
     test_soc_recovery_prototype.py's build_optimization(). Single battery by
     default; pass plant_overrides={"number_of_batteries": N, ...} for N>1.
     """
-    logger = logging.getLogger("multi_battery_test")
-    logger.handlers = []
-    logger.addHandler(logging.NullHandler())
+    if logger is None:
+        logger = logging.getLogger("multi_battery_test")
+        logger.handlers = []
+        logger.addHandler(logging.NullHandler())
 
     retrieve_hass_conf = {
         "optimization_time_step": pd.to_timedelta(30, "minutes"),

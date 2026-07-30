@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from emhass import utils
+from emhass.soc_power_profiles import log_model_size_increase
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
 # Any other key is silently ignored, so a typo such as the singular
@@ -229,6 +230,11 @@ class Optimization:
         else:
             self.num_timesteps = int(self.time_delta / self.freq)
         self.logger.debug(f"CVXPY: Initialization with {self.num_timesteps} time steps.")
+        self.battery_soc_power_profile_model_size = log_model_size_increase(
+            self.logger,
+            self.plant_conf.get("battery_soc_power_profiles"),
+            self.num_timesteps,
+        )
 
         # Define Parameters (Data holders)
         # These will be updated in perform_optimization without rebuilding the problem

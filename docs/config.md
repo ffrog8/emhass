@@ -344,6 +344,20 @@ The optimizer selects each interval's charge and discharge bands from that batte
 
 The selected profile value cannot raise the corresponding `battery_charge_power_max` or `battery_discharge_power_max`; the lower limit applies. Existing maximum-SOC headroom and minimum-SOC or planning-reserve constraints remain independent and may reduce delivered power below both limits.
 
+Before building a supplied profile model, EMHASS logs its exact added size. If
+`T` is the interval count, `K` is the total number of charge and discharge
+breakpoints, and `R` is the number of configured battery-direction profiles,
+the model adds `T*K` Boolean selectors and `T*(2*K+R)` linear rows. There is no
+battery-domain band-count limit.
+
+The retained paired benchmark covers up to 1,152 selectors and 2,592 added rows
+(three batteries, five charge and five discharge bands each, over 48
+intervals). A larger request remains valid but logs one warning so you can
+benchmark or simplify it before control use. This is an evidence boundary for
+one measured environment, not a performance guarantee. The solver timeout
+starts after CVXPY has constructed the problem, and general request-size,
+memory, and service protections remain separate concerns.
+
 Runtime requests follow replacement rather than nested-merge semantics. Omitting `battery_soc_power_profiles`, or passing top-level JSON `null`, inherits the static configuration. A non-null list replaces it completely and must still contain exactly one object per battery. An omitted direction inside a replacement entry is disabled for that entry; it is not inherited from static configuration. Use a complete list of empty objects, such as `[{}, {}]`, to request scalar-only behavior for that optimization.
 
 The same shapes are accepted when overriding these parameters at runtime, and a runtime value always wins over the configured one. Note that this includes the broadcast: with `number_of_batteries` greater than 1, a runtime scalar replaces the configured value for every battery, even when the configuration held a per-battery list. So a payload that passes an aggregate value like `battery_charge_power_max: 4200` on a two-battery plant silently turns per-unit limits of `[2500, 2400]` into `[4200, 4200]`. When the masked configured list held genuinely distinct per-battery values, a warning is logged naming the parameter and both values. If you run more than one battery, pass runtime battery parameters as lists of `number_of_batteries` entries.

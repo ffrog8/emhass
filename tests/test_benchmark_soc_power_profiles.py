@@ -13,6 +13,7 @@ from scripts.benchmark_soc_power_profiles import (
     benchmark_solver_environment,
     build_benchmark_params,
     build_run_record,
+    compare_paired_reports,
     primary_solve_outcome,
     run_benchmarks,
     summarize_runs,
@@ -20,6 +21,8 @@ from scripts.benchmark_soc_power_profiles import (
     verify_cache_transition,
     verify_repository_provenance,
 )
+
+from emhass.soc_power_profiles import model_size_increase
 
 CORPUS_PATH = (
     Path(__file__).parents[1] / "benchmarks" / "soc_power_profiles" / "payloads.json"
@@ -306,7 +309,9 @@ def test_runner_rejects_dependency_lock_metadata_lookup_failure(monkeypatch):
         asyncio.run(run_benchmarks(CORPUS_PATH, repetitions=1))
 
 
-def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monkeypatch):
+def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
+    monkeypatch, tmp_path
+):
     before_result_files = {
         path: path.read_bytes() if path.exists() else None for path in RESULT_PATHS
     }
@@ -329,7 +334,12 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monke
     monkeypatch.setenv("LON", "138.6")
     monkeypatch.setenv("ALT", "50")
 
-    report = asyncio.run(run_benchmarks(CORPUS_PATH, repetitions=2))
+    corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+    corpus["payloads"] = corpus["payloads"][:2]
+    small_corpus = tmp_path / "payloads.json"
+    small_corpus.write_text(json.dumps(corpus), encoding="utf-8")
+
+    report = asyncio.run(run_benchmarks(small_corpus, repetitions=2))
 
     after_result_files = {
         path: path.read_bytes() if path.exists() else None for path in RESULT_PATHS
@@ -351,13 +361,28 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monke
     assert report["reproduction"]["offline_inputs"]["long_lived_token"] == ""
     assert report["reproduction"]["offline_inputs"]["time_zone"] == "UTC"
     assert report["repetitions"] == 2
+    assert report["benchmark_variant"] == "candidate"
+    assert report["retained_warning_envelope"] == {
+        "boolean_selectors": 1152,
+        "added_linear_rows": 2592,
+    }
 
     by_name = {payload["name"]: payload for payload in report["payloads"]}
     assert set(by_name) == {"one_battery", "two_batteries"}
 
     for payload in by_name.values():
-        assert [run["cache_state"] for run in payload["runs"]] == ["cold", "warm"]
-        assert [run["cache_reused"] for run in payload["runs"]] == [False, True]
+        assert [run["cache_state"] for run in payload["runs"]] == [
+            "cold",
+            "warm",
+            "cold",
+            "warm",
+        ]
+        assert [run["cache_reused"] for run in payload["runs"]] == [
+            False,
+            True,
+            False,
+            True,
+        ]
         assert set(payload["timing_summary"]) == {"cold", "warm"}
         assert payload["timing_summary"]["cold"]["end_to_end_s"]["minimum_s"] >= 0
         assert payload["timing_summary"]["warm"]["end_to_end_s"]["p95_s"] >= 0
@@ -385,3 +410,81 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monke
     two = by_name["two_batteries"]["runs"][0]
     assert set(two["power_schedule_w"]) >= {"P_batt", "P_batt_0", "P_batt_1"}
     assert set(two["soc_schedule_fraction"]) == {"SOC_opt_0", "SOC_opt_1"}
+
+
+def test_corpus_covers_required_profile_shapes_and_warning_envelope():
+    corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+    payloads = {payload["name"]: payload for payload in corpus["payloads"]}
+
+    assert {"one_battery", "two_batteries"} <= payloads.keys()
+    assert payloads["one_battery"].get("candidate_profiles") is None
+    assert payloads["two_batteries"].get("candidate_profiles") is None
+    assert len(
+        payloads["one_battery_two_band"]["candidate_profiles"][0]["charge"][
+            "power_max"
+        ]
+    ) == 2
+    assert len(
+        payloads["one_battery_three_band"]["candidate_profiles"][0]["charge"][
+            "power_max"
+        ]
+    ) == 3
+
+    full_size = model_size_increase(
+        payloads["three_battery_mixed_48"]["candidate_profiles"], 48
+    )
+    assert full_size["boolean_selectors"] == 288
+    assert full_size["added_linear_rows"] == 816
+
+    envelope_payloads = [
+        payload for payload in corpus["payloads"] if payload.get("benchmark_envelope")
+    ]
+    assert len(envelope_payloads) == 1
+    envelope_size = model_size_increase(
+        envelope_payloads[0]["candidate_profiles"],
+        envelope_payloads[0]["runtime"]["prediction_horizon"],
+    )
+    assert envelope_size["boolean_selectors"] == 1152
+    assert envelope_size["added_linear_rows"] == 2592
+
+
+def test_paired_report_comparison_requires_absent_profile_equivalence():
+    run = {
+        "repetition": 1,
+        "cache_state": "cold",
+        "objective": 1.0,
+        "power_schedule_w": {"P_batt": [1.0]},
+        "soc_schedule_fraction": {"SOC_opt": [0.5]},
+    }
+    common_reproduction = {
+        "solver": {"name": "HIGHS"},
+        "offline_inputs": {"hass_url": "http://127.0.0.1/"},
+        "environment": {"machine": "test"},
+        "resolved_packages": {"cvxpy": "test"},
+    }
+    baseline = {
+        "corpus_sha256": "same",
+        "repetitions": 1,
+        "reproduction": common_reproduction,
+        "payloads": [{"name": "absent", "runs": [run]}],
+    }
+    candidate = {
+        "corpus_sha256": "same",
+        "repetitions": 1,
+        "reproduction": common_reproduction,
+        "payloads": [
+            {
+                "name": "absent",
+                "profile_state": "absent",
+                "runs": [dict(run)],
+            }
+        ],
+    }
+
+    comparison = compare_paired_reports(baseline, candidate)
+    assert comparison["environment_parity"] is True
+    assert comparison["payloads"][0]["runs"][0]["objective_delta"] == 0
+
+    candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
+    with pytest.raises(RuntimeError, match="absent-profile result differs"):
+        compare_paired_reports(baseline, candidate)
