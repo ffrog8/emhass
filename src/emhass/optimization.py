@@ -71,9 +71,10 @@ CURTAILMENT_TIEBREAK_EPS = 1e-7
 # multi-battery.
 BATTERY_TIEBREAK_EPS = 1e-9
 
-# Shift each exact SOC threshold down by this numerical guard. This makes the
-# conservative high-SOC band unambiguous at the nominal breakpoint without
-# excluding SOC values in a gap around it.
+# Charge thresholds shift down by this numerical guard, so nominal equality and
+# the guard region select the conservative high-SOC, lower-charge-power band.
+# Discharge thresholds shift up, selecting the conservative low-SOC,
+# lower-discharge-power band over the corresponding equality and guard region.
 SOC_POWER_PROFILE_GUARD = 1e-4
 
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
