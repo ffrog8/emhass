@@ -25,14 +25,14 @@ charge and five discharge bands for each of three batteries over 48 intervals:
 not a universal performance guarantee or a band-count limit.
 
 Use the repository development environment described in `docs/develop.md`.
-Run the harness-only benchmark commit against the unchanged optimizer with
-`--unchanged-base`, then run the candidate checkout in the same environment:
+Run the issue #2 runner at unchanged optimizer checkout `4def37f8` against this
+same expanded corpus, then run the candidate checkout in the same environment:
 
 ```bash
 uv sync --extra test
 python scripts/benchmark_soc_power_profiles.py \
+  --corpus /path/to/candidate/benchmarks/soc_power_profiles/payloads.json \
   --repetitions 5 \
-  --unchanged-base \
   --output /tmp/emhass-soc-profile-unchanged-base.json
 
 python scripts/benchmark_soc_power_profiles.py \
@@ -42,11 +42,10 @@ python scripts/benchmark_soc_power_profiles.py \
 ```
 
 Use the same corpus, repetition count, solver settings, machine, container, and
-resolved environment for both runs. Each repetition performs one cold
-construction followed by one solve that reuses the resulting cached
-`Optimization` and CVXPY `Problem`. Five repetitions therefore produce five
-cold and five warm samples per payload. Retain both raw JSON files with the
-corpus and source revisions.
+resolved environment for both runs. The first repetition performs cold
+construction, and the next four reuse the resulting cached `Optimization` and
+CVXPY `Problem`. Retain both raw JSON files with the corpus and source
+revisions.
 
 The output records:
 
@@ -54,7 +53,7 @@ The output records:
   `pyproject.toml` hash;
 - Python/platform details and all resolved package versions;
 - the configured solver, timeout, relative MIP gap, and thread count;
-- equal cold-construction and warm-cache sample populations;
+- cold construction and warm-cache repetitions reported separately;
 - solver status, objective, battery power schedule, and SOC schedule;
 - primary timeout/infeasible counts, final unsuccessful counts, and whether the
   relaxed fallback was used;
@@ -89,10 +88,10 @@ control authority. Fixed loopback/empty/UTC/zero location inputs replace all
 ambient Home Assistant credentials and location variables. The configured
 solver temporarily overrides ambient `LP_SOLVER` and is restored after the run.
 
-The unchanged-base run uses the current harness and corpus but ignores
-`candidate_profiles`; the optimizer itself remains unchanged. This separates
-measurement tooling from feature code while keeping payloads, sample ordering,
-and environment identical. The candidate run applies those profiles, and
+The unchanged runner at `4def37f8` does not know the corpus's optional
+`candidate_profiles` member, so it uses the common scalar configuration and
+runtime while retaining an unmodified optimizer. Its report records tested
+commit `4def37f8`. The candidate runner applies those profiles, and
 `--baseline-report` rejects environment or absent-profile result mismatches.
 
 Normal EMHASS execution logs `T*K` Boolean selectors and `T*(2*K+R)` added

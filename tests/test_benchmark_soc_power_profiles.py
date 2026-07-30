@@ -371,18 +371,8 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     assert set(by_name) == {"one_battery", "two_batteries"}
 
     for payload in by_name.values():
-        assert [run["cache_state"] for run in payload["runs"]] == [
-            "cold",
-            "warm",
-            "cold",
-            "warm",
-        ]
-        assert [run["cache_reused"] for run in payload["runs"]] == [
-            False,
-            True,
-            False,
-            True,
-        ]
+        assert [run["cache_state"] for run in payload["runs"]] == ["cold", "warm"]
+        assert [run["cache_reused"] for run in payload["runs"]] == [False, True]
         assert set(payload["timing_summary"]) == {"cold", "warm"}
         assert payload["timing_summary"]["cold"]["end_to_end_s"]["minimum_s"] >= 0
         assert payload["timing_summary"]["warm"]["end_to_end_s"]["p95_s"] >= 0

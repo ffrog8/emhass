@@ -379,11 +379,8 @@ async def _run_payload(
     logger: logging.Logger,
     warning_capture: _WarningCapture,
     emhass_conf: dict[str, pathlib.Path],
-    apply_profiles: bool,
 ) -> dict[str, Any]:
-    profiles = (
-        copy.deepcopy(payload.get("candidate_profiles")) if apply_profiles else None
-    )
+    profiles = copy.deepcopy(payload.get("candidate_profiles"))
     configuration = copy.deepcopy(payload["configuration"])
     if profiles is not None:
         configuration["battery_soc_power_profiles"] = profiles
@@ -399,58 +396,56 @@ async def _run_payload(
     runs = []
     cold_optimization = None
 
-    for sample in range(repetitions):
-        OptimizationCache.clear()
-        cold_optimization = None
-        for cache_repetition in range(2):
-            had_cached_instance = OptimizationCache.get_stats()["has_instance"]
-            end_to_end_start = time.perf_counter()
-            setup_start = time.perf_counter()
-            input_data = await set_input_data_dict(
-                emhass_conf,
-                configuration["costfun"],
-                params_json,
-                runtime_json,
-                corpus["mode"],
-                logger,
-                get_data_from_file=True,
+    OptimizationCache.clear()
+    for repetition in range(repetitions):
+        had_cached_instance = OptimizationCache.get_stats()["has_instance"]
+        end_to_end_start = time.perf_counter()
+        setup_start = time.perf_counter()
+        input_data = await set_input_data_dict(
+            emhass_conf,
+            configuration["costfun"],
+            params_json,
+            runtime_json,
+            corpus["mode"],
+            logger,
+            get_data_from_file=True,
+        )
+        setup_seconds = time.perf_counter() - setup_start
+        if not isinstance(input_data, dict):
+            raise RuntimeError(
+                f"input preparation failed for payload {payload['name']!r}"
             )
-            setup_seconds = time.perf_counter() - setup_start
-            if not isinstance(input_data, dict):
-                raise RuntimeError(
-                    f"input preparation failed for payload {payload['name']!r}"
-                )
 
-            warning_start = len(warning_capture.messages)
-            result = await naive_mpc_optim(input_data, logger, debug=True)
-            end_to_end_seconds = time.perf_counter() - end_to_end_start
-            if not hasattr(result, "columns"):
-                raise RuntimeError(f"optimization failed for payload {payload['name']!r}")
+        warning_start = len(warning_capture.messages)
+        result = await naive_mpc_optim(input_data, logger, debug=True)
+        end_to_end_seconds = time.perf_counter() - end_to_end_start
+        if not hasattr(result, "columns"):
+            raise RuntimeError(f"optimization failed for payload {payload['name']!r}")
 
-            cache_state, cache_reused, cold_optimization = verify_cache_transition(
-                repetition=cache_repetition,
-                had_cached_instance=had_cached_instance,
-                cold_optimization=cold_optimization,
-                current_optimization=input_data["opt"],
+        cache_state, cache_reused, cold_optimization = verify_cache_transition(
+            repetition=repetition,
+            had_cached_instance=had_cached_instance,
+            cold_optimization=cold_optimization,
+            current_optimization=input_data["opt"],
+        )
+        primary_status, relaxed_fallback_used = primary_solve_outcome(
+            warning_capture.messages[warning_start:],
+            final_status=str(input_data["opt"].prob.status),
+        )
+        runs.append(
+            build_run_record(
+                repetition=repetition + 1,
+                cache_state=cache_state,
+                cache_reused=cache_reused,
+                result=result,
+                optimization=input_data["opt"],
+                stage_times=input_data["stage_times"],
+                setup_seconds=setup_seconds,
+                end_to_end_seconds=end_to_end_seconds,
+                primary_solver_status=primary_status,
+                relaxed_fallback_used=relaxed_fallback_used,
             )
-            primary_status, relaxed_fallback_used = primary_solve_outcome(
-                warning_capture.messages[warning_start:],
-                final_status=str(input_data["opt"].prob.status),
-            )
-            runs.append(
-                build_run_record(
-                    repetition=sample + 1,
-                    cache_state=cache_state,
-                    cache_reused=cache_reused,
-                    result=result,
-                    optimization=input_data["opt"],
-                    stage_times=input_data["stage_times"],
-                    setup_seconds=setup_seconds,
-                    end_to_end_seconds=end_to_end_seconds,
-                    primary_solver_status=primary_status,
-                    relaxed_fallback_used=relaxed_fallback_used,
-                )
-            )
+        )
 
     profile_model_size = model_size_increase(
         profiles, payload["runtime"]["prediction_horizon"]
@@ -584,8 +579,6 @@ def compare_paired_reports(
 async def run_benchmarks(
     corpus_path: pathlib.Path = DEFAULT_CORPUS_PATH,
     repetitions: int | None = None,
-    *,
-    apply_profiles: bool = True,
 ) -> dict[str, Any]:
     """Execute every corpus payload through set_input_data_dict and naive_mpc_optim."""
     corpus_path = corpus_path.resolve()
@@ -625,7 +618,6 @@ async def run_benchmarks(
                             logger,
                             warning_capture,
                             emhass_conf,
-                            apply_profiles,
                         )
                     )
     finally:
@@ -645,14 +637,14 @@ async def run_benchmarks(
     return {
         "schema_version": corpus["schema_version"],
         "repetitions": repetitions,
-        "benchmark_variant": "candidate" if apply_profiles else "unchanged_base",
+        "benchmark_variant": "candidate",
         "retained_warning_envelope": {
             "boolean_selectors": BENCHMARK_MAX_SELECTORS,
             "added_linear_rows": BENCHMARK_MAX_ADDED_ROWS,
         },
         "repetition_note": (
-            "Each repetition contains one cold construction followed by one "
-            "warm-cache solve of the same payload."
+            "The first repetition is a cold construction; all later repetitions "
+            "reuse its cached Optimization object."
         ),
         "corpus_sha256": _sha256(corpus_path),
         "reproduction": {
@@ -713,17 +705,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repetitions",
         type=int,
-        help="Cold/warm sample pairs per payload.",
+        help="Runs per payload; first is cold and remaining runs are warm-cache.",
     )
     parser.add_argument(
         "--baseline-report",
         type=pathlib.Path,
         help="Unchanged-base JSON report to validate and include as a paired comparison.",
-    )
-    parser.add_argument(
-        "--unchanged-base",
-        action="store_true",
-        help="Ignore candidate profiles while benchmarking an unchanged optimizer checkout.",
     )
     parser.add_argument(
         "--output",
@@ -735,13 +722,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    report = asyncio.run(
-        run_benchmarks(
-            args.corpus,
-            args.repetitions,
-            apply_profiles=not args.unchanged_base,
-        )
-    )
+    report = asyncio.run(run_benchmarks(args.corpus, args.repetitions))
     if args.baseline_report:
         baseline = json.loads(args.baseline_report.read_text(encoding="utf-8"))
         report["paired_comparison"] = compare_paired_reports(baseline, report)
