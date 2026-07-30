@@ -137,7 +137,14 @@ def _sha256(path: pathlib.Path) -> str:
 
 def _git_required(repository: pathlib.Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repository), *args],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            *args,
+        ],
         capture_output=True,
         text=True,
     )
