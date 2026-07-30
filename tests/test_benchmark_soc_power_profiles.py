@@ -273,6 +273,39 @@ def test_payload_corpus_contains_no_control_or_credential_fields():
     )
 
 
+def test_runner_rejects_dependency_lock_metadata_lookup_failure(monkeypatch):
+    actual_run = subprocess.run
+
+    def fail_lock_metadata_lookup(command, *args, **kwargs):
+        if command[-2:] == ["ls-files", "uv.lock"]:
+            return subprocess.CompletedProcess(
+                command,
+                returncode=128,
+                stdout="",
+                stderr="simulated lock metadata failure",
+            )
+        return actual_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "scripts.benchmark_soc_power_profiles.verify_repository_provenance",
+        lambda repository, base_commit: {
+            "base_commit": base_commit,
+            "tested_commit": "f" * 40,
+            "merge_base": base_commit,
+            "worktree_clean": True,
+            "branch": "test-benchmark",
+            "commits_since_base": [],
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.benchmark_soc_power_profiles.subprocess.run",
+        fail_lock_metadata_lookup,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated lock metadata failure"):
+        asyncio.run(run_benchmarks(CORPUS_PATH, repetitions=1))
+
+
 def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monkeypatch):
     before_result_files = {
         path: path.read_bytes() if path.exists() else None for path in RESULT_PATHS

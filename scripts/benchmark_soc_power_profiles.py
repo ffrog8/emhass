@@ -132,15 +132,6 @@ def _sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def _git(*args: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(PROJECT_ROOT), *args],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
 def _git_required(repository: pathlib.Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repository), *args],
@@ -505,7 +496,7 @@ async def run_benchmarks(
 
     pyproject_path = PROJECT_ROOT / "pyproject.toml"
     lock_path = PROJECT_ROOT / "uv.lock"
-    tracked_lock = _git("ls-files", "uv.lock") == "uv.lock"
+    tracked_lock = _git_required(PROJECT_ROOT, "ls-files", "uv.lock") == "uv.lock"
     actual_solver_names = sorted(
         {
             run["solver_name"]
