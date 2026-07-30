@@ -17,6 +17,7 @@ import collections
 import contextlib
 import copy
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import logging
@@ -30,15 +31,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 import cvxpy as cp
 import numpy as np
 import orjson
-
-from emhass import utils
-from emhass.command_line import OptimizationCache, naive_mpc_optim, set_input_data_dict
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "benchmarks" / "soc_power_profiles" / "payloads.json"
@@ -52,6 +51,71 @@ OFFLINE_BENCHMARK_SECRETS = {
     "Longitude": 0.0,
     "Altitude": 0.0,
 }
+
+
+@dataclass(frozen=True)
+class EmhassRuntime:
+    """Production interfaces loaded and verified from one tested source tree."""
+
+    utils: Any
+    optimization_cache: Any
+    naive_mpc_optim: Any
+    set_input_data_dict: Any
+
+
+def verified_emhass_module_manifest(project_root: pathlib.Path) -> dict[str, Any]:
+    """Fail closed unless every loaded EMHASS module belongs to project_root/src."""
+    source_root = (project_root / "src").resolve()
+    modules: dict[str, dict[str, str]] = {}
+    for name, module in sorted(sys.modules.items()):
+        if name != "emhass" and not name.startswith("emhass."):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            raise RuntimeError(
+                f"loaded production module {name!r} has no verifiable source path"
+            )
+        resolved_path = pathlib.Path(module_file).resolve()
+        if not resolved_path.is_relative_to(source_root):
+            raise RuntimeError(
+                f"loaded production module {name!r} is outside tested project root "
+                f"{project_root}"
+            )
+        modules[name] = {
+            "path": str(resolved_path.relative_to(project_root)),
+            "sha256": _sha256(resolved_path),
+        }
+    return {
+        "source_root": str(source_root),
+        "modules": modules,
+    }
+
+
+def load_tested_emhass(project_root: pathlib.Path) -> EmhassRuntime:
+    """Load EMHASS only after binding the process to the explicit tested checkout."""
+    project_root = project_root.resolve()
+    source_root = (project_root / "src").resolve()
+    if not (source_root / "emhass" / "__init__.py").is_file():
+        raise RuntimeError(f"tested project has no EMHASS package under {source_root}")
+
+    # Reject an ambient import before changing sys.path. Unloading mixed dependency
+    # graphs is unsafe; a fresh process is required when changing tested checkouts.
+    verified_emhass_module_manifest(project_root)
+    source_text = str(source_root)
+    if source_text not in sys.path:
+        sys.path.insert(0, source_text)
+
+    utils = importlib.import_module("emhass.utils")
+    command_line = importlib.import_module("emhass.command_line")
+    manifest = verified_emhass_module_manifest(project_root)
+    if not manifest["modules"]:
+        raise RuntimeError("tested EMHASS import produced no verifiable modules")
+    return EmhassRuntime(
+        utils=utils,
+        optimization_cache=command_line.OptimizationCache,
+        naive_mpc_optim=command_line.naive_mpc_optim,
+        set_input_data_dict=command_line.set_input_data_dict,
+    )
 
 
 @contextlib.contextmanager
@@ -311,10 +375,12 @@ async def build_benchmark_params(
     runtime: dict[str, Any],
     logger: logging.Logger | None = None,
     emhass_conf: dict[str, pathlib.Path] | None = None,
+    emhass_runtime: EmhassRuntime | None = None,
 ) -> dict[str, Any]:
     """Build inputs from fixed offline values, never ambient secrets or location."""
     logger = logger or _logger()
     emhass_conf = emhass_conf or _emhass_conf()
+    emhass_runtime = emhass_runtime or load_tested_emhass(PROJECT_ROOT)
     config = json.loads(emhass_conf["defaults_path"].read_text(encoding="utf-8"))
     config.update(copy.deepcopy(configuration))
     config.update(
@@ -325,7 +391,7 @@ async def build_benchmark_params(
             "num_threads": solver["threads"],
         }
     )
-    params = await utils.build_params(
+    params = await emhass_runtime.utils.build_params(
         emhass_conf, copy.deepcopy(OFFLINE_BENCHMARK_SECRETS), config, logger
     )
     if params is False:
@@ -337,6 +403,11 @@ async def build_benchmark_params(
 def _solver_seconds(opt: Any) -> float:
     solver_stats = getattr(opt.prob, "solver_stats", None)
     value = getattr(solver_stats, "solve_time", None)
+    return max(float(value or 0.0), 0.0)
+
+
+def _compilation_seconds(opt: Any) -> float:
+    value = getattr(opt.prob, "compilation_time", None)
     return max(float(value or 0.0), 0.0)
 
 
@@ -389,6 +460,7 @@ def build_run_record(
     """Build one JSON-safe run record, including unsuccessful solver results."""
     solve_call_seconds = float(stage_times.get("optim_solve.solve", 0.0))
     solver_seconds = _solver_seconds(optimization)
+    compilation_seconds = _compilation_seconds(optimization)
     solver_stats = getattr(optimization.prob, "solver_stats", None)
     return {
         "repetition": repetition,
@@ -406,10 +478,14 @@ def build_run_record(
             "input_setup": setup_seconds,
             "model_construction": float(stage_times.get("optim_solve.build", 0.0)),
             "solve_call_including_fallback": solve_call_seconds,
-            "canonicalization_and_wrapper": (
+            "cvxpy_compilation": compilation_seconds,
+            "solve_wrapper_overhead": (
                 None
                 if relaxed_fallback_used
-                else max(solve_call_seconds - solver_seconds, 0.0)
+                else max(
+                    solve_call_seconds - compilation_seconds - solver_seconds,
+                    0.0,
+                )
             ),
             "final_solver": solver_seconds,
             "result_extraction": float(stage_times.get("optim_solve.extract", 0.0)),
@@ -455,6 +531,7 @@ async def _run_payload(
     logger: logging.Logger,
     warning_capture: _WarningCapture,
     emhass_conf: dict[str, pathlib.Path],
+    emhass_runtime: EmhassRuntime,
     apply_profiles: bool,
 ) -> dict[str, Any]:
     requested_profiles = copy.deepcopy(payload.get("candidate_profiles"))
@@ -468,18 +545,21 @@ async def _run_payload(
         payload["runtime"],
         logger,
         emhass_conf,
+        emhass_runtime,
     )
     params_json = orjson.dumps(params).decode("utf-8")
     runtime_json = orjson.dumps(payload["runtime"]).decode("utf-8")
     runs = []
     cold_optimization = None
 
-    OptimizationCache.clear()
+    emhass_runtime.optimization_cache.clear()
     for repetition in range(repetitions):
-        had_cached_instance = OptimizationCache.get_stats()["has_instance"]
+        had_cached_instance = emhass_runtime.optimization_cache.get_stats()[
+            "has_instance"
+        ]
         end_to_end_start = time.perf_counter()
         setup_start = time.perf_counter()
-        input_data = await set_input_data_dict(
+        input_data = await emhass_runtime.set_input_data_dict(
             emhass_conf,
             configuration["costfun"],
             params_json,
@@ -495,7 +575,7 @@ async def _run_payload(
             )
 
         warning_start = len(warning_capture.messages)
-        result = await naive_mpc_optim(input_data, logger, debug=True)
+        result = await emhass_runtime.naive_mpc_optim(input_data, logger, debug=True)
         end_to_end_seconds = time.perf_counter() - end_to_end_start
         if not hasattr(result, "columns"):
             raise RuntimeError(f"optimization failed for payload {payload['name']!r}")
@@ -716,6 +796,7 @@ async def run_benchmarks(
         raise RuntimeError(
             f"configured solver {corpus['solver']['name']!r} is not installed"
         )
+    emhass_runtime = load_tested_emhass(project_root)
     harness_provenance = verify_repository_provenance(
         PROJECT_ROOT, corpus["base_commit"]
     )
@@ -746,11 +827,12 @@ async def run_benchmarks(
                             logger,
                             warning_capture,
                             emhass_conf,
+                            emhass_runtime,
                             execution_order == "candidate",
                         )
                     )
     finally:
-        OptimizationCache.clear()
+        emhass_runtime.optimization_cache.clear()
         logger.handlers.clear()
 
     pyproject_path = project_root / "pyproject.toml"
@@ -773,7 +855,8 @@ async def run_benchmarks(
         },
         "repetition_note": (
             "The first repetition is a cold construction; all later repetitions "
-            "reuse its cached Optimization object."
+            "reuse its cached Optimization and CVXPY Problem objects. CVXPY "
+            "compilation_time still measures each solve's compilation or cache lookup."
         ),
         "corpus_sha256": _sha256(corpus_path),
         "execution": {
@@ -784,6 +867,7 @@ async def run_benchmarks(
         "reproduction": {
             "harness_provenance": harness_provenance,
             "tested_source_provenance": tested_source_provenance,
+            "tested_modules": verified_emhass_module_manifest(project_root),
             "pyproject_sha256": _sha256(pyproject_path),
             "dependency_lock": {
                 "tracked": tracked_lock,
@@ -808,10 +892,14 @@ async def run_benchmarks(
                 "Existing optim_solve.build instrumentation covers model expression and "
                 "problem construction inside perform_optimization."
             ),
-            "canonicalization_and_wrapper": (
-                "Derived as the instrumented CVXPY solve-call wall time minus solver_stats."
-                "solve_time; current instrumentation cannot isolate canonicalization from "
-                "the remaining CVXPY wrapper overhead."
+            "cvxpy_compilation": (
+                "CVXPY Problem.compilation_time reported by the pinned CVXPY version "
+                "for the final solve attempt."
+            ),
+            "solve_wrapper_overhead": (
+                "Solve-call wall time minus CVXPY compilation_time and solver_stats."
+                "solve_time. It is null after relaxed fallback because the solve-call "
+                "timer then spans more than the final attempt."
             ),
             "end_to_end": (
                 "Runner wall time around input preparation and the complete optimisation mode."

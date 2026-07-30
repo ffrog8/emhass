@@ -229,6 +229,7 @@ class Optimization:
         else:
             self.num_timesteps = int(self.time_delta / self.freq)
         self.logger.debug(f"CVXPY: Initialization with {self.num_timesteps} time steps.")
+
         # Define Parameters (Data holders)
         # These will be updated in perform_optimization without rebuilding the problem
         self.param_pv_forecast = cp.Parameter(self.num_timesteps, name="pv_forecast")

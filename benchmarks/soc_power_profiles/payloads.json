@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "base_commit": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
   "mode": "naive-mpc-optim",
   "execution_environment": {

@@ -17,6 +17,7 @@ from scripts.benchmark_soc_power_profiles import (
     build_benchmark_params,
     build_run_record,
     compare_paired_reports,
+    load_tested_emhass,
     primary_solve_outcome,
     run_benchmarks,
     summarize_runs,
@@ -146,6 +147,7 @@ def test_cache_labels_require_observed_object_reuse():
 
 def test_unsuccessful_solve_remains_reportable_with_counts():
     problem = SimpleNamespace(
+        compilation_time=0.05,
         value=None,
         status="infeasible",
         solver_stats=SimpleNamespace(solve_time=None, solver_name="HIGHS"),
@@ -181,6 +183,7 @@ def test_unsuccessful_solve_remains_reportable_with_counts():
     assert run["objective"] is None
     assert run["power_schedule_w"]["P_batt"] == [None]
     assert run["solver_name"] == "HIGHS"
+    assert run["timings_s"]["cvxpy_compilation"] == 0.05
     assert run["problem_size"]["constraint_rows"] == 5
     assert summary["primary_infeasible_count"] == 1
     assert summary["primary_timeout_count"] == 0
@@ -190,6 +193,7 @@ def test_unsuccessful_solve_remains_reportable_with_counts():
 
 def test_unsuccessful_solve_without_solver_stats_remains_reportable():
     problem = SimpleNamespace(
+        compilation_time=0.05,
         value=None,
         status=None,
         solver_stats=None,
@@ -219,6 +223,55 @@ def test_unsuccessful_solve_without_solver_stats_remains_reportable():
     assert run["solver_name"] == "unknown"
     assert run["timings_s"]["final_solver"] == 0.0
     assert run["problem_size"]["constraint_rows"] == 5
+
+
+def test_run_record_separates_cvxpy_compilation_solver_and_wrapper_overhead():
+    problem = SimpleNamespace(
+        compilation_time=0.2,
+        value=1.0,
+        solver_stats=SimpleNamespace(solve_time=0.3, solver_name="HIGHS"),
+        size_metrics=SimpleNamespace(
+            num_scalar_variables=4,
+            num_scalar_eq_constr=2,
+            num_scalar_leq_constr=3,
+        ),
+        variables=lambda: [],
+    )
+    optimization = SimpleNamespace(optim_status="Optimal", prob=problem)
+    result = pd.DataFrame({"P_batt": [0.0], "SOC_opt": [0.5]})
+
+    run = build_run_record(
+        repetition=1,
+        cache_state="cold",
+        cache_reused=False,
+        result=result,
+        optimization=optimization,
+        stage_times={
+            "optim_solve.build": 0.1,
+            "optim_solve.solve": 0.8,
+            "optim_solve.extract": 0.1,
+            "optim_solve": 1.0,
+        },
+        setup_seconds=0.2,
+        end_to_end_seconds=1.5,
+        primary_solver_status="optimal",
+        relaxed_fallback_used=False,
+    )
+    timings = run["timings_s"]
+
+    assert timings["model_construction"] == 0.1
+    assert timings["cvxpy_compilation"] == 0.2
+    assert timings["final_solver"] == 0.3
+    assert timings["solve_wrapper_overhead"] == pytest.approx(0.3)
+    assert "canonicalization_and_wrapper" not in timings
+    assert all(value >= 0 for value in timings.values() if value is not None)
+    assert (
+        timings["cvxpy_compilation"]
+        + timings["final_solver"]
+        + timings["solve_wrapper_overhead"]
+        == pytest.approx(timings["solve_call_including_fallback"])
+    )
+    assert timings["end_to_end"] >= timings["optimization_mode"]
 
 
 def test_primary_failure_is_preserved_when_relaxed_fallback_succeeds():
@@ -261,6 +314,17 @@ def test_provenance_requires_clean_descendant_of_recorded_base(tmp_path):
     )
     with pytest.raises(RuntimeError, match="merge-base"):
         verify_repository_provenance(repository, unrelated_commit)
+
+
+def test_runner_rejects_ambient_emhass_import_outside_tested_project(tmp_path):
+    tested_project = tmp_path / "tested-project"
+    (tested_project / "src" / "emhass").mkdir(parents=True)
+    (tested_project / "src" / "emhass" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError, match="outside tested project root"):
+        load_tested_emhass(tested_project)
 
 
 def test_benchmark_params_ignore_ambient_credentials_and_location(monkeypatch):
@@ -402,6 +466,16 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     assert report["reproduction"]["dependency_lock"]["tracked"] is False
     assert report["reproduction"]["pyproject_sha256"]
     assert report["reproduction"]["resolved_packages"]["cvxpy"]
+    tested_modules = report["reproduction"]["tested_modules"]
+    assert tested_modules["source_root"] == str(Path(__file__).parents[1] / "src")
+    assert tested_modules["modules"]["emhass.optimization"]["path"] == (
+        "src/emhass/optimization.py"
+    )
+    assert tested_modules["modules"]["emhass.optimization"]["sha256"] == (
+        hashlib.sha256(
+            (Path(__file__).parents[1] / "src/emhass/optimization.py").read_bytes()
+        ).hexdigest()
+    )
     assert report["reproduction"]["solver"]["name"] == "HIGHS"
     assert report["reproduction"]["solver"]["actual_names"] == ["HIGHS"]
     environment = report["reproduction"]["environment"]
@@ -414,7 +488,7 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     assert report["reproduction"]["offline_inputs"]["time_zone"] == "UTC"
     assert report["repetitions"] == 2
     assert report["benchmark_variant"] == "candidate"
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["execution"]["order"] == "candidate"
     assert datetime.fromisoformat(report["execution"]["completed_at_utc"]) >= (
         datetime.fromisoformat(report["execution"]["started_at_utc"])
@@ -451,9 +525,23 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
             assert run["problem_size"]["scalar_variables"] > 0
             assert run["problem_size"]["constraint_rows"] > 0
             assert run["timings_s"]["model_construction"] >= 0
-            assert run["timings_s"]["canonicalization_and_wrapper"] >= 0
+            assert run["timings_s"]["cvxpy_compilation"] >= 0
+            assert run["timings_s"]["solve_wrapper_overhead"] >= 0
             assert run["timings_s"]["final_solver"] >= 0
             assert run["timings_s"]["end_to_end"] >= 0
+            assert (
+                run["timings_s"]["cvxpy_compilation"]
+                + run["timings_s"]["final_solver"]
+                + run["timings_s"]["solve_wrapper_overhead"]
+                == pytest.approx(
+                    run["timings_s"]["solve_call_including_fallback"],
+                    abs=1e-9,
+                )
+            )
+            assert (
+                run["timings_s"]["end_to_end"]
+                >= run["timings_s"]["optimization_mode"]
+            )
 
     one = by_name["one_battery"]["runs"][0]
     assert len(one["soc_schedule_fraction"]["SOC_opt"]) == 8

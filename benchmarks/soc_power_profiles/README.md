@@ -56,6 +56,8 @@ The output records:
 
 - separate harness and tested-source commits, branches, ancestry and
   cleanliness, plus the corpus and `pyproject.toml` hashes;
+- every imported EMHASS production module's tested-source-relative path and
+  SHA-256, after rejecting any ambient module outside the explicit tested root;
 - UTC process order/timestamps, container identity, declared image/runtime,
   nonempty CPU identity/fingerprint, and all resolved package versions;
 - the configured solver, timeout, relative MIP gap, and thread count;
@@ -80,12 +82,18 @@ records the project file hash plus resolved versions. This is a reproducibility
 limitation: retain the first report and execute the paired comparison in the
 same environment.
 
-`canonicalization_and_wrapper` is the instrumented CVXPY solve-call wall time
-minus `solver_stats.solve_time`. Current EMHASS instrumentation cannot separate
-CVXPY canonicalisation from its remaining wrapper overhead, so the report names
-that combined value explicitly. If relaxed fallback runs, this derived field is
-`null` because the solve-call timer contains both primary and fallback work
-while `solver_stats.solve_time` describes only the final problem.
+`cvxpy_compilation` is CVXPY's own `Problem.compilation_time` for the final
+solve attempt. `final_solver` is `solver_stats.solve_time`.
+`solve_wrapper_overhead` is the instrumented solve-call wall time minus those
+two measurements. It is not labelled canonicalisation. If relaxed fallback
+runs, the residual is `null` because the solve-call timer spans multiple
+attempts while CVXPY's compilation and solver fields describe only the final
+problem.
+
+Cold means a newly constructed EMHASS `Optimization` and CVXPY `Problem`.
+Warm means those objects are reused. CVXPY still records each warm solve's
+compilation or cached reduction lookup in `Problem.compilation_time`; warm does
+not mean that field must be zero.
 
 The runner uses `get_data_from_file=True`, disables result publishing, and
 redirects normal last-run/plan files into a temporary directory. It reads no
