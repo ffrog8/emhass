@@ -23,7 +23,7 @@ Use the repository development environment described in `docs/develop.md`:
 uv sync --extra test
 python scripts/benchmark_soc_power_profiles.py \
   --repetitions 5 \
-  --output baseline.json
+  --output /tmp/emhass-soc-profile-baseline.json
 ```
 
 Run the unchanged base and later selector branch with the same corpus,
@@ -38,9 +38,14 @@ The output records:
 - the configured solver, timeout, relative MIP gap, and thread count;
 - cold first execution and warm-cache repetitions;
 - solver status, objective, battery power schedule, and SOC schedule;
+- primary timeout/infeasible counts, final unsuccessful counts, and whether the
+  relaxed fallback was used;
+- actual solver names and generic CVXPY scalar-variable, Boolean-variable, and
+  constraint-row counts;
 - input setup, model construction, solver, result extraction, optimisation-mode,
   and end-to-end wall times;
-- minimum, median, p95, and maximum for every timing field.
+- separate cold and warm minimum, median, p95, and maximum values for every
+  timing field.
 
 At this upstream fixed point, the repository ignores and does not track
 `uv.lock`. The report therefore marks the dependency lock as unavailable and
@@ -51,9 +56,19 @@ same environment.
 `canonicalization_and_wrapper` is the instrumented CVXPY solve-call wall time
 minus `solver_stats.solve_time`. Current EMHASS instrumentation cannot separate
 CVXPY canonicalisation from its remaining wrapper overhead, so the report names
-that combined value explicitly.
+that combined value explicitly. If relaxed fallback runs, this derived field is
+`null` because the solve-call timer contains both primary and fallback work
+while `solver_stats.solve_time` describes only the final problem.
 
 The runner uses `get_data_from_file=True`, disables result publishing, and
 redirects normal last-run/plan files into a temporary directory. It reads no
 production credentials, contacts no Home Assistant endpoint, and grants no
-control authority.
+control authority. Fixed loopback/empty/UTC/zero location inputs replace all
+ambient Home Assistant credentials and location variables. The configured
+solver temporarily overrides ambient `LP_SOLVER` and is restored after the run.
+
+The unchanged base has no SOC-profile selectors, so it cannot report a
+feature-specific selector count. Generic Boolean-variable and constraint-row
+counts provide the model-size baseline; the later exact-selector implementation
+must add its feature-specific selector/row accounting when those structures
+exist.
