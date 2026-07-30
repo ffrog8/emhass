@@ -27,6 +27,13 @@ from emhass.soc_power_profiles import model_size_increase
 CORPUS_PATH = (
     Path(__file__).parents[1] / "benchmarks" / "soc_power_profiles" / "payloads.json"
 )
+RETAINED_RESULT_PATH = (
+    Path(__file__).parents[1]
+    / "benchmarks"
+    / "soc_power_profiles"
+    / "results"
+    / "2026-07-30"
+)
 PROJECT_DATA_PATH = Path(__file__).parents[1] / "data"
 RESULT_PATHS = [
     PROJECT_DATA_PATH / "last_run.json",
@@ -478,3 +485,40 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
     candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
     with pytest.raises(RuntimeError, match="absent-profile result differs"):
         compare_paired_reports(baseline, candidate)
+
+
+def test_retained_paired_result_has_provenance_and_exact_model_deltas():
+    baseline = json.loads(
+        (RETAINED_RESULT_PATH / "unchanged-base.json").read_text(encoding="utf-8")
+    )
+    candidate = json.loads(
+        (RETAINED_RESULT_PATH / "candidate.json").read_text(encoding="utf-8")
+    )
+
+    assert baseline["corpus_sha256"] == candidate["corpus_sha256"]
+    assert baseline["reproduction"]["tested_commit"] == (
+        "4def37f83c7ef4cde6900abb0fd68f402fbd1072"
+    )
+    assert candidate["reproduction"]["tested_commit"] == (
+        "d6d9f91ff0bfe2f0e4034fe2da9284df81976184"
+    )
+    assert candidate["paired_comparison"]["environment_parity"] is True
+
+    baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
+    for payload in candidate["payloads"]:
+        baseline_run = baseline_payloads[payload["name"]]["runs"][0]
+        candidate_run = payload["runs"][0]
+        assert (
+            candidate_run["problem_size"]["boolean_variables"]
+            - baseline_run["problem_size"]["boolean_variables"]
+            == payload["profile_model_size"]["boolean_selectors"]
+        )
+        assert (
+            candidate_run["problem_size"]["constraint_rows"]
+            - baseline_run["problem_size"]["constraint_rows"]
+            == payload["profile_model_size"]["added_linear_rows"]
+        )
+        assert payload["primary_timeout_count"] == 0
+        assert payload["primary_infeasible_count"] == 0
+        assert payload["final_unsuccessful_count"] == 0
+        assert payload["relaxed_fallback_count"] == 0
