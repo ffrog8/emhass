@@ -3376,6 +3376,54 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_mpc_disabled_battery_logs_no_profile_model_increase_or_warning(self):
+        oversized_profile = {
+            "charge": {
+                "soc_breakpoints": [
+                    float(value) for value in np.linspace(0.01, 0.99, 49)
+                ],
+                "power_max": [
+                    float(value) for value in np.linspace(5000, 100, 50)
+                ],
+            }
+        }
+        runtime = {
+            "set_use_battery": False,
+            "number_of_batteries": 3,
+            "battery_soc_power_profiles": [
+                oversized_profile,
+                oversized_profile,
+                oversized_profile,
+            ],
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [1000.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+        }
+
+        with self.assertLogs(logger, logging.INFO) as captured:
+            input_data = await self._run_set_input(runtime)
+
+        self.assertEqual(
+            input_data["plant_conf"]["battery_soc_power_profiles"],
+            [oversized_profile, oversized_profile, oversized_profile],
+        )
+        self.assertEqual(
+            sum(
+                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows"
+                in message
+                for message in captured.output
+            ),
+            1,
+        )
+        self.assertFalse(
+            any(
+                "Battery SOC power-profile model size" in message
+                for message in captured.output
+            )
+        )
+
     async def test_mpc_cache_hit_refreshes_same_shape_discharge_profile_coefficients(self):
         base_runtime = {
             "set_use_battery": True,

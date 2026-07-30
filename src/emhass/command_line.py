@@ -1531,7 +1531,11 @@ async def set_input_data_dict(
             _num_ts = len(fcst.forecast_dates)
             log_model_size_increase(
                 logger,
-                plant_conf.get("battery_soc_power_profiles"),
+                (
+                    plant_conf.get("battery_soc_power_profiles")
+                    if optim_conf.get("set_use_battery", False)
+                    else None
+                ),
                 _num_ts,
                 battery_count=int(plant_conf.get("number_of_batteries", 1)),
             )
