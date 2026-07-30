@@ -108,7 +108,9 @@ The report records the harness commit separately from tested source commit
 `4def37f8`. The candidate process imports the candidate tested source and
 applies the profiles. `--baseline-report` rejects common-input, execution-order,
 host-characteristic, process-setting, package, or absent-profile result
-mismatches.
+mismatches. It also reads every reported production module from the declared
+tested commit in the local Git object database and rejects a missing commit,
+missing path, or content hash mismatch.
 
 Every normal optimization request logs `T*K` Boolean selectors and
 `T*(2*K+R)` added linear rows before cache selection. This includes cache hits

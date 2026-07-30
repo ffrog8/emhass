@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import cvxpy as cp
@@ -648,11 +648,24 @@ def _maximum_absolute_difference(
 
 
 def _validate_report_module_provenance(
-    report: dict[str, Any], report_name: str
+    report: dict[str, Any],
+    report_name: str,
+    repository: pathlib.Path,
 ) -> None:
     if int(report.get("schema_version", 0)) < 3:
         return
     manifest = report.get("reproduction", {}).get("tested_modules")
+    provenance = report.get("reproduction", {}).get("tested_source_provenance")
+    tested_commit = (
+        provenance.get("tested_commit") if isinstance(provenance, dict) else None
+    )
+    if (
+        not isinstance(tested_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", tested_commit) is None
+    ):
+        raise RuntimeError(
+            f"{report_name} tested module provenance has no valid tested commit"
+        )
     modules = manifest.get("modules") if isinstance(manifest, dict) else None
     required = {"emhass.command_line", "emhass.optimization"}
     if not isinstance(modules, dict) or not required <= modules.keys():
@@ -677,6 +690,28 @@ def _validate_report_module_provenance(
                 f"{report_name} tested module provenance has invalid hash for "
                 f"{module_name!r}"
             )
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.resolve()}",
+                "-C",
+                str(repository.resolve()),
+                "show",
+                f"{tested_commit}:{path}",
+            ],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{report_name} tested module provenance cannot resolve "
+                f"{tested_commit}:{path}"
+            )
+        if hashlib.sha256(result.stdout).hexdigest() != sha256:
+            raise RuntimeError(
+                f"{report_name} tested module provenance hash does not match "
+                f"{tested_commit}:{path}"
+            )
 
 
 def compare_paired_reports(
@@ -684,10 +719,11 @@ def compare_paired_reports(
     candidate: dict[str, Any],
     *,
     tolerance: float = 1e-6,
+    repository: pathlib.Path = PROJECT_ROOT,
 ) -> dict[str, Any]:
     """Compare reports produced from one corpus under identical environments."""
-    _validate_report_module_provenance(baseline, "baseline")
-    _validate_report_module_provenance(candidate, "candidate")
+    _validate_report_module_provenance(baseline, "baseline", repository)
+    _validate_report_module_provenance(candidate, "candidate", repository)
     baseline_environment = baseline["reproduction"]["environment"]
     candidate_environment = candidate["reproduction"]["environment"]
     comparable_environment = (
@@ -820,7 +856,7 @@ async def run_benchmarks(
     execution_order: str = "candidate",
 ) -> dict[str, Any]:
     """Execute every corpus payload through set_input_data_dict and naive_mpc_optim."""
-    started_at = datetime.now(UTC)
+    started_at = datetime.now(timezone.utc)  # noqa: UP017
     corpus_path = corpus_path.resolve()
     project_root = project_root.resolve()
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
@@ -900,7 +936,7 @@ async def run_benchmarks(
         "execution": {
             "order": execution_order,
             "started_at_utc": started_at.isoformat(),
-            "completed_at_utc": datetime.now(UTC).isoformat(),
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         },
         "reproduction": {
             "harness_provenance": harness_provenance,

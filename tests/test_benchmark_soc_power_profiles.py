@@ -1,5 +1,6 @@
 """Behavior tests for the reproducible SOC power-profile benchmark runner."""
 
+import ast
 import asyncio
 import copy
 import hashlib
@@ -73,6 +74,31 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
         "base",
     )
     return repository, _git(repository, "rev-parse", "HEAD")
+
+
+def _git_blob_sha256(repository: Path, commit: str, path: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repository), "show", f"{commit}:{path}"],
+        check=True,
+        capture_output=True,
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def test_benchmark_runner_uses_python_310_compatible_utc_import():
+    source = (
+        Path(__file__).parents[1] / "scripts/benchmark_soc_power_profiles.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 10))
+    datetime_imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime"
+        for alias in node.names
+    }
+
+    assert "timezone" in datetime_imports
+    assert "UTC" not in datetime_imports
 
 
 def test_timing_summary_reports_minimum_median_p95_and_maximum():
@@ -609,6 +635,10 @@ def test_corpus_covers_required_profile_shapes_and_warning_envelope():
 
 
 def test_paired_report_comparison_requires_absent_profile_equivalence():
+    repository = Path(__file__).parents[1]
+    tested_commit = _git(repository, "rev-parse", "HEAD")
+    command_line_path = "src/emhass/command_line.py"
+    optimization_path = "src/emhass/optimization.py"
     run = {
         "repetition": 1,
         "cache_state": "cold",
@@ -634,16 +664,21 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
         "offline_inputs": {"hass_url": "http://127.0.0.1/"},
         "environment": common_environment,
         "resolved_packages": {"cvxpy": "test"},
+        "tested_source_provenance": {"tested_commit": tested_commit},
         "tested_modules": {
             "source_root": "/tested/src",
             "modules": {
                 "emhass.command_line": {
-                    "path": "src/emhass/command_line.py",
-                    "sha256": "a" * 64,
+                    "path": command_line_path,
+                    "sha256": _git_blob_sha256(
+                        repository, tested_commit, command_line_path
+                    ),
                 },
                 "emhass.optimization": {
-                    "path": "src/emhass/optimization.py",
-                    "sha256": "b" * 64,
+                    "path": optimization_path,
+                    "sha256": _git_blob_sha256(
+                        repository, tested_commit, optimization_path
+                    ),
                 },
             },
         },
@@ -686,14 +721,22 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
     assert comparison["separate_containers"] is True
     assert comparison["payloads"][0]["runs"][0]["objective_delta"] == 0
 
+    candidate["reproduction"]["tested_source_provenance"]["tested_commit"] = "f" * 40
+    with pytest.raises(RuntimeError, match="tested module provenance"):
+        compare_paired_reports(baseline, candidate)
+    candidate["reproduction"]["tested_source_provenance"]["tested_commit"] = tested_commit
+
+    original_hash = candidate["reproduction"]["tested_modules"]["modules"][
+        "emhass.optimization"
+    ]["sha256"]
     candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
         "sha256"
-    ] = "invalid"
+    ] = "f" * 64
     with pytest.raises(RuntimeError, match="tested module provenance"):
         compare_paired_reports(baseline, candidate)
     candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
         "sha256"
-    ] = "b" * 64
+    ] = original_hash
 
     candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
     with pytest.raises(RuntimeError, match="absent-profile result differs"):
