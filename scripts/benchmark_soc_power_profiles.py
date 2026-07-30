@@ -647,6 +647,38 @@ def _maximum_absolute_difference(
     return max(differences, default=0.0)
 
 
+def _validate_report_module_provenance(
+    report: dict[str, Any], report_name: str
+) -> None:
+    if int(report.get("schema_version", 0)) < 3:
+        return
+    manifest = report.get("reproduction", {}).get("tested_modules")
+    modules = manifest.get("modules") if isinstance(manifest, dict) else None
+    required = {"emhass.command_line", "emhass.optimization"}
+    if not isinstance(modules, dict) or not required <= modules.keys():
+        raise RuntimeError(
+            f"{report_name} tested module provenance is missing required modules"
+        )
+    for module_name, module in modules.items():
+        path = module.get("path") if isinstance(module, dict) else None
+        sha256 = module.get("sha256") if isinstance(module, dict) else None
+        if not isinstance(path, str) or not path.startswith("src/emhass/"):
+            raise RuntimeError(
+                f"{report_name} tested module provenance has invalid path for "
+                f"{module_name!r}"
+            )
+        relative_path = pathlib.PurePosixPath(path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(
+                f"{report_name} tested module provenance escapes its tested root"
+            )
+        if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+            raise RuntimeError(
+                f"{report_name} tested module provenance has invalid hash for "
+                f"{module_name!r}"
+            )
+
+
 def compare_paired_reports(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
@@ -654,6 +686,8 @@ def compare_paired_reports(
     tolerance: float = 1e-6,
 ) -> dict[str, Any]:
     """Compare reports produced from one corpus under identical environments."""
+    _validate_report_module_provenance(baseline, "baseline")
+    _validate_report_module_provenance(candidate, "candidate")
     baseline_environment = baseline["reproduction"]["environment"]
     candidate_environment = candidate["reproduction"]["environment"]
     comparable_environment = (
@@ -669,6 +703,10 @@ def compare_paired_reports(
         "process_settings",
     )
     parity_fields = {
+        "schema_version": (
+            baseline.get("schema_version"),
+            candidate.get("schema_version"),
+        ),
         "corpus_sha256": (baseline["corpus_sha256"], candidate["corpus_sha256"]),
         "repetitions": (baseline["repetitions"], candidate["repetitions"]),
         "solver": (

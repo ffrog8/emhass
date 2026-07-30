@@ -634,8 +634,22 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
         "offline_inputs": {"hass_url": "http://127.0.0.1/"},
         "environment": common_environment,
         "resolved_packages": {"cvxpy": "test"},
+        "tested_modules": {
+            "source_root": "/tested/src",
+            "modules": {
+                "emhass.command_line": {
+                    "path": "src/emhass/command_line.py",
+                    "sha256": "a" * 64,
+                },
+                "emhass.optimization": {
+                    "path": "src/emhass/optimization.py",
+                    "sha256": "b" * 64,
+                },
+            },
+        },
     }
     baseline = {
+        "schema_version": 3,
         "corpus_sha256": "same",
         "repetitions": 1,
         "reproduction": common_reproduction,
@@ -649,6 +663,7 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
     candidate_reproduction = copy.deepcopy(common_reproduction)
     candidate_reproduction["environment"]["container_id"] = "candidate-container"
     candidate = {
+        "schema_version": 3,
         "corpus_sha256": "same",
         "repetitions": 1,
         "reproduction": candidate_reproduction,
@@ -670,6 +685,15 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
     assert comparison["environment_parity"] is True
     assert comparison["separate_containers"] is True
     assert comparison["payloads"][0]["runs"][0]["objective_delta"] == 0
+
+    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
+        "sha256"
+    ] = "invalid"
+    with pytest.raises(RuntimeError, match="tested module provenance"):
+        compare_paired_reports(baseline, candidate)
+    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
+        "sha256"
+    ] = "b" * 64
 
     candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
     with pytest.raises(RuntimeError, match="absent-profile result differs"):
