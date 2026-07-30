@@ -18,15 +18,21 @@ BENCHMARK_MAX_ADDED_ROWS = 2592
 
 
 def model_size_increase(
-    profiles: list[dict[str, Any]] | None, horizon: int
+    profiles: list[dict[str, Any]] | None,
+    horizon: int,
+    *,
+    battery_count: int | None = None,
 ) -> dict[str, Any]:
     """Return exact added model structure for a validated profile list."""
+    if battery_count is None:
+        battery_count = len(profiles or [])
+    normalized_profiles = profiles or [{} for _ in range(battery_count)]
     direction_presence: list[dict[str, bool]] = []
     band_counts: list[dict[str, int]] = []
     breakpoints = 0
     directions = 0
 
-    for entry in profiles or []:
+    for entry in normalized_profiles:
         present: dict[str, bool] = {}
         counts: dict[str, int] = {}
         for direction in ("charge", "discharge"):
@@ -43,7 +49,7 @@ def model_size_increase(
     added_rows = horizon * (2 * breakpoints + directions)
     return {
         "horizon": horizon,
-        "battery_count": len(profiles or []),
+        "battery_count": battery_count,
         "direction_presence": direction_presence,
         "band_counts": band_counts,
         "breakpoint_count": breakpoints,
@@ -57,11 +63,15 @@ def log_model_size_increase(
     logger: logging.Logger,
     profiles: list[dict[str, Any]] | None,
     horizon: int,
+    *,
+    battery_count: int | None = None,
 ) -> dict[str, Any]:
     """Log exact added structure and warn once above retained benchmark evidence."""
-    model_size = model_size_increase(profiles, horizon)
-    if model_size["profile_direction_count"] == 0:
-        return model_size
+    model_size = model_size_increase(
+        profiles,
+        horizon,
+        battery_count=battery_count,
+    )
 
     logger.info(
         "Battery SOC power profiles add %d Boolean selectors and %d linear rows "

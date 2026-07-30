@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import cvxpy as cp
@@ -38,14 +39,11 @@ import orjson
 
 from emhass import utils
 from emhass.command_line import OptimizationCache, naive_mpc_optim, set_input_data_dict
-from emhass.soc_power_profiles import (
-    BENCHMARK_MAX_ADDED_ROWS,
-    BENCHMARK_MAX_SELECTORS,
-    model_size_increase,
-)
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "benchmarks" / "soc_power_profiles" / "payloads.json"
+BENCHMARK_MAX_SELECTORS = 1152
+BENCHMARK_MAX_ADDED_ROWS = 2592
 OFFLINE_BENCHMARK_SECRETS = {
     "hass_url": "http://127.0.0.1/",
     "long_lived_token": "",
@@ -220,14 +218,83 @@ def _logger(capture: _WarningCapture | None = None) -> logging.Logger:
     return logger
 
 
-def _emhass_conf(data_path: pathlib.Path | None = None) -> dict[str, pathlib.Path]:
-    root_path = PROJECT_ROOT / "src" / "emhass"
+def _emhass_conf(
+    project_root: pathlib.Path = PROJECT_ROOT,
+    data_path: pathlib.Path | None = None,
+) -> dict[str, pathlib.Path]:
+    root_path = project_root / "src" / "emhass"
     return {
-        "data_path": data_path or PROJECT_ROOT / "data",
+        "data_path": data_path or project_root / "data",
         "root_path": root_path,
-        "config_path": PROJECT_ROOT / "config.json",
+        "config_path": project_root / "config.json",
         "defaults_path": root_path / "data" / "config_defaults.json",
         "associations_path": root_path / "data" / "associations.csv",
+    }
+
+
+def _profile_model_size(
+    profiles: list[dict[str, Any]] | None,
+    horizon: int,
+    battery_count: int,
+) -> dict[str, Any]:
+    normalized_profiles = profiles or [{} for _ in range(battery_count)]
+    direction_presence = []
+    band_counts = []
+    breakpoints = 0
+    profile_directions = 0
+    for entry in normalized_profiles:
+        presence = {}
+        counts = {}
+        for direction in ("charge", "discharge"):
+            profile = entry.get(direction)
+            presence[direction] = profile is not None
+            counts[direction] = len(profile["power_max"]) if profile is not None else 0
+            if profile is not None:
+                breakpoints += len(profile["soc_breakpoints"])
+                profile_directions += 1
+        direction_presence.append(presence)
+        band_counts.append(counts)
+    return {
+        "horizon": horizon,
+        "battery_count": battery_count,
+        "direction_presence": direction_presence,
+        "band_counts": band_counts,
+        "breakpoint_count": breakpoints,
+        "profile_direction_count": profile_directions,
+        "boolean_selectors": horizon * breakpoints,
+        "added_linear_rows": horizon * (2 * breakpoints + profile_directions),
+    }
+
+
+def _execution_environment(corpus: dict[str, Any]) -> dict[str, Any]:
+    cpu_model = ""
+    cpuinfo_path = pathlib.Path("/proc/cpuinfo")
+    if cpuinfo_path.exists():
+        for line in cpuinfo_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key.strip() in {"model name", "Hardware", "Processor"}:
+                cpu_model = value.strip()
+                if cpu_model:
+                    break
+    if not cpu_model:
+        cpu_model = platform.processor() or platform.machine()
+    cpu_count = os.cpu_count()
+    hardware_identity = f"{platform.machine()}|{cpu_count}|{cpu_model}"
+    declared = corpus["execution_environment"]
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_count": cpu_count,
+        "cpu_model": cpu_model,
+        "hardware_fingerprint_sha256": hashlib.sha256(
+            hardware_identity.encode("utf-8")
+        ).hexdigest(),
+        "containerized": pathlib.Path("/.dockerenv").exists(),
+        "container_id": platform.node(),
+        "declared_container_image": declared["container_image"],
+        "declared_runtime": declared["runtime"],
+        "process_settings": copy.deepcopy(declared["process_settings"]),
     }
 
 
@@ -261,7 +328,8 @@ async def build_benchmark_params(
 
 
 def _solver_seconds(opt: Any) -> float:
-    value = getattr(opt.prob.solver_stats, "solve_time", None)
+    solver_stats = getattr(opt.prob, "solver_stats", None)
+    value = getattr(solver_stats, "solve_time", None)
     return max(float(value or 0.0), 0.0)
 
 
@@ -314,6 +382,7 @@ def build_run_record(
     """Build one JSON-safe run record, including unsuccessful solver results."""
     solve_call_seconds = float(stage_times.get("optim_solve.solve", 0.0))
     solver_seconds = _solver_seconds(optimization)
+    solver_stats = getattr(optimization.prob, "solver_stats", None)
     return {
         "repetition": repetition,
         "cache_state": cache_state,
@@ -321,7 +390,7 @@ def build_run_record(
         "primary_solver_status": primary_solver_status,
         "solver_status": optimization.optim_status,
         "relaxed_fallback_used": relaxed_fallback_used,
-        "solver_name": optimization.prob.solver_stats.solver_name or "unknown",
+        "solver_name": getattr(solver_stats, "solver_name", None) or "unknown",
         "objective": _safe_number(optimization.prob.value),
         "problem_size": _problem_size(optimization.prob),
         "power_schedule_w": _schedule(result, "P_batt"),
@@ -379,8 +448,10 @@ async def _run_payload(
     logger: logging.Logger,
     warning_capture: _WarningCapture,
     emhass_conf: dict[str, pathlib.Path],
+    apply_profiles: bool,
 ) -> dict[str, Any]:
-    profiles = copy.deepcopy(payload.get("candidate_profiles"))
+    requested_profiles = copy.deepcopy(payload.get("candidate_profiles"))
+    profiles = requested_profiles if apply_profiles else None
     configuration = copy.deepcopy(payload["configuration"])
     if profiles is not None:
         configuration["battery_soc_power_profiles"] = profiles
@@ -447,8 +518,16 @@ async def _run_payload(
             )
         )
 
-    profile_model_size = model_size_increase(
-        profiles, payload["runtime"]["prediction_horizon"]
+    battery_count = int(configuration.get("number_of_batteries", 1))
+    profile_model_size = _profile_model_size(
+        profiles,
+        payload["runtime"]["prediction_horizon"],
+        battery_count,
+    )
+    scenario_profile_shape = _profile_model_size(
+        requested_profiles,
+        payload["runtime"]["prediction_horizon"],
+        battery_count,
     )
     return {
         "name": payload["name"],
@@ -456,6 +535,7 @@ async def _run_payload(
         "prediction_horizon": payload["runtime"]["prediction_horizon"],
         "profile_state": "configured" if profiles is not None else "absent",
         "benchmark_envelope": bool(payload.get("benchmark_envelope")),
+        "scenario_profile_shape": scenario_profile_shape,
         "profile_model_size": profile_model_size,
         "runs": runs,
         **summarize_runs(runs),
@@ -487,6 +567,20 @@ def compare_paired_reports(
     tolerance: float = 1e-6,
 ) -> dict[str, Any]:
     """Compare reports produced from one corpus under identical environments."""
+    baseline_environment = baseline["reproduction"]["environment"]
+    candidate_environment = candidate["reproduction"]["environment"]
+    comparable_environment = (
+        "python",
+        "platform",
+        "machine",
+        "cpu_count",
+        "cpu_model",
+        "hardware_fingerprint_sha256",
+        "containerized",
+        "declared_container_image",
+        "declared_runtime",
+        "process_settings",
+    )
     parity_fields = {
         "corpus_sha256": (baseline["corpus_sha256"], candidate["corpus_sha256"]),
         "repetitions": (baseline["repetitions"], candidate["repetitions"]),
@@ -498,9 +592,9 @@ def compare_paired_reports(
             baseline["reproduction"]["offline_inputs"],
             candidate["reproduction"]["offline_inputs"],
         ),
-        "environment": (
-            baseline["reproduction"]["environment"],
-            candidate["reproduction"]["environment"],
+        "host_and_process_conditions": (
+            {key: baseline_environment[key] for key in comparable_environment},
+            {key: candidate_environment[key] for key in comparable_environment},
         ),
         "resolved_packages": (
             baseline["reproduction"]["resolved_packages"],
@@ -512,11 +606,24 @@ def compare_paired_reports(
         raise RuntimeError(
             "paired benchmark environment mismatch: " + ", ".join(mismatches)
         )
+    baseline_execution = baseline["execution"]
+    candidate_execution = candidate["execution"]
+    if (
+        baseline_execution["order"] != "baseline"
+        or candidate_execution["order"] != "candidate"
+    ):
+        raise RuntimeError("paired benchmark execution order labels are invalid")
+    baseline_completed = datetime.fromisoformat(baseline_execution["completed_at_utc"])
+    candidate_started = datetime.fromisoformat(candidate_execution["started_at_utc"])
+    if baseline_completed > candidate_started:
+        raise RuntimeError("candidate benchmark started before baseline completed")
 
+    baseline_names = [payload["name"] for payload in baseline["payloads"]]
+    candidate_names = [payload["name"] for payload in candidate["payloads"]]
+    if baseline_names != candidate_names:
+        raise RuntimeError("paired benchmark payload names or order differ")
     baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
     candidate_payloads = {payload["name"]: payload for payload in candidate["payloads"]}
-    if baseline_payloads.keys() != candidate_payloads.keys():
-        raise RuntimeError("paired benchmark payload names differ")
 
     comparisons = []
     for name, candidate_payload in candidate_payloads.items():
@@ -571,6 +678,10 @@ def compare_paired_reports(
         )
     return {
         "environment_parity": True,
+        "separate_containers": (
+            baseline_environment["container_id"] != candidate_environment["container_id"]
+        ),
+        "baseline_completed_before_candidate_started": True,
         "absent_profile_tolerance": tolerance,
         "payloads": comparisons,
     }
@@ -579,9 +690,14 @@ def compare_paired_reports(
 async def run_benchmarks(
     corpus_path: pathlib.Path = DEFAULT_CORPUS_PATH,
     repetitions: int | None = None,
+    *,
+    project_root: pathlib.Path = PROJECT_ROOT,
+    execution_order: str = "candidate",
 ) -> dict[str, Any]:
     """Execute every corpus payload through set_input_data_dict and naive_mpc_optim."""
+    started_at = datetime.now(UTC)
     corpus_path = corpus_path.resolve()
+    project_root = project_root.resolve()
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
     if repetitions is None:
         repetitions = int(corpus["default_repetitions"])
@@ -593,7 +709,12 @@ async def run_benchmarks(
         raise RuntimeError(
             f"configured solver {corpus['solver']['name']!r} is not installed"
         )
-    provenance = verify_repository_provenance(PROJECT_ROOT, corpus["base_commit"])
+    harness_provenance = verify_repository_provenance(
+        PROJECT_ROOT, corpus["base_commit"]
+    )
+    tested_source_provenance = verify_repository_provenance(
+        project_root, corpus["base_commit"]
+    )
 
     warning_capture = _WarningCapture()
     logger = _logger(warning_capture)
@@ -604,10 +725,10 @@ async def run_benchmarks(
         ) as data_dir:
             benchmark_data_path = pathlib.Path(data_dir)
             shutil.copyfile(
-                PROJECT_ROOT / "data" / "test_df_final.pkl",
+                project_root / "data" / "test_df_final.pkl",
                 benchmark_data_path / "test_df_final.pkl",
             )
-            emhass_conf = _emhass_conf(benchmark_data_path)
+            emhass_conf = _emhass_conf(project_root, benchmark_data_path)
             with benchmark_solver_environment(corpus["solver"]["name"]):
                 for payload in corpus["payloads"]:
                     payload_reports.append(
@@ -618,15 +739,16 @@ async def run_benchmarks(
                             logger,
                             warning_capture,
                             emhass_conf,
+                            execution_order == "candidate",
                         )
                     )
     finally:
         OptimizationCache.clear()
         logger.handlers.clear()
 
-    pyproject_path = PROJECT_ROOT / "pyproject.toml"
-    lock_path = PROJECT_ROOT / "uv.lock"
-    tracked_lock = _git_required(PROJECT_ROOT, "ls-files", "uv.lock") == "uv.lock"
+    pyproject_path = project_root / "pyproject.toml"
+    lock_path = project_root / "uv.lock"
+    tracked_lock = _git_required(project_root, "ls-files", "uv.lock") == "uv.lock"
     actual_solver_names = sorted(
         {
             run["solver_name"]
@@ -637,7 +759,7 @@ async def run_benchmarks(
     return {
         "schema_version": corpus["schema_version"],
         "repetitions": repetitions,
-        "benchmark_variant": "candidate",
+        "benchmark_variant": execution_order,
         "retained_warning_envelope": {
             "boolean_selectors": BENCHMARK_MAX_SELECTORS,
             "added_linear_rows": BENCHMARK_MAX_ADDED_ROWS,
@@ -647,8 +769,14 @@ async def run_benchmarks(
             "reuse its cached Optimization object."
         ),
         "corpus_sha256": _sha256(corpus_path),
+        "execution": {
+            "order": execution_order,
+            "started_at_utc": started_at.isoformat(),
+            "completed_at_utc": datetime.now(UTC).isoformat(),
+        },
         "reproduction": {
-            **provenance,
+            "harness_provenance": harness_provenance,
+            "tested_source_provenance": tested_source_provenance,
             "pyproject_sha256": _sha256(pyproject_path),
             "dependency_lock": {
                 "tracked": tracked_lock,
@@ -666,13 +794,7 @@ async def run_benchmarks(
                 "actual_names": actual_solver_names,
             },
             "offline_inputs": copy.deepcopy(OFFLINE_BENCHMARK_SECRETS),
-            "environment": {
-                "python": sys.version,
-                "platform": platform.platform(),
-                "machine": platform.machine(),
-                "processor": platform.processor(),
-                "cpu_count": os.cpu_count(),
-            },
+            "environment": _execution_environment(corpus),
         },
         "timing_notes": {
             "model_construction": (
@@ -713,6 +835,18 @@ def _parse_args() -> argparse.Namespace:
         help="Unchanged-base JSON report to validate and include as a paired comparison.",
     )
     parser.add_argument(
+        "--project-root",
+        type=pathlib.Path,
+        default=PROJECT_ROOT,
+        help="Clean tested source checkout (default: harness repository root).",
+    )
+    parser.add_argument(
+        "--execution-order",
+        choices=("baseline", "candidate"),
+        default="candidate",
+        help="Position of this process in the paired execution.",
+    )
+    parser.add_argument(
         "--output",
         type=pathlib.Path,
         help="Write JSON to this path instead of stdout.",
@@ -722,7 +856,14 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    report = asyncio.run(run_benchmarks(args.corpus, args.repetitions))
+    report = asyncio.run(
+        run_benchmarks(
+            args.corpus,
+            args.repetitions,
+            project_root=args.project_root,
+            execution_order=args.execution_order,
+        )
+    )
     if args.baseline_report:
         baseline = json.loads(args.baseline_report.read_text(encoding="utf-8"))
         report["paired_comparison"] = compare_paired_reports(baseline, report)

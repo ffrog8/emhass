@@ -1,7 +1,17 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "base_commit": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
   "mode": "naive-mpc-optim",
+  "execution_environment": {
+    "container_image": "ghcr.io/astral-sh/uv:python3.11-bookworm",
+    "runtime": "Docker containers on one remote Docker host",
+    "process_settings": {
+      "python_processes_per_report": 1,
+      "payload_order": "file order",
+      "cache_order": "one cold run followed by warm-cache runs",
+      "network_inputs": "disabled"
+    }
+  },
   "solver": {
     "name": "HIGHS",
     "timeout_s": 30,

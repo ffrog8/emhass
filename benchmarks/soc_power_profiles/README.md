@@ -25,33 +25,39 @@ charge and five discharge bands for each of three batteries over 48 intervals:
 not a universal performance guarantee or a band-count limit.
 
 Use the repository development environment described in `docs/develop.md`.
-Run the issue #2 runner at unchanged optimizer checkout `4def37f8` against this
-same expanded corpus, then run the candidate checkout in the same environment:
+Use the clean candidate checkout's harness for both runs. For the baseline
+process, execute that harness in the clean `4def37f8` project environment and
+point `--project-root` at that unchanged source checkout:
 
 ```bash
 uv sync --extra test
-python scripts/benchmark_soc_power_profiles.py \
+python /path/to/candidate/scripts/benchmark_soc_power_profiles.py \
   --corpus /path/to/candidate/benchmarks/soc_power_profiles/payloads.json \
+  --project-root /path/to/unchanged-4def37f8 \
+  --execution-order baseline \
   --repetitions 5 \
   --output /tmp/emhass-soc-profile-unchanged-base.json
 
 python scripts/benchmark_soc_power_profiles.py \
+  --execution-order candidate \
   --repetitions 5 \
   --baseline-report /tmp/emhass-soc-profile-unchanged-base.json \
   --output /tmp/emhass-soc-profile-candidate.json
 ```
 
-Use the same corpus, repetition count, solver settings, machine, container, and
-resolved environment for both runs. The first repetition performs cold
-construction, and the next four reuse the resulting cached `Optimization` and
-CVXPY `Problem`. Retain both raw JSON files with the corpus and source
-revisions.
+Use the same corpus, repetition count, solver settings, Docker host, declared
+container image, and process settings for both runs. Separate containers are
+allowed and are reported rather than described as one container. The first
+repetition performs cold construction, and the next four reuse the resulting
+cached `Optimization` and CVXPY `Problem`. Retain both raw JSON files with the
+corpus and source revisions.
 
 The output records:
 
-- base and tested commits, branch, feature-only ancestry, corpus hash, and
-  `pyproject.toml` hash;
-- Python/platform details and all resolved package versions;
+- separate harness and tested-source commits, branches, ancestry and
+  cleanliness, plus the corpus and `pyproject.toml` hashes;
+- UTC process order/timestamps, container identity, declared image/runtime,
+  nonempty CPU identity/fingerprint, and all resolved package versions;
 - the configured solver, timeout, relative MIP gap, and thread count;
 - cold construction and warm-cache repetitions reported separately;
 - solver status, objective, battery power schedule, and SOC schedule;
@@ -88,14 +94,18 @@ control authority. Fixed loopback/empty/UTC/zero location inputs replace all
 ambient Home Assistant credentials and location variables. The configured
 solver temporarily overrides ambient `LP_SOLVER` and is restored after the run.
 
-The unchanged runner at `4def37f8` does not know the corpus's optional
-`candidate_profiles` member, so it uses the common scalar configuration and
-runtime while retaining an unmodified optimizer. Its report records tested
-commit `4def37f8`. The candidate runner applies those profiles, and
-`--baseline-report` rejects environment or absent-profile result mismatches.
+The shared harness omits `candidate_profiles` only for the baseline execution,
+while importing and executing EMHASS from the clean `4def37f8` project root.
+The report records the harness commit separately from tested source commit
+`4def37f8`. The candidate process imports the candidate tested source and
+applies the profiles. `--baseline-report` rejects common-input, execution-order,
+host-characteristic, process-setting, package, or absent-profile result
+mismatches.
 
-Normal EMHASS execution logs `T*K` Boolean selectors and `T*(2*K+R)` added
-linear rows before constructing a supplied profile model. Requests above the
+Every normal optimization request logs `T*K` Boolean selectors and
+`T*(2*K+R)` added linear rows before cache selection. This includes cache hits
+and explicit scalar-only replacements, which report 0 selectors and 0 rows.
+Requests above the
 retained 1,152-selector or 2,592-row boundary remain accepted and emit one
 advisory warning. Solver timeout starts only when solving after problem
 construction; this warning is not a request-size, memory, or service-safety

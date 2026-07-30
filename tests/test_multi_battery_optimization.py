@@ -34,6 +34,24 @@ VALID_OPTIMAL_STATUSES = ["Optimal", "Optimal (Relaxed)"]
 
 
 class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
+    def test_absent_profiles_report_empty_metadata_for_each_configured_battery(self):
+        assert model_size_increase(None, 8, battery_count=2) == {
+            "horizon": 8,
+            "battery_count": 2,
+            "direction_presence": [
+                {"charge": False, "discharge": False},
+                {"charge": False, "discharge": False},
+            ],
+            "band_counts": [
+                {"charge": 0, "discharge": 0},
+                {"charge": 0, "discharge": 0},
+            ],
+            "breakpoint_count": 0,
+            "profile_direction_count": 0,
+            "boolean_selectors": 0,
+            "added_linear_rows": 0,
+        }
+
     def test_full_three_battery_shape_reports_exact_formula(self):
         profiles = [
             {
@@ -109,7 +127,7 @@ class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
         self.assertTrue(captured.output[0].startswith("INFO:"))
         self.assertIn("1152 Boolean selectors", captured.output[0])
 
-    def test_optimizer_logs_counts_before_profile_model_construction(self):
+    def test_logging_reports_profile_model_size(self):
         profiles = [
             {
                 "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
@@ -120,11 +138,7 @@ class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
         logger.handlers = []
 
         with self.assertLogs(logger, logging.INFO) as captured:
-            build_optimization(
-                optim_overrides={"delta_forecast_daily": pd.Timedelta(hours=24)},
-                plant_overrides={"battery_soc_power_profiles": profiles},
-                logger=logger,
-            )
+            log_model_size_increase(logger, profiles, 48, battery_count=1)
 
         self.assertTrue(
             any(

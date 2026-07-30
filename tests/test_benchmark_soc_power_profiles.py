@@ -1,9 +1,12 @@
 """Behavior tests for the reproducible SOC power-profile benchmark runner."""
 
 import asyncio
+import copy
+import hashlib
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -185,6 +188,39 @@ def test_unsuccessful_solve_remains_reportable_with_counts():
     assert summary["relaxed_fallback_count"] == 0
 
 
+def test_unsuccessful_solve_without_solver_stats_remains_reportable():
+    problem = SimpleNamespace(
+        value=None,
+        status=None,
+        solver_stats=None,
+        size_metrics=SimpleNamespace(
+            num_scalar_variables=4,
+            num_scalar_eq_constr=2,
+            num_scalar_leq_constr=3,
+        ),
+        variables=lambda: [],
+    )
+    optimization = SimpleNamespace(optim_status="error", prob=problem)
+    result = pd.DataFrame({"P_batt": [float("nan")], "SOC_opt": [float("nan")]})
+
+    run = build_run_record(
+        repetition=1,
+        cache_state="cold",
+        cache_reused=False,
+        result=result,
+        optimization=optimization,
+        stage_times={"optim_solve.solve": 0.2},
+        setup_seconds=0.1,
+        end_to_end_seconds=0.3,
+        primary_solver_status="error",
+        relaxed_fallback_used=False,
+    )
+
+    assert run["solver_name"] == "unknown"
+    assert run["timings_s"]["final_solver"] == 0.0
+    assert run["problem_size"]["constraint_rows"] == 5
+
+
 def test_primary_failure_is_preserved_when_relaxed_fallback_succeeds():
     primary_status, relaxed = primary_solve_outcome(
         [
@@ -342,7 +378,7 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     monkeypatch.setenv("ALT", "50")
 
     corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
-    corpus["payloads"] = corpus["payloads"][:2]
+    corpus["payloads"] = corpus["payloads"][:3]
     small_corpus = tmp_path / "payloads.json"
     small_corpus.write_text(json.dumps(corpus), encoding="utf-8")
 
@@ -353,29 +389,47 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     }
     assert after_result_files == before_result_files
     assert os.environ["LP_SOLVER"] == "GUROBI"
-    assert report["reproduction"]["base_commit"] == (
+    tested_source = report["reproduction"]["tested_source_provenance"]
+    harness = report["reproduction"]["harness_provenance"]
+    assert tested_source["base_commit"] == (
         "aef76a4ba9286d5a12f1ca476e56076c70a74951"
     )
-    assert report["reproduction"]["merge_base"] == report["reproduction"]["base_commit"]
-    assert report["reproduction"]["tested_commit"]
-    assert report["reproduction"]["worktree_clean"] is True
+    assert tested_source["merge_base"] == tested_source["base_commit"]
+    assert tested_source["tested_commit"]
+    assert harness["tested_commit"] == tested_source["tested_commit"]
+    assert tested_source["worktree_clean"] is True
+    assert harness["worktree_clean"] is True
     assert report["reproduction"]["dependency_lock"]["tracked"] is False
     assert report["reproduction"]["pyproject_sha256"]
     assert report["reproduction"]["resolved_packages"]["cvxpy"]
     assert report["reproduction"]["solver"]["name"] == "HIGHS"
     assert report["reproduction"]["solver"]["actual_names"] == ["HIGHS"]
+    environment = report["reproduction"]["environment"]
+    assert environment["cpu_model"]
+    assert environment["hardware_fingerprint_sha256"]
+    assert environment["declared_container_image"]
+    assert environment["container_id"]
     assert report["reproduction"]["offline_inputs"]["hass_url"] == "http://127.0.0.1/"
     assert report["reproduction"]["offline_inputs"]["long_lived_token"] == ""
     assert report["reproduction"]["offline_inputs"]["time_zone"] == "UTC"
     assert report["repetitions"] == 2
     assert report["benchmark_variant"] == "candidate"
+    assert report["schema_version"] == 2
+    assert report["execution"]["order"] == "candidate"
+    assert datetime.fromisoformat(report["execution"]["completed_at_utc"]) >= (
+        datetime.fromisoformat(report["execution"]["started_at_utc"])
+    )
     assert report["retained_warning_envelope"] == {
         "boolean_selectors": 1152,
         "added_linear_rows": 2592,
     }
 
     by_name = {payload["name"]: payload for payload in report["payloads"]}
-    assert set(by_name) == {"one_battery", "two_batteries"}
+    assert set(by_name) == {
+        "one_battery",
+        "two_batteries",
+        "one_battery_two_band",
+    }
 
     for payload in by_name.values():
         assert [run["cache_state"] for run in payload["runs"]] == ["cold", "warm"]
@@ -403,10 +457,31 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
 
     one = by_name["one_battery"]["runs"][0]
     assert len(one["soc_schedule_fraction"]["SOC_opt"]) == 8
+    assert by_name["one_battery"]["profile_model_size"]["battery_count"] == 1
+    assert by_name["one_battery"]["profile_model_size"]["direction_presence"] == [
+        {"charge": False, "discharge": False}
+    ]
 
     two = by_name["two_batteries"]["runs"][0]
     assert set(two["power_schedule_w"]) >= {"P_batt", "P_batt_0", "P_batt_1"}
     assert set(two["soc_schedule_fraction"]) == {"SOC_opt_0", "SOC_opt_1"}
+    assert by_name["two_batteries"]["profile_model_size"]["battery_count"] == 2
+    assert by_name["two_batteries"]["profile_model_size"]["band_counts"] == [
+        {"charge": 0, "discharge": 0},
+        {"charge": 0, "discharge": 0},
+    ]
+
+    configured = by_name["one_battery_two_band"]
+    assert configured["profile_state"] == "configured"
+    assert configured["profile_model_size"]["battery_count"] == 1
+    assert configured["profile_model_size"]["direction_presence"] == [
+        {"charge": True, "discharge": True}
+    ]
+    assert configured["profile_model_size"]["band_counts"] == [
+        {"charge": 2, "discharge": 2}
+    ]
+    assert configured["profile_model_size"]["boolean_selectors"] == 16
+    assert configured["profile_model_size"]["added_linear_rows"] == 48
 
 
 def test_corpus_covers_required_profile_shapes_and_warning_envelope():
@@ -453,22 +528,47 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
         "power_schedule_w": {"P_batt": [1.0]},
         "soc_schedule_fraction": {"SOC_opt": [0.5]},
     }
+    common_environment = {
+        "python": "test",
+        "platform": "test",
+        "machine": "test",
+        "cpu_count": 1,
+        "cpu_model": "test CPU",
+        "hardware_fingerprint_sha256": "same",
+        "containerized": True,
+        "container_id": "baseline-container",
+        "declared_container_image": "test-image",
+        "declared_runtime": "test-runtime",
+        "process_settings": {"processes": 1},
+    }
     common_reproduction = {
         "solver": {"name": "HIGHS"},
         "offline_inputs": {"hass_url": "http://127.0.0.1/"},
-        "environment": {"machine": "test"},
+        "environment": common_environment,
         "resolved_packages": {"cvxpy": "test"},
     }
     baseline = {
         "corpus_sha256": "same",
         "repetitions": 1,
         "reproduction": common_reproduction,
+        "execution": {
+            "order": "baseline",
+            "started_at_utc": "2026-07-30T00:00:00+00:00",
+            "completed_at_utc": "2026-07-30T00:01:00+00:00",
+        },
         "payloads": [{"name": "absent", "runs": [run]}],
     }
+    candidate_reproduction = copy.deepcopy(common_reproduction)
+    candidate_reproduction["environment"]["container_id"] = "candidate-container"
     candidate = {
         "corpus_sha256": "same",
         "repetitions": 1,
-        "reproduction": common_reproduction,
+        "reproduction": candidate_reproduction,
+        "execution": {
+            "order": "candidate",
+            "started_at_utc": "2026-07-30T00:02:00+00:00",
+            "completed_at_utc": "2026-07-30T00:03:00+00:00",
+        },
         "payloads": [
             {
                 "name": "absent",
@@ -480,10 +580,66 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
 
     comparison = compare_paired_reports(baseline, candidate)
     assert comparison["environment_parity"] is True
+    assert comparison["separate_containers"] is True
     assert comparison["payloads"][0]["runs"][0]["objective_delta"] == 0
 
     candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
     with pytest.raises(RuntimeError, match="absent-profile result differs"):
+        compare_paired_reports(baseline, candidate)
+
+
+def test_paired_report_comparison_rejects_payload_reordering():
+    environment = {
+        "python": "test",
+        "platform": "test",
+        "machine": "test",
+        "cpu_count": 1,
+        "cpu_model": "test CPU",
+        "hardware_fingerprint_sha256": "same",
+        "containerized": True,
+        "container_id": "container",
+        "declared_container_image": "test-image",
+        "declared_runtime": "test-runtime",
+        "process_settings": {"processes": 1},
+    }
+    reproduction = {
+        "solver": {"name": "HIGHS"},
+        "offline_inputs": {},
+        "environment": environment,
+        "resolved_packages": {},
+    }
+    run = {
+        "repetition": 1,
+        "cache_state": "cold",
+        "objective": 0.0,
+        "power_schedule_w": {},
+        "soc_schedule_fraction": {},
+    }
+    baseline = {
+        "corpus_sha256": "same",
+        "repetitions": 1,
+        "reproduction": copy.deepcopy(reproduction),
+        "execution": {
+            "order": "baseline",
+            "started_at_utc": "2026-07-30T00:00:00+00:00",
+            "completed_at_utc": "2026-07-30T00:01:00+00:00",
+        },
+        "payloads": [
+            {"name": "first", "runs": [run]},
+            {"name": "second", "runs": [run]},
+        ],
+    }
+    candidate = copy.deepcopy(baseline)
+    candidate["execution"] = {
+        "order": "candidate",
+        "started_at_utc": "2026-07-30T00:02:00+00:00",
+        "completed_at_utc": "2026-07-30T00:03:00+00:00",
+    }
+    candidate["payloads"] = list(reversed(candidate["payloads"]))
+    for payload in candidate["payloads"]:
+        payload["profile_state"] = "absent"
+
+    with pytest.raises(RuntimeError, match="names or order differ"):
         compare_paired_reports(baseline, candidate)
 
 
@@ -495,14 +651,15 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
         (RETAINED_RESULT_PATH / "candidate.json").read_text(encoding="utf-8")
     )
 
-    assert baseline["corpus_sha256"] == candidate["corpus_sha256"]
-    assert baseline["reproduction"]["tested_commit"] == (
+    current_corpus_hash = hashlib.sha256(CORPUS_PATH.read_bytes()).hexdigest()
+    assert baseline["corpus_sha256"] == current_corpus_hash
+    assert candidate["corpus_sha256"] == current_corpus_hash
+    assert baseline["reproduction"]["tested_source_provenance"]["tested_commit"] == (
         "4def37f83c7ef4cde6900abb0fd68f402fbd1072"
     )
-    assert candidate["reproduction"]["tested_commit"] == (
-        "d6d9f91ff0bfe2f0e4034fe2da9284df81976184"
-    )
-    assert candidate["paired_comparison"]["environment_parity"] is True
+    assert candidate["reproduction"]["tested_source_provenance"]["tested_commit"]
+    independent_comparison = compare_paired_reports(baseline, candidate)
+    assert independent_comparison["environment_parity"] is True
 
     baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
     for payload in candidate["payloads"]:
