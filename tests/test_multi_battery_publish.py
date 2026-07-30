@@ -296,6 +296,27 @@ def test_publish_n2_fleet_total_plus_per_battery_entities():
     assert rh.post_data.call_count == 5
 
 
+def test_publish_n2_empty_profiles_preserve_columns_and_entities():
+    opt_res = _make_opt_res(
+        {
+            "P_batt": [3.0, 4.0, 5.0],
+            "P_batt_0": [1.0, 2.0, 3.0],
+            "P_batt_1": [2.0, 2.0, 2.0],
+            "SOC_opt_0": [0.5, 0.6, 0.7],
+            "SOC_opt_1": [0.4, 0.5, 0.6],
+        }
+    )
+    without_profile_ctx, without_profile_rh = _make_ctx(2)
+    empty_profile_ctx, empty_profile_rh = _make_ctx(2)
+    empty_profile_ctx.input_data_dict["plant_conf"]["battery_soc_power_profiles"] = [{}, {}]
+
+    without_profile_columns = asyncio.run(_publish_battery_data(without_profile_ctx, opt_res))
+    empty_profile_columns = asyncio.run(_publish_battery_data(empty_profile_ctx, opt_res))
+
+    assert empty_profile_columns == without_profile_columns
+    assert _entity_ids_posted(empty_profile_rh) == _entity_ids_posted(without_profile_rh)
+
+
 def test_publish_n2_friendly_names_get_battery_k_suffix():
     ctx, rh = _make_ctx(2)
     opt_res = _make_opt_res(

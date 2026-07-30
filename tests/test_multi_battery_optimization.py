@@ -1041,6 +1041,43 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
         selectors = opt.vars["battery_charge_profile_selectors"][0].value
         self.assertAlmostEqual(float(selectors[0, 0]), 1.0, delta=1e-7)
 
+    def test_soc_inside_numerical_guard_below_breakpoint_remains_feasible(self):
+        opt = build_optimization(
+            optim_overrides={
+                "set_nocharge_from_grid": True,
+                "set_nodischarge_to_grid": True,
+            },
+            plant_overrides={
+                "maximum_power_from_grid": 0,
+                "maximum_power_to_grid": 0,
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.8],
+                            "power_max": [2000.0, 500.0],
+                        }
+                    }
+                ],
+            },
+        )
+        index = pd.date_range("2026-02-01", periods=2, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 2, "unit_prod_price": [0.0] * 2},
+            index=index,
+        )
+        p_pv = pd.Series([400.0, 0.0], index=index)
+        p_load = pd.Series([0.0, 0.0], index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.77995, soc_final=0.79995
+        )
+
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[0]), 0.79995, delta=1e-7)
+        self.assertAlmostEqual(float(result["P_batt"].iloc[0]), -400.0, delta=1e-5)
+
     def test_forecast_discharge_restores_later_high_charge_capability(self):
         opt = build_optimization(
             optim_overrides={
@@ -1214,18 +1251,33 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
         self.assertLess(float((-result["P_batt"]).max()), 5000.0)
         self.assertAlmostEqual(float(result["SOC_opt"].iloc[-1]), 0.9, delta=1e-7)
 
-    def test_empty_profiles_add_no_variables_rows_or_output_changes(self):
+    def test_empty_profiles_add_no_variables_rows_or_output_changes_for_two_batteries(self):
         index, p_pv, p_load, df_input = make_pin_scenario()
-        without_profile = build_optimization()
+        common_overrides = {
+            "number_of_batteries": 2,
+            "battery_nominal_energy_capacity": [10000, 10000],
+            "battery_discharge_power_max": [5000, 5000],
+            "battery_charge_power_max": [5000, 5000],
+            "battery_discharge_efficiency": [1.0, 1.0],
+            "battery_charge_efficiency": [1.0, 1.0],
+            "battery_minimum_state_of_charge": [0.3, 0.3],
+            "battery_maximum_state_of_charge": [0.9, 0.9],
+            "battery_target_state_of_charge": [0.5, 0.5],
+            "battery_stress_cost": [0.0, 0.0],
+        }
+        without_profile = build_optimization(plant_overrides=common_overrides)
         explicit_empty = build_optimization(
-            plant_overrides={"battery_soc_power_profiles": [{}]}
+            plant_overrides={
+                **common_overrides,
+                "battery_soc_power_profiles": [{}, {}],
+            }
         )
 
         without_result = without_profile.perform_dayahead_forecast_optim(
-            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
+            df_input, p_pv, p_load, soc_init=[0.4, 0.4], soc_final=[0.5, 0.5]
         )
         empty_result = explicit_empty.perform_dayahead_forecast_optim(
-            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
+            df_input, p_pv, p_load, soc_init=[0.4, 0.4], soc_final=[0.5, 0.5]
         )
 
         without_metrics = without_profile.prob.size_metrics
@@ -1250,6 +1302,7 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
             empty_result["optim_status"].tolist(),
             without_result["optim_status"].tolist(),
         )
+        self.assertAlmostEqual(explicit_empty.prob.value, without_profile.prob.value)
         np.testing.assert_allclose(
             empty_result.select_dtypes(include=[np.number]).to_numpy(),
             without_result.select_dtypes(include=[np.number]).to_numpy(),

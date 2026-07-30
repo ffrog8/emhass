@@ -886,9 +886,40 @@
             "description": "Define the number of physical batteries in the plant. Defaults to 1. When greater than 1, every per-battery array parameter below (capacity, power limits, efficiencies, SOC min/max/target, stress cost, weight_battery_charge/discharge, SOC deficit/surplus threshold/cost) accepts either a single scalar (broadcast to every battery) or a list of exactly this many entries. See docs/config.md for the full broadcast/nesting semantics. (unit: count)"
           },
           "battery_soc_power_profiles": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "charge": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "soc_breakpoints",
+                    "power_max"
+                  ],
+                  "properties": {
+                    "soc_breakpoints": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    },
+                    "power_max": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
             },
             "title": "Battery SOC charge power profiles",
             "description": "Optional JSON list with exactly one object per configured battery. Use {} for no profile. A charge profile contains soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative, non-increasing value in watts. Only the charge member is supported; discharge profiles are rejected."

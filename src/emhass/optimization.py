@@ -71,9 +71,9 @@ CURTAILMENT_TIEBREAK_EPS = 1e-7
 # multi-battery.
 BATTERY_TIEBREAK_EPS = 1e-9
 
-# Exact SOC step-profile selectors leave this gap below each nominal
-# breakpoint. Equality is therefore forced onto the conservative high-SOC
-# band while staying outside the solver's feasibility tolerance.
+# Shift each exact SOC threshold down by this numerical guard. This makes the
+# conservative high-SOC band unambiguous at the nominal breakpoint without
+# excluding SOC values in a gap around it.
 SOC_POWER_PROFILE_GUARD = 1e-4
 
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
@@ -2390,11 +2390,13 @@ class Optimization:
                     for breakpoint_index in range(charge_profile_breakpoints.size):
                         selector = charge_profile_selectors[:, breakpoint_index]
                         breakpoint = charge_profile_breakpoints[breakpoint_index]
+                        guarded_breakpoint = breakpoint - SOC_POWER_PROFILE_GUARD
                         constraints.append(
-                            end_soc
-                            <= breakpoint - SOC_POWER_PROFILE_GUARD + selector
+                            end_soc <= guarded_breakpoint + selector
                         )
-                        constraints.append(end_soc >= breakpoint - (1 - selector))
+                        constraints.append(
+                            end_soc >= guarded_breakpoint - (1 - selector)
+                        )
                         selected_charge_cap = selected_charge_cap + cp.multiply(
                             charge_profile_power[breakpoint_index + 1]
                             - charge_profile_power[breakpoint_index],

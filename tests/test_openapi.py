@@ -191,6 +191,32 @@ class TestBuildSpec(unittest.TestCase):
         self.assertEqual(schema["type"], "object")
         self.assertTrue(schema["additionalProperties"])
 
+    def test_battery_soc_power_profiles_schema_is_nullable_and_charge_only(self):
+        schema = gen.build_spec()["components"]["schemas"]["Config"]["properties"][
+            "battery_soc_power_profiles"
+        ]
+
+        self.assertEqual(schema["type"], ["array", "null"])
+        item = schema["items"]
+        self.assertEqual(item["type"], "object")
+        self.assertFalse(item["additionalProperties"])
+        self.assertNotIn("required", item)
+        self.assertEqual(set(item["properties"]), {"charge"})
+        charge = item["properties"]["charge"]
+        self.assertEqual(charge["type"], "object")
+        self.assertFalse(charge["additionalProperties"])
+        self.assertEqual(
+            set(charge["required"]), {"soc_breakpoints", "power_max"}
+        )
+        self.assertEqual(
+            charge["properties"]["soc_breakpoints"]["items"],
+            {"type": "number", "minimum": 0, "maximum": 1},
+        )
+        self.assertEqual(
+            charge["properties"]["power_max"]["items"],
+            {"type": "number", "minimum": 0},
+        )
+
 
 class TestOpenapiArtifact(unittest.TestCase):
     OUT = REPO_ROOT / "src" / "emhass" / "static" / "openapi.json"

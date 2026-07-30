@@ -638,6 +638,43 @@
       "Description": "Optional JSON list with exactly one object per configured battery. Use {} for no profile. A charge profile contains soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative, non-increasing value in watts. Only the charge member is supported; discharge profiles are rejected.",
       "input": "array.object",
       "default_value": null,
+      "openapi_schema": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "charge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "soc_breakpoints",
+                "power_max"
+              ],
+              "properties": {
+                "soc_breakpoints": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "power_max": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "unit": "none"
     },
     "set_nocharge_from_grid": {
