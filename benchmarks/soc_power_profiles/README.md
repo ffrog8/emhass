@@ -116,35 +116,37 @@ control. The benchmark and warning do not authorize real control use.
 The raw 30 July 2026 reports are retained in
 `results/2026-07-30/unchanged-base.json` and
 `results/2026-07-30/candidate.json`. Both use corpus SHA-256
-`8433341de57b66ecb630325d4549c1adb6a3989e58b9247bcb00a0fd704447d6`,
+`194fa4193710d01355d1f64e06c8f0c80ba6347c75c11b1aaafdcf4259afdcce`,
 Python 3.12.12, CVXPY 1.7.5, highspy 1.15.1, one HiGHS thread, a 30-second
 solver limit, and a 0.01 relative MIP gap on the same eight-CPU x86_64
-container host. The comparator confirmed identical resolved packages and
-environment metadata.
+Docker host. The reports identify two separate containers using the same
+declared image and process settings. The comparator confirmed identical
+resolved packages, hardware fingerprint, and stable environment metadata.
 
-The unchanged optimizer was commit `4def37f8`; the candidate was
-`d6d9f91f`. Each row has one cold sample and four warm samples. Candidate
-end-to-end seconds were:
+The shared benchmark harness was commit `a5ad22f3`. The unchanged optimizer
+under test was commit `4def37f8`; the candidate optimizer was `a5ad22f3`.
+Each row has one cold sample and four warm samples. Candidate end-to-end
+seconds were:
 
 | Scenario | Selectors / rows | Cold | Warm min | Warm median | Warm p95 | Warm max |
 |---|---:|---:|---:|---:|---:|---:|
-| One battery, no profile | 0 / 0 | 0.181 | 0.030 | 0.034 | 0.042 | 0.043 |
-| Two batteries, no profile | 0 / 0 | 0.131 | 0.030 | 0.034 | 0.037 | 0.038 |
-| Two-band charge/discharge | 16 / 48 | 0.172 | 0.040 | 0.042 | 0.044 | 0.044 |
-| Three-band charge/discharge | 32 / 80 | 0.150 | 0.034 | 0.042 | 0.050 | 0.051 |
-| Three-battery mixed, 48 intervals | 288 / 816 | 2.384 | 0.150 | 0.157 | 0.162 | 0.163 |
-| Deliberately large, 48 intervals | 1,152 / 2,592 | 14.618 | 0.358 | 0.368 | 0.408 | 0.414 |
+| One battery, no profile | 0 / 0 | 0.138 | 0.025 | 0.026 | 0.029 | 0.030 |
+| Two batteries, no profile | 0 / 0 | 0.102 | 0.027 | 0.029 | 0.034 | 0.035 |
+| Two-band charge/discharge | 16 / 48 | 0.078 | 0.027 | 0.029 | 0.035 | 0.036 |
+| Three-band charge/discharge | 32 / 80 | 0.130 | 0.028 | 0.028 | 0.032 | 0.033 |
+| Three-battery mixed, 48 intervals | 288 / 816 | 2.376 | 0.146 | 0.147 | 0.156 | 0.157 |
+| Deliberately large, 48 intervals | 1,152 / 2,592 | 14.603 | 0.342 | 0.346 | 0.350 | 0.351 |
 
 The paired end-to-end impact against the scalar optimizer was:
 
 | Scenario | Base cold | Candidate cold | Cold delta | Base warm median | Candidate warm median | Warm delta / ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| One battery, no profile | 0.085 | 0.181 | +0.096 | 0.026 | 0.034 | +0.007 / 1.28x |
-| Two batteries, no profile | 0.110 | 0.131 | +0.021 | 0.028 | 0.034 | +0.006 / 1.21x |
-| Two-band charge/discharge | 0.123 | 0.172 | +0.049 | 0.025 | 0.042 | +0.017 / 1.66x |
-| Three-band charge/discharge | 0.067 | 0.150 | +0.083 | 0.028 | 0.042 | +0.015 / 1.53x |
-| Three-battery mixed, 48 intervals | 0.570 | 2.384 | +1.814 | 0.093 | 0.157 | +0.064 / 1.69x |
-| Deliberately large, 48 intervals | 0.566 | 14.618 | +14.051 | 0.094 | 0.368 | +0.274 / 3.94x |
+| One battery, no profile | 0.083 | 0.138 | +0.055 | 0.028 | 0.026 | -0.002 / 0.92x |
+| Two batteries, no profile | 0.122 | 0.102 | -0.020 | 0.030 | 0.029 | -0.001 / 0.96x |
+| Two-band charge/discharge | 0.066 | 0.078 | +0.011 | 0.026 | 0.029 | +0.003 / 1.11x |
+| Three-band charge/discharge | 0.065 | 0.130 | +0.065 | 0.025 | 0.028 | +0.003 / 1.10x |
+| Three-battery mixed, 48 intervals | 0.579 | 2.376 | +1.797 | 0.092 | 0.147 | +0.055 / 1.60x |
+| Deliberately large, 48 intervals | 0.547 | 14.603 | +14.056 | 0.093 | 0.346 | +0.253 / 3.72x |
 
 The profile rows compare the exact selector model with the same scalar payload
 on the unchanged optimizer, so the timing delta measures the added formulation
@@ -153,9 +155,9 @@ their small timing differences show the residual process and measurement noise
 in this sample; they are not evidence of a mathematical model change.
 
 For the mixed case, cold model construction, canonicalisation/wrapper, and
-solver times were 0.009, 0.140, and 2.210 seconds; their warm medians were
-0.001, 0.006, and 0.128 seconds. For the deliberately large case, the same
-values were 0.014, 0.289, and 14.291 seconds cold and 0.001, 0.009, and 0.333
+solver times were 0.009, 0.206, and 2.138 seconds; their warm medians were
+0.001, 0.006, and 0.119 seconds. For the deliberately large case, the same
+values were 0.014, 0.218, and 14.348 seconds cold and 0.001, 0.008, and 0.313
 seconds warm. The raw reports retain minimum, median, p95, and maximum for
 every timing field.
 

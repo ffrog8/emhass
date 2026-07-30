@@ -654,15 +654,76 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     current_corpus_hash = hashlib.sha256(CORPUS_PATH.read_bytes()).hexdigest()
     assert baseline["corpus_sha256"] == current_corpus_hash
     assert candidate["corpus_sha256"] == current_corpus_hash
+    assert baseline["schema_version"] == 2
+    assert candidate["schema_version"] == 2
     assert baseline["reproduction"]["tested_source_provenance"]["tested_commit"] == (
         "4def37f83c7ef4cde6900abb0fd68f402fbd1072"
     )
-    assert candidate["reproduction"]["tested_source_provenance"]["tested_commit"]
+    expected_harness_commit = "a5ad22f3cf13e3a08f3d501298b68c8539a912e4"
+    assert (
+        baseline["reproduction"]["harness_provenance"]["tested_commit"]
+        == expected_harness_commit
+    )
+    assert (
+        candidate["reproduction"]["harness_provenance"]["tested_commit"]
+        == expected_harness_commit
+    )
+    assert (
+        candidate["reproduction"]["tested_source_provenance"]["tested_commit"]
+        == expected_harness_commit
+    )
     independent_comparison = compare_paired_reports(baseline, candidate)
     assert independent_comparison["environment_parity"] is True
+    assert independent_comparison["separate_containers"] is True
+    assert independent_comparison["baseline_completed_before_candidate_started"] is True
+
+    required_shape_fields = {
+        "horizon",
+        "battery_count",
+        "direction_presence",
+        "band_counts",
+        "boolean_selectors",
+        "added_linear_rows",
+    }
+    for report in (baseline, candidate):
+        for payload in report["payloads"]:
+            assert required_shape_fields <= payload["scenario_profile_shape"].keys()
+            assert required_shape_fields <= payload["profile_model_size"].keys()
+
+        absent_payloads = {payload["name"]: payload for payload in report["payloads"]}
+        assert absent_payloads["one_battery"]["profile_model_size"][
+            "battery_count"
+        ] == 1
+        assert absent_payloads["one_battery"]["profile_model_size"][
+            "direction_presence"
+        ] == [{"charge": False, "discharge": False}]
+        assert absent_payloads["one_battery"]["profile_model_size"]["band_counts"] == [
+            {"charge": 0, "discharge": 0}
+        ]
+        assert absent_payloads["two_batteries"]["profile_model_size"][
+            "battery_count"
+        ] == 2
+        assert absent_payloads["two_batteries"]["profile_model_size"][
+            "direction_presence"
+        ] == [
+            {"charge": False, "discharge": False},
+            {"charge": False, "discharge": False},
+        ]
+        assert absent_payloads["two_batteries"]["profile_model_size"][
+            "band_counts"
+        ] == [
+            {"charge": 0, "discharge": 0},
+            {"charge": 0, "discharge": 0},
+        ]
 
     baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
     for payload in candidate["payloads"]:
+        assert payload["scenario_profile_shape"]["horizon"] == payload[
+            "prediction_horizon"
+        ]
+        assert payload["scenario_profile_shape"]["battery_count"] == len(
+            payload["scenario_profile_shape"]["band_counts"]
+        )
         baseline_run = baseline_payloads[payload["name"]]["runs"][0]
         candidate_run = payload["runs"][0]
         assert (
