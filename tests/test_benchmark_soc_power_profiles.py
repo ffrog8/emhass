@@ -277,6 +277,17 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monke
     before_result_files = {
         path: path.read_bytes() if path.exists() else None for path in RESULT_PATHS
     }
+    monkeypatch.setattr(
+        "scripts.benchmark_soc_power_profiles.verify_repository_provenance",
+        lambda repository, base_commit: {
+            "base_commit": base_commit,
+            "tested_commit": "f" * 40,
+            "merge_base": base_commit,
+            "worktree_clean": True,
+            "branch": "test-benchmark",
+            "commits_since_base": [],
+        },
+    )
     monkeypatch.setenv("LP_SOLVER", "GUROBI")
     monkeypatch.setenv("EMHASS_URL", "https://production.example.invalid")
     monkeypatch.setenv("SUPERVISOR_TOKEN", "production-token")
