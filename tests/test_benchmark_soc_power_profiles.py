@@ -766,12 +766,12 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     current_corpus_hash = hashlib.sha256(CORPUS_PATH.read_bytes()).hexdigest()
     assert baseline["corpus_sha256"] == current_corpus_hash
     assert candidate["corpus_sha256"] == current_corpus_hash
-    assert baseline["schema_version"] == 2
-    assert candidate["schema_version"] == 2
+    assert baseline["schema_version"] == 3
+    assert candidate["schema_version"] == 3
     assert baseline["reproduction"]["tested_source_provenance"]["tested_commit"] == (
         "4def37f83c7ef4cde6900abb0fd68f402fbd1072"
     )
-    expected_harness_commit = "a5ad22f3cf13e3a08f3d501298b68c8539a912e4"
+    expected_harness_commit = "1ac3b38001c6c3e14979604d31d96aa4ac6fe978"
     assert (
         baseline["reproduction"]["harness_provenance"]["tested_commit"]
         == expected_harness_commit
@@ -788,6 +788,19 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     assert independent_comparison["environment_parity"] is True
     assert independent_comparison["separate_containers"] is True
     assert independent_comparison["baseline_completed_before_candidate_started"] is True
+    assert baseline["reproduction"]["tested_modules"]["modules"][
+        "emhass.optimization"
+    ] == {
+        "path": "src/emhass/optimization.py",
+        "sha256": "1668ff6afc73df486336637021d9f016bbb83d38cf46b22647bf9246586d05fb",
+    }
+    candidate_optimization = candidate["reproduction"]["tested_modules"]["modules"][
+        "emhass.optimization"
+    ]
+    assert candidate_optimization["path"] == "src/emhass/optimization.py"
+    assert candidate_optimization["sha256"] == hashlib.sha256(
+        (Path(__file__).parents[1] / candidate_optimization["path"]).read_bytes()
+    ).hexdigest()
 
     required_shape_fields = {
         "horizon",
@@ -801,6 +814,22 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
         for payload in report["payloads"]:
             assert required_shape_fields <= payload["scenario_profile_shape"].keys()
             assert required_shape_fields <= payload["profile_model_size"].keys()
+            for run in payload["runs"]:
+                timings = run["timings_s"]
+                assert timings["model_construction"] >= 0
+                assert timings["cvxpy_compilation"] >= 0
+                assert timings["final_solver"] >= 0
+                assert timings["solve_wrapper_overhead"] >= 0
+                assert (
+                    timings["cvxpy_compilation"]
+                    + timings["final_solver"]
+                    + timings["solve_wrapper_overhead"]
+                    == pytest.approx(
+                        timings["solve_call_including_fallback"],
+                        abs=1e-9,
+                    )
+                )
+                assert timings["end_to_end"] >= timings["optimization_mode"]
 
         absent_payloads = {payload["name"]: payload for payload in report["payloads"]}
         assert absent_payloads["one_battery"]["profile_model_size"][

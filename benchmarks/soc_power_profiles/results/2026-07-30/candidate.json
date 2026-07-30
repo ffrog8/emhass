@@ -1,10 +1,10 @@
 {
   "benchmark_variant": "candidate",
-  "corpus_sha256": "194fa4193710d01355d1f64e06c8f0c80ba6347c75c11b1aaafdcf4259afdcce",
+  "corpus_sha256": "55b6a370af365f5b78d49be75cd8f7a3a5bb4e3306a0dd402b43c6e80487eaa1",
   "execution": {
-    "completed_at_utc": "2026-07-30T07:41:13.919892+00:00",
+    "completed_at_utc": "2026-07-30T08:16:12.299716+00:00",
     "order": "candidate",
-    "started_at_utc": "2026-07-30T07:40:53.983322+00:00"
+    "started_at_utc": "2026-07-30T08:15:51.549103+00:00"
   },
   "paired_comparison": {
     "absent_profile_tolerance": 1e-06,
@@ -340,14 +340,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.08985351119190454,
-            "end_to_end": 0.1382690006867051,
-            "final_solver": 0.01883101463317871,
-            "input_setup": 0.01382209686562419,
-            "model_construction": 0.0034274328500032425,
-            "optimization_mode": 0.11506694229319692,
-            "result_extraction": 0.002652181312441826,
-            "solve_call_including_fallback": 0.10868452582508326
+            "cvxpy_compilation": 0.08482789993286133,
+            "end_to_end": 0.1370408721268177,
+            "final_solver": 0.027023792266845703,
+            "input_setup": 0.007469804026186466,
+            "model_construction": 0.003441331908106804,
+            "optimization_mode": 0.12035915534943342,
+            "result_extraction": 0.0027397521771490574,
+            "solve_call_including_fallback": 0.11386175313964486,
+            "solve_wrapper_overhead": 0.00201006093993783
           }
         },
         {
@@ -391,14 +392,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.002098505385220051,
-            "end_to_end": 0.02545524388551712,
-            "final_solver": 0.006085872650146484,
-            "input_setup": 0.005142807029187679,
-            "model_construction": 0.0004531126469373703,
-            "optimization_mode": 0.011478120926767588,
-            "result_extraction": 0.002544763032346964,
-            "solve_call_including_fallback": 0.008184378035366535
+            "cvxpy_compilation": 0.0012431144714355469,
+            "end_to_end": 0.02720112120732665,
+            "final_solver": 0.006703853607177734,
+            "input_setup": 0.005173197947442532,
+            "model_construction": 0.00045552290976047516,
+            "optimization_mode": 0.012857724912464619,
+            "result_extraction": 0.00298453401774168,
+            "solve_call_including_fallback": 0.009112291969358921,
+            "solve_wrapper_overhead": 0.0011653238907456398
           }
         },
         {
@@ -442,14 +444,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0018530348315835,
-            "end_to_end": 0.030030304100364447,
-            "final_solver": 0.006574153900146484,
-            "input_setup": 0.004809686914086342,
-            "model_construction": 0.0004434068687260151,
-            "optimization_mode": 0.0118205351755023,
-            "result_extraction": 0.0026547773741185665,
-            "solve_call_including_fallback": 0.008427188731729984
+            "cvxpy_compilation": 0.0007746219635009766,
+            "end_to_end": 0.028242397122085094,
+            "final_solver": 0.006511688232421875,
+            "input_setup": 0.0051278104074299335,
+            "model_construction": 0.0004509389400482178,
+            "optimization_mode": 0.011611885856837034,
+            "result_extraction": 0.002513181883841753,
+            "solve_call_including_fallback": 0.00835577817633748,
+            "solve_wrapper_overhead": 0.001069467980414629
           }
         },
         {
@@ -493,14 +496,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0018060584552586079,
-            "end_to_end": 0.02511780383065343,
-            "final_solver": 0.006015777587890625,
-            "input_setup": 0.005176730919629335,
-            "model_construction": 0.0004584738053381443,
-            "optimization_mode": 0.011093223001807928,
-            "result_extraction": 0.002504215110093355,
-            "solve_call_including_fallback": 0.007821836043149233
+            "cvxpy_compilation": 0.0007190704345703125,
+            "end_to_end": 0.025029536802321672,
+            "final_solver": 0.006081104278564453,
+            "input_setup": 0.005073470063507557,
+            "model_construction": 0.00042865704745054245,
+            "optimization_mode": 0.010948262643069029,
+            "result_extraction": 0.002457871101796627,
+            "solve_call_including_fallback": 0.00777864083647728,
+            "solve_wrapper_overhead": 0.000978466123342514
           }
         },
         {
@@ -544,14 +548,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.001806796994060278,
-            "end_to_end": 0.0262576793320477,
-            "final_solver": 0.00742793083190918,
-            "input_setup": 0.00495461979880929,
-            "model_construction": 0.00046140095219016075,
-            "optimization_mode": 0.01254146359860897,
-            "result_extraction": 0.0025160741060972214,
-            "solve_call_including_fallback": 0.009234727825969458
+            "cvxpy_compilation": 0.0007321834564208984,
+            "end_to_end": 0.024423277005553246,
+            "final_solver": 0.006119489669799805,
+            "input_setup": 0.0048902020789682865,
+            "model_construction": 0.00042296480387449265,
+            "optimization_mode": 0.010999335907399654,
+            "result_extraction": 0.002445222344249487,
+            "solve_call_including_fallback": 0.007841451093554497,
+            "solve_wrapper_overhead": 0.0009897779673337936
           }
         }
       ],
@@ -577,103 +582,115 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.08985351119190454,
-            "median_s": 0.08985351119190454,
-            "minimum_s": 0.08985351119190454,
-            "p95_s": 0.08985351119190454
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.08482789993286133,
+            "median_s": 0.08482789993286133,
+            "minimum_s": 0.08482789993286133,
+            "p95_s": 0.08482789993286133
           },
           "end_to_end_s": {
-            "maximum_s": 0.1382690006867051,
-            "median_s": 0.1382690006867051,
-            "minimum_s": 0.1382690006867051,
-            "p95_s": 0.1382690006867051
+            "maximum_s": 0.1370408721268177,
+            "median_s": 0.1370408721268177,
+            "minimum_s": 0.1370408721268177,
+            "p95_s": 0.1370408721268177
           },
           "final_solver_s": {
-            "maximum_s": 0.01883101463317871,
-            "median_s": 0.01883101463317871,
-            "minimum_s": 0.01883101463317871,
-            "p95_s": 0.01883101463317871
+            "maximum_s": 0.027023792266845703,
+            "median_s": 0.027023792266845703,
+            "minimum_s": 0.027023792266845703,
+            "p95_s": 0.027023792266845703
           },
           "input_setup_s": {
-            "maximum_s": 0.01382209686562419,
-            "median_s": 0.01382209686562419,
-            "minimum_s": 0.01382209686562419,
-            "p95_s": 0.01382209686562419
+            "maximum_s": 0.007469804026186466,
+            "median_s": 0.007469804026186466,
+            "minimum_s": 0.007469804026186466,
+            "p95_s": 0.007469804026186466
           },
           "model_construction_s": {
-            "maximum_s": 0.0034274328500032425,
-            "median_s": 0.0034274328500032425,
-            "minimum_s": 0.0034274328500032425,
-            "p95_s": 0.0034274328500032425
+            "maximum_s": 0.003441331908106804,
+            "median_s": 0.003441331908106804,
+            "minimum_s": 0.003441331908106804,
+            "p95_s": 0.003441331908106804
           },
           "optimization_mode_s": {
-            "maximum_s": 0.11506694229319692,
-            "median_s": 0.11506694229319692,
-            "minimum_s": 0.11506694229319692,
-            "p95_s": 0.11506694229319692
+            "maximum_s": 0.12035915534943342,
+            "median_s": 0.12035915534943342,
+            "minimum_s": 0.12035915534943342,
+            "p95_s": 0.12035915534943342
           },
           "result_extraction_s": {
-            "maximum_s": 0.002652181312441826,
-            "median_s": 0.002652181312441826,
-            "minimum_s": 0.002652181312441826,
-            "p95_s": 0.002652181312441826
+            "maximum_s": 0.0027397521771490574,
+            "median_s": 0.0027397521771490574,
+            "minimum_s": 0.0027397521771490574,
+            "p95_s": 0.0027397521771490574
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.10868452582508326,
-            "median_s": 0.10868452582508326,
-            "minimum_s": 0.10868452582508326,
-            "p95_s": 0.10868452582508326
+            "maximum_s": 0.11386175313964486,
+            "median_s": 0.11386175313964486,
+            "minimum_s": 0.11386175313964486,
+            "p95_s": 0.11386175313964486
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.00201006093993783,
+            "median_s": 0.00201006093993783,
+            "minimum_s": 0.00201006093993783,
+            "p95_s": 0.00201006093993783
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.002098505385220051,
-            "median_s": 0.001829915912821889,
-            "minimum_s": 0.0018060584552586079,
-            "p95_s": 0.002061684802174568
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.0012431144714355469,
+            "median_s": 0.0007534027099609375,
+            "minimum_s": 0.0007190704345703125,
+            "p95_s": 0.0011728405952453611
           },
           "end_to_end_s": {
-            "maximum_s": 0.030030304100364447,
-            "median_s": 0.02585646160878241,
-            "minimum_s": 0.02511780383065343,
-            "p95_s": 0.029464410385116935
+            "maximum_s": 0.028242397122085094,
+            "median_s": 0.02611532900482416,
+            "minimum_s": 0.024423277005553246,
+            "p95_s": 0.028086205734871326
           },
           "final_solver_s": {
-            "maximum_s": 0.00742793083190918,
-            "median_s": 0.006330013275146484,
-            "minimum_s": 0.006015777587890625,
-            "p95_s": 0.007299864292144775
+            "maximum_s": 0.006703853607177734,
+            "median_s": 0.00631558895111084,
+            "minimum_s": 0.006081104278564453,
+            "p95_s": 0.006675028800964355
           },
           "input_setup_s": {
-            "maximum_s": 0.005176730919629335,
-            "median_s": 0.005048713413998485,
-            "minimum_s": 0.004809686914086342,
-            "p95_s": 0.005171642336063087
+            "maximum_s": 0.005173197947442532,
+            "median_s": 0.005100640235468745,
+            "minimum_s": 0.0048902020789682865,
+            "p95_s": 0.005166389816440642
           },
           "model_construction_s": {
-            "maximum_s": 0.00046140095219016075,
-            "median_s": 0.0004557932261377573,
-            "minimum_s": 0.0004434068687260151,
-            "p95_s": 0.0004609618801623583
+            "maximum_s": 0.00045552290976047516,
+            "median_s": 0.0004397979937493801,
+            "minimum_s": 0.00042296480387449265,
+            "p95_s": 0.00045483531430363656
           },
           "optimization_mode_s": {
-            "maximum_s": 0.01254146359860897,
-            "median_s": 0.011649328051134944,
-            "minimum_s": 0.011093223001807928,
-            "p95_s": 0.01243332433514297
+            "maximum_s": 0.012857724912464619,
+            "median_s": 0.011305610882118344,
+            "minimum_s": 0.010948262643069029,
+            "p95_s": 0.01267084905412048
           },
           "result_extraction_s": {
-            "maximum_s": 0.0026547773741185665,
-            "median_s": 0.0025304185692220926,
-            "minimum_s": 0.002504215110093355,
-            "p95_s": 0.0026382752228528263
+            "maximum_s": 0.00298453401774168,
+            "median_s": 0.00248552649281919,
+            "minimum_s": 0.002445222344249487,
+            "p95_s": 0.002913831197656691
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.009234727825969458,
-            "median_s": 0.00830578338354826,
-            "minimum_s": 0.007821836043149233,
-            "p95_s": 0.009113596961833536
+            "maximum_s": 0.009112291969358921,
+            "median_s": 0.008098614634945989,
+            "minimum_s": 0.00777864083647728,
+            "p95_s": 0.008998814900405704
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0011653238907456398,
+            "median_s": 0.0010296229738742113,
+            "minimum_s": 0.000978466123342514,
+            "p95_s": 0.0011509455041959881
           }
         }
       }
@@ -795,14 +812,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.060954833868891,
-            "end_to_end": 0.1021898677572608,
-            "final_solver": 0.017621517181396484,
-            "input_setup": 0.006330352742224932,
-            "model_construction": 0.004937387071549892,
-            "optimization_mode": 0.08700105268508196,
-            "result_extraction": 0.0031845830380916595,
-            "solve_call_including_fallback": 0.07857635105028749
+            "cvxpy_compilation": 0.05422854423522949,
+            "end_to_end": 0.09690937073901296,
+            "final_solver": 0.01764369010925293,
+            "input_setup": 0.00608794204890728,
+            "model_construction": 0.005281113088130951,
+            "optimization_mode": 0.08200750220566988,
+            "result_extraction": 0.003131826873868704,
+            "solve_call_including_fallback": 0.0733074527233839,
+            "solve_wrapper_overhead": 0.0014352183789014816
           }
         },
         {
@@ -876,14 +894,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0022039595060050488,
-            "end_to_end": 0.027295579202473164,
-            "final_solver": 0.007368564605712891,
-            "input_setup": 0.005027880892157555,
-            "model_construction": 0.0005736551247537136,
-            "optimization_mode": 0.0136980633251369,
-            "result_extraction": 0.0032532019540667534,
-            "solve_call_including_fallback": 0.00957252411171794
+            "cvxpy_compilation": 0.0007483959197998047,
+            "end_to_end": 0.028243581764400005,
+            "final_solver": 0.007537126541137695,
+            "input_setup": 0.004905086942017078,
+            "model_construction": 0.0005567050538957119,
+            "optimization_mode": 0.01433603698387742,
+            "result_extraction": 0.003861122764647007,
+            "solve_call_including_fallback": 0.009643094148486853,
+            "solve_wrapper_overhead": 0.0013575716875493526
           }
         },
         {
@@ -957,14 +976,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.002129483502358198,
-            "end_to_end": 0.027371530886739492,
-            "final_solver": 0.007524013519287109,
-            "input_setup": 0.0048397560603916645,
-            "model_construction": 0.0005947509780526161,
-            "optimization_mode": 0.01372701209038496,
-            "result_extraction": 0.003178840037435293,
-            "solve_call_including_fallback": 0.009653497021645308
+            "cvxpy_compilation": 0.000797271728515625,
+            "end_to_end": 0.028356315102428198,
+            "final_solver": 0.007530927658081055,
+            "input_setup": 0.005210281815379858,
+            "model_construction": 0.0007117008790373802,
+            "optimization_mode": 0.013872901909053326,
+            "result_extraction": 0.0030554886907339096,
+            "solve_call_including_fallback": 0.009825078304857016,
+            "solve_wrapper_overhead": 0.001496878918260336
           }
         },
         {
@@ -1038,14 +1058,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0022027618251740932,
-            "end_to_end": 0.02968242298811674,
-            "final_solver": 0.008918285369873047,
-            "input_setup": 0.004877164959907532,
-            "model_construction": 0.0005680411122739315,
-            "optimization_mode": 0.0157141643576324,
-            "result_extraction": 0.0037314300425350666,
-            "solve_call_including_fallback": 0.01112104719504714
+            "cvxpy_compilation": 0.0008420944213867188,
+            "end_to_end": 0.02935513388365507,
+            "final_solver": 0.0073909759521484375,
+            "input_setup": 0.005033846944570541,
+            "model_construction": 0.000619715079665184,
+            "optimization_mode": 0.014995696023106575,
+            "result_extraction": 0.004306315910071135,
+            "solve_call_including_fallback": 0.009697034023702145,
+            "solve_wrapper_overhead": 0.0014639636501669884
           }
         },
         {
@@ -1119,14 +1140,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.003322433214634657,
-            "end_to_end": 0.034887359011918306,
-            "final_solver": 0.00904393196105957,
-            "input_setup": 0.005683376919478178,
-            "model_construction": 0.0010393219999969006,
-            "optimization_mode": 0.019004676956683397,
-            "result_extraction": 0.00529318256303668,
-            "solve_call_including_fallback": 0.012366365175694227
+            "cvxpy_compilation": 0.0007436275482177734,
+            "end_to_end": 0.026291111018508673,
+            "final_solver": 0.007343769073486328,
+            "input_setup": 0.004553331062197685,
+            "model_construction": 0.0005483529530465603,
+            "optimization_mode": 0.013211140874773264,
+            "result_extraction": 0.0030042720027267933,
+            "solve_call_including_fallback": 0.009380597155541182,
+            "solve_wrapper_overhead": 0.00129320053383708
           }
         }
       ],
@@ -1160,103 +1182,115 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.060954833868891,
-            "median_s": 0.060954833868891,
-            "minimum_s": 0.060954833868891,
-            "p95_s": 0.060954833868891
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.05422854423522949,
+            "median_s": 0.05422854423522949,
+            "minimum_s": 0.05422854423522949,
+            "p95_s": 0.05422854423522949
           },
           "end_to_end_s": {
-            "maximum_s": 0.1021898677572608,
-            "median_s": 0.1021898677572608,
-            "minimum_s": 0.1021898677572608,
-            "p95_s": 0.1021898677572608
+            "maximum_s": 0.09690937073901296,
+            "median_s": 0.09690937073901296,
+            "minimum_s": 0.09690937073901296,
+            "p95_s": 0.09690937073901296
           },
           "final_solver_s": {
-            "maximum_s": 0.017621517181396484,
-            "median_s": 0.017621517181396484,
-            "minimum_s": 0.017621517181396484,
-            "p95_s": 0.017621517181396484
+            "maximum_s": 0.01764369010925293,
+            "median_s": 0.01764369010925293,
+            "minimum_s": 0.01764369010925293,
+            "p95_s": 0.01764369010925293
           },
           "input_setup_s": {
-            "maximum_s": 0.006330352742224932,
-            "median_s": 0.006330352742224932,
-            "minimum_s": 0.006330352742224932,
-            "p95_s": 0.006330352742224932
+            "maximum_s": 0.00608794204890728,
+            "median_s": 0.00608794204890728,
+            "minimum_s": 0.00608794204890728,
+            "p95_s": 0.00608794204890728
           },
           "model_construction_s": {
-            "maximum_s": 0.004937387071549892,
-            "median_s": 0.004937387071549892,
-            "minimum_s": 0.004937387071549892,
-            "p95_s": 0.004937387071549892
+            "maximum_s": 0.005281113088130951,
+            "median_s": 0.005281113088130951,
+            "minimum_s": 0.005281113088130951,
+            "p95_s": 0.005281113088130951
           },
           "optimization_mode_s": {
-            "maximum_s": 0.08700105268508196,
-            "median_s": 0.08700105268508196,
-            "minimum_s": 0.08700105268508196,
-            "p95_s": 0.08700105268508196
+            "maximum_s": 0.08200750220566988,
+            "median_s": 0.08200750220566988,
+            "minimum_s": 0.08200750220566988,
+            "p95_s": 0.08200750220566988
           },
           "result_extraction_s": {
-            "maximum_s": 0.0031845830380916595,
-            "median_s": 0.0031845830380916595,
-            "minimum_s": 0.0031845830380916595,
-            "p95_s": 0.0031845830380916595
+            "maximum_s": 0.003131826873868704,
+            "median_s": 0.003131826873868704,
+            "minimum_s": 0.003131826873868704,
+            "p95_s": 0.003131826873868704
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.07857635105028749,
-            "median_s": 0.07857635105028749,
-            "minimum_s": 0.07857635105028749,
-            "p95_s": 0.07857635105028749
+            "maximum_s": 0.0733074527233839,
+            "median_s": 0.0733074527233839,
+            "minimum_s": 0.0733074527233839,
+            "p95_s": 0.0733074527233839
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0014352183789014816,
+            "median_s": 0.0014352183789014816,
+            "minimum_s": 0.0014352183789014816,
+            "p95_s": 0.0014352183789014816
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.003322433214634657,
-            "median_s": 0.002203360665589571,
-            "minimum_s": 0.002129483502358198,
-            "p95_s": 0.0031546621583402154
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.0008420944213867188,
+            "median_s": 0.0007728338241577148,
+            "minimum_s": 0.0007436275482177734,
+            "p95_s": 0.0008353710174560546
           },
           "end_to_end_s": {
-            "maximum_s": 0.034887359011918306,
-            "median_s": 0.028526976937428117,
-            "minimum_s": 0.027295579202473164,
-            "p95_s": 0.03410661860834807
+            "maximum_s": 0.02935513388365507,
+            "median_s": 0.0282999484334141,
+            "minimum_s": 0.026291111018508673,
+            "p95_s": 0.02920531106647104
           },
           "final_solver_s": {
-            "maximum_s": 0.00904393196105957,
-            "median_s": 0.008221149444580078,
-            "minimum_s": 0.007368564605712891,
-            "p95_s": 0.009025084972381591
+            "maximum_s": 0.007537126541137695,
+            "median_s": 0.007460951805114746,
+            "minimum_s": 0.007343769073486328,
+            "p95_s": 0.007536196708679199
           },
           "input_setup_s": {
-            "maximum_s": 0.005683376919478178,
-            "median_s": 0.004952522926032543,
-            "minimum_s": 0.0048397560603916645,
-            "p95_s": 0.005585052515380084
+            "maximum_s": 0.005210281815379858,
+            "median_s": 0.00496946694329381,
+            "minimum_s": 0.004553331062197685,
+            "p95_s": 0.00518381658475846
           },
           "model_construction_s": {
-            "maximum_s": 0.0010393219999969006,
-            "median_s": 0.0005842030514031649,
-            "minimum_s": 0.0005680411122739315,
-            "p95_s": 0.0009726363467052577
+            "maximum_s": 0.0007117008790373802,
+            "median_s": 0.000588210066780448,
+            "minimum_s": 0.0005483529530465603,
+            "p95_s": 0.0006979030091315507
           },
           "optimization_mode_s": {
-            "maximum_s": 0.019004676956683397,
-            "median_s": 0.01472058822400868,
-            "minimum_s": 0.0136980633251369,
-            "p95_s": 0.018511100066825745
+            "maximum_s": 0.014995696023106575,
+            "median_s": 0.014104469446465373,
+            "minimum_s": 0.013211140874773264,
+            "p95_s": 0.014896747167222201
           },
           "result_extraction_s": {
-            "maximum_s": 0.00529318256303668,
-            "median_s": 0.00349231599830091,
-            "minimum_s": 0.003178840037435293,
-            "p95_s": 0.005058919684961438
+            "maximum_s": 0.004306315910071135,
+            "median_s": 0.0034583057276904583,
+            "minimum_s": 0.0030042720027267933,
+            "p95_s": 0.004239536938257515
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.012366365175694227,
-            "median_s": 0.010387272108346224,
-            "minimum_s": 0.00957252411171794,
-            "p95_s": 0.012179567478597164
+            "maximum_s": 0.009825078304857016,
+            "median_s": 0.009670064086094499,
+            "minimum_s": 0.009380597155541182,
+            "p95_s": 0.009805871662683785
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.001496878918260336,
+            "median_s": 0.0014107676688581705,
+            "minimum_s": 0.00129320053383708,
+            "p95_s": 0.0014919416280463338
           }
         }
       }
@@ -1340,14 +1374,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.04165133461356163,
-            "end_to_end": 0.0776180736720562,
-            "final_solver": 0.013898849487304688,
-            "input_setup": 0.005918127950280905,
-            "model_construction": 0.003552522975951433,
-            "optimization_mode": 0.0626871190033853,
-            "result_extraction": 0.0032951729372143745,
-            "solve_call_including_fallback": 0.05555018410086632
+            "cvxpy_compilation": 0.03986406326293945,
+            "end_to_end": 0.07562107313424349,
+            "final_solver": 0.013301610946655273,
+            "input_setup": 0.005785600282251835,
+            "model_construction": 0.004180251620709896,
+            "optimization_mode": 0.061336832121014595,
+            "result_extraction": 0.002509352285414934,
+            "solve_call_including_fallback": 0.05437577096745372,
+            "solve_wrapper_overhead": 0.0012100967578589916
           }
         },
         {
@@ -1391,14 +1426,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0033536977134644985,
-            "end_to_end": 0.03640527697280049,
-            "final_solver": 0.009589195251464844,
-            "input_setup": 0.007771558128297329,
-            "model_construction": 0.0007898956537246704,
-            "optimization_mode": 0.01718088099732995,
-            "result_extraction": 0.0029956591315567493,
-            "solve_call_including_fallback": 0.012942892964929342
+            "cvxpy_compilation": 0.0007669925689697266,
+            "end_to_end": 0.026535471435636282,
+            "final_solver": 0.007287502288818359,
+            "input_setup": 0.005247419234365225,
+            "model_construction": 0.00043469294905662537,
+            "optimization_mode": 0.012509230989962816,
+            "result_extraction": 0.002551646903157234,
+            "solve_call_including_fallback": 0.009238108061254025,
+            "solve_wrapper_overhead": 0.0011836132034659386
           }
         },
         {
@@ -1442,14 +1478,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0020613977685570717,
-            "end_to_end": 0.027233623899519444,
-            "final_solver": 0.007460594177246094,
-            "input_setup": 0.005631675943732262,
-            "model_construction": 0.0004241401329636574,
-            "optimization_mode": 0.012806988321244717,
-            "result_extraction": 0.0025690626353025436,
-            "solve_call_including_fallback": 0.009521991945803165
+            "cvxpy_compilation": 0.0007429122924804688,
+            "end_to_end": 0.026235084980726242,
+            "final_solver": 0.007253408432006836,
+            "input_setup": 0.005079151131212711,
+            "model_construction": 0.0004362720064818859,
+            "optimization_mode": 0.01246712077409029,
+            "result_extraction": 0.0025704610161483288,
+            "solve_call_including_fallback": 0.009170664008706808,
+            "solve_wrapper_overhead": 0.0011743432842195034
           }
         },
         {
@@ -1493,14 +1530,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.001904158852994442,
-            "end_to_end": 0.029346199240535498,
-            "final_solver": 0.007240772247314453,
-            "input_setup": 0.005705466028302908,
-            "model_construction": 0.0004837927408516407,
-            "optimization_mode": 0.012515984009951353,
-            "result_extraction": 0.0025340691208839417,
-            "solve_call_including_fallback": 0.009144931100308895
+            "cvxpy_compilation": 0.0007448196411132812,
+            "end_to_end": 0.02629703003913164,
+            "final_solver": 0.007264614105224609,
+            "input_setup": 0.005040000192821026,
+            "model_construction": 0.00042202509939670563,
+            "optimization_mode": 0.012267449870705605,
+            "result_extraction": 0.0024505839683115482,
+            "solve_call_including_fallback": 0.009106033947318792,
+            "solve_wrapper_overhead": 0.0010966002009809017
           }
         },
         {
@@ -1544,14 +1582,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0019385674968361855,
-            "end_to_end": 0.027884974610060453,
-            "final_solver": 0.00736236572265625,
-            "input_setup": 0.005538114812225103,
-            "model_construction": 0.00044215191155672073,
-            "optimization_mode": 0.012637256179004908,
-            "result_extraction": 0.0025600697845220566,
-            "solve_call_including_fallback": 0.009300933219492435
+            "cvxpy_compilation": 0.0007331371307373047,
+            "end_to_end": 0.025592833291739225,
+            "final_solver": 0.0072362422943115234,
+            "input_setup": 0.0048340121284127235,
+            "model_construction": 0.0004252302460372448,
+            "optimization_mode": 0.012308882549405098,
+            "result_extraction": 0.0025044651702046394,
+            "solve_call_including_fallback": 0.009080997668206692,
+            "solve_wrapper_overhead": 0.0011116182431578636
           }
         }
       ],
@@ -1577,103 +1616,115 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.04165133461356163,
-            "median_s": 0.04165133461356163,
-            "minimum_s": 0.04165133461356163,
-            "p95_s": 0.04165133461356163
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.03986406326293945,
+            "median_s": 0.03986406326293945,
+            "minimum_s": 0.03986406326293945,
+            "p95_s": 0.03986406326293945
           },
           "end_to_end_s": {
-            "maximum_s": 0.0776180736720562,
-            "median_s": 0.0776180736720562,
-            "minimum_s": 0.0776180736720562,
-            "p95_s": 0.0776180736720562
+            "maximum_s": 0.07562107313424349,
+            "median_s": 0.07562107313424349,
+            "minimum_s": 0.07562107313424349,
+            "p95_s": 0.07562107313424349
           },
           "final_solver_s": {
-            "maximum_s": 0.013898849487304688,
-            "median_s": 0.013898849487304688,
-            "minimum_s": 0.013898849487304688,
-            "p95_s": 0.013898849487304688
+            "maximum_s": 0.013301610946655273,
+            "median_s": 0.013301610946655273,
+            "minimum_s": 0.013301610946655273,
+            "p95_s": 0.013301610946655273
           },
           "input_setup_s": {
-            "maximum_s": 0.005918127950280905,
-            "median_s": 0.005918127950280905,
-            "minimum_s": 0.005918127950280905,
-            "p95_s": 0.005918127950280905
+            "maximum_s": 0.005785600282251835,
+            "median_s": 0.005785600282251835,
+            "minimum_s": 0.005785600282251835,
+            "p95_s": 0.005785600282251835
           },
           "model_construction_s": {
-            "maximum_s": 0.003552522975951433,
-            "median_s": 0.003552522975951433,
-            "minimum_s": 0.003552522975951433,
-            "p95_s": 0.003552522975951433
+            "maximum_s": 0.004180251620709896,
+            "median_s": 0.004180251620709896,
+            "minimum_s": 0.004180251620709896,
+            "p95_s": 0.004180251620709896
           },
           "optimization_mode_s": {
-            "maximum_s": 0.0626871190033853,
-            "median_s": 0.0626871190033853,
-            "minimum_s": 0.0626871190033853,
-            "p95_s": 0.0626871190033853
+            "maximum_s": 0.061336832121014595,
+            "median_s": 0.061336832121014595,
+            "minimum_s": 0.061336832121014595,
+            "p95_s": 0.061336832121014595
           },
           "result_extraction_s": {
-            "maximum_s": 0.0032951729372143745,
-            "median_s": 0.0032951729372143745,
-            "minimum_s": 0.0032951729372143745,
-            "p95_s": 0.0032951729372143745
+            "maximum_s": 0.002509352285414934,
+            "median_s": 0.002509352285414934,
+            "minimum_s": 0.002509352285414934,
+            "p95_s": 0.002509352285414934
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.05555018410086632,
-            "median_s": 0.05555018410086632,
-            "minimum_s": 0.05555018410086632,
-            "p95_s": 0.05555018410086632
+            "maximum_s": 0.05437577096745372,
+            "median_s": 0.05437577096745372,
+            "minimum_s": 0.05437577096745372,
+            "p95_s": 0.05437577096745372
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0012100967578589916,
+            "median_s": 0.0012100967578589916,
+            "minimum_s": 0.0012100967578589916,
+            "p95_s": 0.0012100967578589916
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.0033536977134644985,
-            "median_s": 0.0019999826326966286,
-            "minimum_s": 0.001904158852994442,
-            "p95_s": 0.003159852721728384
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.0007669925689697266,
+            "median_s": 0.000743865966796875,
+            "minimum_s": 0.0007331371307373047,
+            "p95_s": 0.0007636666297912598
           },
           "end_to_end_s": {
-            "maximum_s": 0.03640527697280049,
-            "median_s": 0.028615586925297976,
-            "minimum_s": 0.027233623899519444,
-            "p95_s": 0.03534641531296074
+            "maximum_s": 0.026535471435636282,
+            "median_s": 0.02626605750992894,
+            "minimum_s": 0.025592833291739225,
+            "p95_s": 0.026499705226160585
           },
           "final_solver_s": {
-            "maximum_s": 0.009589195251464844,
-            "median_s": 0.007411479949951172,
-            "minimum_s": 0.007240772247314453,
-            "p95_s": 0.00926990509033203
+            "maximum_s": 0.007287502288818359,
+            "median_s": 0.007259011268615723,
+            "minimum_s": 0.0072362422943115234,
+            "p95_s": 0.0072840690612792965
           },
           "input_setup_s": {
-            "maximum_s": 0.007771558128297329,
-            "median_s": 0.005668570986017585,
-            "minimum_s": 0.005538114812225103,
-            "p95_s": 0.007461644313298165
+            "maximum_s": 0.005247419234365225,
+            "median_s": 0.005059575662016869,
+            "minimum_s": 0.0048340121284127235,
+            "p95_s": 0.005222179018892348
           },
           "model_construction_s": {
-            "maximum_s": 0.0007898956537246704,
-            "median_s": 0.0004629723262041807,
-            "minimum_s": 0.0004241401329636574,
-            "p95_s": 0.0007439802167937159
+            "maximum_s": 0.0004362720064818859,
+            "median_s": 0.0004299615975469351,
+            "minimum_s": 0.00042202509939670563,
+            "p95_s": 0.0004360351478680968
           },
           "optimization_mode_s": {
-            "maximum_s": 0.01718088099732995,
-            "median_s": 0.012722122250124812,
-            "minimum_s": 0.012515984009951353,
-            "p95_s": 0.016524797095917164
+            "maximum_s": 0.012509230989962816,
+            "median_s": 0.012388001661747694,
+            "minimum_s": 0.012267449870705605,
+            "p95_s": 0.012502914457581938
           },
           "result_extraction_s": {
-            "maximum_s": 0.0029956591315567493,
-            "median_s": 0.0025645662099123,
-            "minimum_s": 0.0025340691208839417,
-            "p95_s": 0.0029316696571186182
+            "maximum_s": 0.0025704610161483288,
+            "median_s": 0.002528056036680937,
+            "minimum_s": 0.0024505839683115482,
+            "p95_s": 0.0025676388991996645
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.012942892964929342,
-            "median_s": 0.0094114625826478,
-            "minimum_s": 0.009144931100308895,
-            "p95_s": 0.012429757812060415
+            "maximum_s": 0.009238108061254025,
+            "median_s": 0.0091383489780128,
+            "minimum_s": 0.009080997668206692,
+            "p95_s": 0.009227991453371942
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0011836132034659386,
+            "median_s": 0.0011429807636886835,
+            "minimum_s": 0.0010966002009809017,
+            "p95_s": 0.0011822227155789734
           }
         }
       }
@@ -1757,14 +1808,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.05445859953761101,
-            "end_to_end": 0.13041961612179875,
-            "final_solver": 0.04744887351989746,
-            "input_setup": 0.009665404912084341,
-            "model_construction": 0.004350242204964161,
-            "optimization_mode": 0.10987716587260365,
-            "result_extraction": 0.0033111469820141792,
-            "solve_call_including_fallback": 0.10190747305750847
+            "cvxpy_compilation": 0.0570979118347168,
+            "end_to_end": 0.12779823504388332,
+            "final_solver": 0.04196572303771973,
+            "input_setup": 0.0069588422775268555,
+            "model_construction": 0.007491026073694229,
+            "optimization_mode": 0.110869234893471,
+            "result_extraction": 0.0025072800926864147,
+            "solve_call_including_fallback": 0.10058589512482285,
+            "solve_wrapper_overhead": 0.0015222602523863316
           }
         },
         {
@@ -1808,14 +1860,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.002010828349739313,
-            "end_to_end": 0.028060430195182562,
-            "final_solver": 0.008999347686767578,
-            "input_setup": 0.005020987242460251,
-            "model_construction": 0.00044091232120990753,
-            "optimization_mode": 0.01431567408144474,
-            "result_extraction": 0.00257439399138093,
-            "solve_call_including_fallback": 0.011010176036506891
+            "cvxpy_compilation": 0.0007541179656982422,
+            "end_to_end": 0.027177151292562485,
+            "final_solver": 0.00880289077758789,
+            "input_setup": 0.00485279830172658,
+            "model_construction": 0.0004185456782579422,
+            "optimization_mode": 0.014009595848619938,
+            "result_extraction": 0.0024878201074898243,
+            "solve_call_including_fallback": 0.010826404206454754,
+            "solve_wrapper_overhead": 0.001269395463168621
           }
         },
         {
@@ -1859,14 +1912,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0021573882550001144,
-            "end_to_end": 0.027929435018450022,
-            "final_solver": 0.008794784545898438,
-            "input_setup": 0.0053034289740026,
-            "model_construction": 0.0004639741964638233,
-            "optimization_mode": 0.014226817060261965,
-            "result_extraction": 0.002514300402253866,
-            "solve_call_including_fallback": 0.010952172800898552
+            "cvxpy_compilation": 0.0007448196411132812,
+            "end_to_end": 0.027118639089167118,
+            "final_solver": 0.00870656967163086,
+            "input_setup": 0.005045730620622635,
+            "model_construction": 0.0004080268554389477,
+            "optimization_mode": 0.013887185603380203,
+            "result_extraction": 0.0024501788429915905,
+            "solve_call_including_fallback": 0.010748184286057949,
+            "solve_wrapper_overhead": 0.0012967949733138084
           }
         },
         {
@@ -1910,14 +1964,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0019982620142400265,
-            "end_to_end": 0.02765547763556242,
-            "final_solver": 0.00882411003112793,
-            "input_setup": 0.004974401090294123,
-            "model_construction": 0.0004279930144548416,
-            "optimization_mode": 0.01404309319332242,
-            "result_extraction": 0.0025021489709615707,
-            "solve_call_including_fallback": 0.010822372045367956
+            "cvxpy_compilation": 0.0007443428039550781,
+            "end_to_end": 0.027000589296221733,
+            "final_solver": 0.008669376373291016,
+            "input_setup": 0.005039969924837351,
+            "model_construction": 0.00041831890121102333,
+            "optimization_mode": 0.013702052179723978,
+            "result_extraction": 0.0023931097239255905,
+            "solve_call_including_fallback": 0.010612200945615768,
+            "solve_wrapper_overhead": 0.0011984817683696747
           }
         },
         {
@@ -1961,14 +2016,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.002694755792617798,
-            "end_to_end": 0.03293413296341896,
-            "final_solver": 0.008945703506469727,
-            "input_setup": 0.005006303079426289,
-            "model_construction": 0.0004429686814546585,
-            "optimization_mode": 0.016916015185415745,
-            "result_extraction": 0.004524158779531717,
-            "solve_call_including_fallback": 0.011640459299087524
+            "cvxpy_compilation": 0.0007290840148925781,
+            "end_to_end": 0.026963131967931986,
+            "final_solver": 0.008685111999511719,
+            "input_setup": 0.004839635919779539,
+            "model_construction": 0.0004125242121517658,
+            "optimization_mode": 0.013693609740585089,
+            "result_extraction": 0.002424124162644148,
+            "solve_call_including_fallback": 0.010579628869891167,
+            "solve_wrapper_overhead": 0.0011654328554868698
           }
         }
       ],
@@ -1994,103 +2050,115 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.05445859953761101,
-            "median_s": 0.05445859953761101,
-            "minimum_s": 0.05445859953761101,
-            "p95_s": 0.05445859953761101
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.0570979118347168,
+            "median_s": 0.0570979118347168,
+            "minimum_s": 0.0570979118347168,
+            "p95_s": 0.0570979118347168
           },
           "end_to_end_s": {
-            "maximum_s": 0.13041961612179875,
-            "median_s": 0.13041961612179875,
-            "minimum_s": 0.13041961612179875,
-            "p95_s": 0.13041961612179875
+            "maximum_s": 0.12779823504388332,
+            "median_s": 0.12779823504388332,
+            "minimum_s": 0.12779823504388332,
+            "p95_s": 0.12779823504388332
           },
           "final_solver_s": {
-            "maximum_s": 0.04744887351989746,
-            "median_s": 0.04744887351989746,
-            "minimum_s": 0.04744887351989746,
-            "p95_s": 0.04744887351989746
+            "maximum_s": 0.04196572303771973,
+            "median_s": 0.04196572303771973,
+            "minimum_s": 0.04196572303771973,
+            "p95_s": 0.04196572303771973
           },
           "input_setup_s": {
-            "maximum_s": 0.009665404912084341,
-            "median_s": 0.009665404912084341,
-            "minimum_s": 0.009665404912084341,
-            "p95_s": 0.009665404912084341
+            "maximum_s": 0.0069588422775268555,
+            "median_s": 0.0069588422775268555,
+            "minimum_s": 0.0069588422775268555,
+            "p95_s": 0.0069588422775268555
           },
           "model_construction_s": {
-            "maximum_s": 0.004350242204964161,
-            "median_s": 0.004350242204964161,
-            "minimum_s": 0.004350242204964161,
-            "p95_s": 0.004350242204964161
+            "maximum_s": 0.007491026073694229,
+            "median_s": 0.007491026073694229,
+            "minimum_s": 0.007491026073694229,
+            "p95_s": 0.007491026073694229
           },
           "optimization_mode_s": {
-            "maximum_s": 0.10987716587260365,
-            "median_s": 0.10987716587260365,
-            "minimum_s": 0.10987716587260365,
-            "p95_s": 0.10987716587260365
+            "maximum_s": 0.110869234893471,
+            "median_s": 0.110869234893471,
+            "minimum_s": 0.110869234893471,
+            "p95_s": 0.110869234893471
           },
           "result_extraction_s": {
-            "maximum_s": 0.0033111469820141792,
-            "median_s": 0.0033111469820141792,
-            "minimum_s": 0.0033111469820141792,
-            "p95_s": 0.0033111469820141792
+            "maximum_s": 0.0025072800926864147,
+            "median_s": 0.0025072800926864147,
+            "minimum_s": 0.0025072800926864147,
+            "p95_s": 0.0025072800926864147
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.10190747305750847,
-            "median_s": 0.10190747305750847,
-            "minimum_s": 0.10190747305750847,
-            "p95_s": 0.10190747305750847
+            "maximum_s": 0.10058589512482285,
+            "median_s": 0.10058589512482285,
+            "minimum_s": 0.10058589512482285,
+            "p95_s": 0.10058589512482285
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0015222602523863316,
+            "median_s": 0.0015222602523863316,
+            "minimum_s": 0.0015222602523863316,
+            "p95_s": 0.0015222602523863316
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.002694755792617798,
-            "median_s": 0.002084108302369714,
-            "minimum_s": 0.0019982620142400265,
-            "p95_s": 0.0026141506619751453
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.0007541179656982422,
+            "median_s": 0.0007445812225341797,
+            "minimum_s": 0.0007290840148925781,
+            "p95_s": 0.0007527232170104981
           },
           "end_to_end_s": {
-            "maximum_s": 0.03293413296341896,
-            "median_s": 0.027994932606816292,
-            "minimum_s": 0.02765547763556242,
-            "p95_s": 0.0322030775481835
+            "maximum_s": 0.027177151292562485,
+            "median_s": 0.027059614192694426,
+            "minimum_s": 0.026963131967931986,
+            "p95_s": 0.02716837446205318
           },
           "final_solver_s": {
-            "maximum_s": 0.008999347686767578,
-            "median_s": 0.008884906768798828,
-            "minimum_s": 0.008794784545898438,
-            "p95_s": 0.0089913010597229
+            "maximum_s": 0.00880289077758789,
+            "median_s": 0.008695840835571289,
+            "minimum_s": 0.008669376373291016,
+            "p95_s": 0.008788442611694336
           },
           "input_setup_s": {
-            "maximum_s": 0.0053034289740026,
-            "median_s": 0.00501364516094327,
-            "minimum_s": 0.004974401090294123,
-            "p95_s": 0.0052610627142712476
+            "maximum_s": 0.005045730620622635,
+            "median_s": 0.004946384113281965,
+            "minimum_s": 0.004839635919779539,
+            "p95_s": 0.005044866516254842
           },
           "model_construction_s": {
-            "maximum_s": 0.0004639741964638233,
-            "median_s": 0.000441940501332283,
-            "minimum_s": 0.0004279930144548416,
-            "p95_s": 0.0004608233692124486
+            "maximum_s": 0.0004185456782579422,
+            "median_s": 0.0004154215566813946,
+            "minimum_s": 0.0004080268554389477,
+            "p95_s": 0.00041851166170090435
           },
           "optimization_mode_s": {
-            "maximum_s": 0.016916015185415745,
-            "median_s": 0.014271245570853353,
-            "minimum_s": 0.01404309319332242,
-            "p95_s": 0.016525964019820094
+            "maximum_s": 0.014009595848619938,
+            "median_s": 0.01379461889155209,
+            "minimum_s": 0.013693609740585089,
+            "p95_s": 0.013991234311833977
           },
           "result_extraction_s": {
-            "maximum_s": 0.004524158779531717,
-            "median_s": 0.002544347196817398,
-            "minimum_s": 0.0025021489709615707,
-            "p95_s": 0.004231694061309099
+            "maximum_s": 0.0024878201074898243,
+            "median_s": 0.002437151502817869,
+            "minimum_s": 0.0023931097239255905,
+            "p95_s": 0.0024821739178150894
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.011640459299087524,
-            "median_s": 0.010981174418702722,
-            "minimum_s": 0.010822372045367956,
-            "p95_s": 0.01154591680970043
+            "maximum_s": 0.010826404206454754,
+            "median_s": 0.010680192615836859,
+            "minimum_s": 0.010579628869891167,
+            "p95_s": 0.010814671218395234
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.0012967949733138084,
+            "median_s": 0.0012339386157691479,
+            "minimum_s": 0.0011654328554868698,
+            "p95_s": 0.0012926850467920303
           }
         }
       }
@@ -2520,14 +2588,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.2062521418556571,
-            "end_to_end": 2.376365811098367,
-            "final_solver": 2.1383883953094482,
-            "input_setup": 0.007264791987836361,
-            "model_construction": 0.008703278843313456,
-            "optimization_mode": 2.3573439246974885,
-            "result_extraction": 0.0037176678888499737,
-            "solve_call_including_fallback": 2.3446405371651053
+            "cvxpy_compilation": 0.17318058013916016,
+            "end_to_end": 2.282431193161756,
+            "final_solver": 2.074420928955078,
+            "input_setup": 0.006636267993599176,
+            "model_construction": 0.008375817909836769,
+            "optimization_mode": 2.2643783213570714,
+            "result_extraction": 0.0036702649667859077,
+            "solve_call_including_fallback": 2.2520596850663424,
+            "solve_wrapper_overhead": 0.004458175972104073
           }
         },
         {
@@ -2901,14 +2970,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.005476750899106264,
-            "end_to_end": 0.14723633276298642,
-            "final_solver": 0.11835575103759766,
-            "input_setup": 0.0058289337903261185,
-            "model_construction": 0.0007050042040646076,
-            "optimization_mode": 0.1296350327320397,
-            "result_extraction": 0.004811926279217005,
-            "solve_call_including_fallback": 0.12383250193670392
+            "cvxpy_compilation": 0.0010540485382080078,
+            "end_to_end": 0.19794145319610834,
+            "final_solver": 0.16892528533935547,
+            "input_setup": 0.005547921173274517,
+            "model_construction": 0.0007306551560759544,
+            "optimization_mode": 0.18023362383246422,
+            "result_extraction": 0.0037378002889454365,
+            "solve_call_including_fallback": 0.17545977281406522,
+            "solve_wrapper_overhead": 0.005480438936501741
           }
         },
         {
@@ -3282,14 +3352,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0056650047190487385,
-            "end_to_end": 0.14629588602110744,
-            "final_solver": 0.1189124584197998,
-            "input_setup": 0.0052496688440442085,
-            "model_construction": 0.0006931209936738014,
-            "optimization_mode": 0.12925760494545102,
-            "result_extraction": 0.0037007699720561504,
-            "solve_call_including_fallback": 0.12457746313884854
+            "cvxpy_compilation": 0.0010387897491455078,
+            "end_to_end": 0.16052813036367297,
+            "final_solver": 0.13091015815734863,
+            "input_setup": 0.005641428288072348,
+            "model_construction": 0.0007102317176759243,
+            "optimization_mode": 0.14219678984954953,
+            "result_extraction": 0.003826914820820093,
+            "solve_call_including_fallback": 0.13736695516854525,
+            "solve_wrapper_overhead": 0.0054180072620511055
           }
         },
         {
@@ -3663,14 +3734,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.005566562991589308,
-            "end_to_end": 0.15709170885384083,
-            "final_solver": 0.12996792793273926,
-            "input_setup": 0.0051748137921094894,
-            "model_construction": 0.0006969273090362549,
-            "optimization_mode": 0.1401738878339529,
-            "result_extraction": 0.0036588478833436966,
-            "solve_call_including_fallback": 0.13553449092432857
+            "cvxpy_compilation": 0.0010454654693603516,
+            "end_to_end": 0.15171321900561452,
+            "final_solver": 0.12291955947875977,
+            "input_setup": 0.005720851011574268,
+            "model_construction": 0.0007226970046758652,
+            "optimization_mode": 0.13319862028583884,
+            "result_extraction": 0.0038143000565469265,
+            "solve_call_including_fallback": 0.1283635008148849,
+            "solve_wrapper_overhead": 0.004398475866764784
           }
         },
         {
@@ -4044,14 +4116,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.0055093830451369286,
-            "end_to_end": 0.14721759920939803,
-            "final_solver": 0.11940479278564453,
-            "input_setup": 0.00552770309150219,
-            "model_construction": 0.0006938371807336807,
-            "optimization_mode": 0.12955630291253328,
-            "result_extraction": 0.0036606951616704464,
-            "solve_call_including_fallback": 0.12491417583078146
+            "cvxpy_compilation": 0.001055002212524414,
+            "end_to_end": 0.1550948340445757,
+            "final_solver": 0.1257038116455078,
+            "input_setup": 0.006672676187008619,
+            "model_construction": 0.0007117949426174164,
+            "optimization_mode": 0.1359030450694263,
+            "result_extraction": 0.0037352354265749454,
+            "solve_call_including_fallback": 0.13116340665146708,
+            "solve_wrapper_overhead": 0.004404592793434858
           }
         }
       ],
@@ -4093,103 +4166,115 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.2062521418556571,
-            "median_s": 0.2062521418556571,
-            "minimum_s": 0.2062521418556571,
-            "p95_s": 0.2062521418556571
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.17318058013916016,
+            "median_s": 0.17318058013916016,
+            "minimum_s": 0.17318058013916016,
+            "p95_s": 0.17318058013916016
           },
           "end_to_end_s": {
-            "maximum_s": 2.376365811098367,
-            "median_s": 2.376365811098367,
-            "minimum_s": 2.376365811098367,
-            "p95_s": 2.376365811098367
+            "maximum_s": 2.282431193161756,
+            "median_s": 2.282431193161756,
+            "minimum_s": 2.282431193161756,
+            "p95_s": 2.282431193161756
           },
           "final_solver_s": {
-            "maximum_s": 2.1383883953094482,
-            "median_s": 2.1383883953094482,
-            "minimum_s": 2.1383883953094482,
-            "p95_s": 2.1383883953094482
+            "maximum_s": 2.074420928955078,
+            "median_s": 2.074420928955078,
+            "minimum_s": 2.074420928955078,
+            "p95_s": 2.074420928955078
           },
           "input_setup_s": {
-            "maximum_s": 0.007264791987836361,
-            "median_s": 0.007264791987836361,
-            "minimum_s": 0.007264791987836361,
-            "p95_s": 0.007264791987836361
+            "maximum_s": 0.006636267993599176,
+            "median_s": 0.006636267993599176,
+            "minimum_s": 0.006636267993599176,
+            "p95_s": 0.006636267993599176
           },
           "model_construction_s": {
-            "maximum_s": 0.008703278843313456,
-            "median_s": 0.008703278843313456,
-            "minimum_s": 0.008703278843313456,
-            "p95_s": 0.008703278843313456
+            "maximum_s": 0.008375817909836769,
+            "median_s": 0.008375817909836769,
+            "minimum_s": 0.008375817909836769,
+            "p95_s": 0.008375817909836769
           },
           "optimization_mode_s": {
-            "maximum_s": 2.3573439246974885,
-            "median_s": 2.3573439246974885,
-            "minimum_s": 2.3573439246974885,
-            "p95_s": 2.3573439246974885
+            "maximum_s": 2.2643783213570714,
+            "median_s": 2.2643783213570714,
+            "minimum_s": 2.2643783213570714,
+            "p95_s": 2.2643783213570714
           },
           "result_extraction_s": {
-            "maximum_s": 0.0037176678888499737,
-            "median_s": 0.0037176678888499737,
-            "minimum_s": 0.0037176678888499737,
-            "p95_s": 0.0037176678888499737
+            "maximum_s": 0.0036702649667859077,
+            "median_s": 0.0036702649667859077,
+            "minimum_s": 0.0036702649667859077,
+            "p95_s": 0.0036702649667859077
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 2.3446405371651053,
-            "median_s": 2.3446405371651053,
-            "minimum_s": 2.3446405371651053,
-            "p95_s": 2.3446405371651053
+            "maximum_s": 2.2520596850663424,
+            "median_s": 2.2520596850663424,
+            "minimum_s": 2.2520596850663424,
+            "p95_s": 2.2520596850663424
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.004458175972104073,
+            "median_s": 0.004458175972104073,
+            "minimum_s": 0.004458175972104073,
+            "p95_s": 0.004458175972104073
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.0056650047190487385,
-            "median_s": 0.005537973018363118,
-            "minimum_s": 0.005476750899106264,
-            "p95_s": 0.0056502384599298235
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.001055002212524414,
+            "median_s": 0.0010497570037841797,
+            "minimum_s": 0.0010387897491455078,
+            "p95_s": 0.001054859161376953
           },
           "end_to_end_s": {
-            "maximum_s": 0.15709170885384083,
-            "median_s": 0.14722696598619223,
-            "minimum_s": 0.14629588602110744,
-            "p95_s": 0.15561340244021266
+            "maximum_s": 0.19794145319610834,
+            "median_s": 0.15781148220412433,
+            "minimum_s": 0.15171321900561452,
+            "p95_s": 0.19232945477124302
           },
           "final_solver_s": {
-            "maximum_s": 0.12996792793273926,
-            "median_s": 0.11915862560272217,
-            "minimum_s": 0.11835575103759766,
-            "p95_s": 0.12838345766067505
+            "maximum_s": 0.16892528533935547,
+            "median_s": 0.12830698490142822,
+            "minimum_s": 0.12291955947875977,
+            "p95_s": 0.16322301626205443
           },
           "input_setup_s": {
-            "maximum_s": 0.0058289337903261185,
-            "median_s": 0.005388685967773199,
-            "minimum_s": 0.0051748137921094894,
-            "p95_s": 0.005783749185502529
+            "maximum_s": 0.006672676187008619,
+            "median_s": 0.005681139649823308,
+            "minimum_s": 0.005547921173274517,
+            "p95_s": 0.006529902410693466
           },
           "model_construction_s": {
-            "maximum_s": 0.0007050042040646076,
-            "median_s": 0.0006953822448849678,
-            "minimum_s": 0.0006931209936738014,
-            "p95_s": 0.0007037926698103547
+            "maximum_s": 0.0007306551560759544,
+            "median_s": 0.0007172459736466408,
+            "minimum_s": 0.0007102317176759243,
+            "p95_s": 0.000729461433365941
           },
           "optimization_mode_s": {
-            "maximum_s": 0.1401738878339529,
-            "median_s": 0.1295956678222865,
-            "minimum_s": 0.12925760494545102,
-            "p95_s": 0.1385930595686659
+            "maximum_s": 0.18023362383246422,
+            "median_s": 0.13904991745948792,
+            "minimum_s": 0.13319862028583884,
+            "p95_s": 0.174528098735027
           },
           "result_extraction_s": {
-            "maximum_s": 0.004811926279217005,
-            "median_s": 0.0036807325668632984,
-            "minimum_s": 0.0036588478833436966,
-            "p95_s": 0.004645252833142877
+            "maximum_s": 0.003826914820820093,
+            "median_s": 0.0037760501727461815,
+            "minimum_s": 0.0037352354265749454,
+            "p95_s": 0.003825022606179118
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.13553449092432857,
-            "median_s": 0.124745819484815,
-            "minimum_s": 0.12383250193670392,
-            "p95_s": 0.1339414436602965
+            "maximum_s": 0.17545977281406522,
+            "median_s": 0.13426518091000617,
+            "minimum_s": 0.1283635008148849,
+            "p95_s": 0.1697458501672372
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.005480438936501741,
+            "median_s": 0.004911300027742982,
+            "minimum_s": 0.004398475866764784,
+            "p95_s": 0.005471074185334146
           }
         }
       }
@@ -4619,14 +4704,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.2175341765396297,
-            "end_to_end": 14.602725014090538,
-            "final_solver": 14.34842586517334,
-            "input_setup": 0.007037953939288855,
-            "model_construction": 0.013955857139080763,
-            "optimization_mode": 14.584006989840418,
-            "result_extraction": 0.0038076709024608135,
-            "solve_call_including_fallback": 14.56596004171297
+            "cvxpy_compilation": 0.23064756393432617,
+            "end_to_end": 14.697907915804535,
+            "final_solver": 14.41402006149292,
+            "input_setup": 0.007314830087125301,
+            "model_construction": 0.017285848967731,
+            "optimization_mode": 14.67745554074645,
+            "result_extraction": 0.005844722036272287,
+            "solve_call_including_fallback": 14.654024504125118,
+            "solve_wrapper_overhead": 0.009356878697872162
           }
         },
         {
@@ -5000,14 +5086,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.01117599569261074,
-            "end_to_end": 0.35064636962488294,
-            "final_solver": 0.31581759452819824,
-            "input_setup": 0.005691638682037592,
-            "model_construction": 0.0012680389918386936,
-            "optimization_mode": 0.3325060890056193,
-            "result_extraction": 0.0038559488020837307,
-            "solve_call_including_fallback": 0.326993590220809
+            "cvxpy_compilation": 0.001209259033203125,
+            "end_to_end": 0.34857537178322673,
+            "final_solver": 0.31784892082214355,
+            "input_setup": 0.005397771950811148,
+            "model_construction": 0.0006985650397837162,
+            "optimization_mode": 0.3311865972355008,
+            "result_extraction": 0.004089938011020422,
+            "solve_call_including_fallback": 0.3261156650260091,
+            "solve_wrapper_overhead": 0.007057485170662403
           }
         },
         {
@@ -5381,14 +5468,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.008060936816036701,
-            "end_to_end": 0.34346832102164626,
-            "final_solver": 0.31269383430480957,
-            "input_setup": 0.005581567995250225,
-            "model_construction": 0.0006921850144863129,
-            "optimization_mode": 0.325443210080266,
-            "result_extraction": 0.0037105828523635864,
-            "solve_call_including_fallback": 0.32075477112084627
+            "cvxpy_compilation": 0.001230478286743164,
+            "end_to_end": 0.3635648959316313,
+            "final_solver": 0.3314831256866455,
+            "input_setup": 0.005989240948110819,
+            "model_construction": 0.0007421602495014668,
+            "optimization_mode": 0.3446285631507635,
+            "result_extraction": 0.0038506709970533848,
+            "solve_call_including_fallback": 0.3397398367524147,
+            "solve_wrapper_overhead": 0.0070262327790260315
           }
         },
         {
@@ -5762,14 +5850,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.008332656230777502,
-            "end_to_end": 0.34207055205479264,
-            "final_solver": 0.3116176128387451,
-            "input_setup": 0.005257073789834976,
-            "model_construction": 0.0007422259077429771,
-            "optimization_mode": 0.3247747221030295,
-            "result_extraction": 0.003773296717554331,
-            "solve_call_including_fallback": 0.3199502690695226
+            "cvxpy_compilation": 0.001272439956665039,
+            "end_to_end": 0.3407941861078143,
+            "final_solver": 0.309847354888916,
+            "input_setup": 0.0055930339731276035,
+            "model_construction": 0.0007270099595189095,
+            "optimization_mode": 0.3228282416239381,
+            "result_extraction": 0.003686134237796068,
+            "solve_call_including_fallback": 0.3181273890659213,
+            "solve_wrapper_overhead": 0.007007594220340252
           }
         },
         {
@@ -6143,14 +6232,15 @@
           "solver_name": "HIGHS",
           "solver_status": "Optimal",
           "timings_s": {
-            "canonicalization_and_wrapper": 0.008105195127427578,
-            "end_to_end": 0.3488420872017741,
-            "final_solver": 0.3141825199127197,
-            "input_setup": 0.006503606215119362,
-            "model_construction": 0.000777627807110548,
-            "optimization_mode": 0.3270404078066349,
-            "result_extraction": 0.003675699234008789,
-            "solve_call_including_fallback": 0.3222877150401473
+            "cvxpy_compilation": 0.0011959075927734375,
+            "end_to_end": 0.36928753182291985,
+            "final_solver": 0.3352396488189697,
+            "input_setup": 0.005303993355482817,
+            "model_construction": 0.0007027587853372097,
+            "optimization_mode": 0.3504597586579621,
+            "result_extraction": 0.004753496032208204,
+            "solve_call_including_fallback": 0.3447147561237216,
+            "solve_wrapper_overhead": 0.008279199711978436
           }
         }
       ],
@@ -6192,109 +6282,121 @@
       },
       "timing_summary": {
         "cold": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.2175341765396297,
-            "median_s": 0.2175341765396297,
-            "minimum_s": 0.2175341765396297,
-            "p95_s": 0.2175341765396297
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.23064756393432617,
+            "median_s": 0.23064756393432617,
+            "minimum_s": 0.23064756393432617,
+            "p95_s": 0.23064756393432617
           },
           "end_to_end_s": {
-            "maximum_s": 14.602725014090538,
-            "median_s": 14.602725014090538,
-            "minimum_s": 14.602725014090538,
-            "p95_s": 14.602725014090538
+            "maximum_s": 14.697907915804535,
+            "median_s": 14.697907915804535,
+            "minimum_s": 14.697907915804535,
+            "p95_s": 14.697907915804535
           },
           "final_solver_s": {
-            "maximum_s": 14.34842586517334,
-            "median_s": 14.34842586517334,
-            "minimum_s": 14.34842586517334,
-            "p95_s": 14.34842586517334
+            "maximum_s": 14.41402006149292,
+            "median_s": 14.41402006149292,
+            "minimum_s": 14.41402006149292,
+            "p95_s": 14.41402006149292
           },
           "input_setup_s": {
-            "maximum_s": 0.007037953939288855,
-            "median_s": 0.007037953939288855,
-            "minimum_s": 0.007037953939288855,
-            "p95_s": 0.007037953939288855
+            "maximum_s": 0.007314830087125301,
+            "median_s": 0.007314830087125301,
+            "minimum_s": 0.007314830087125301,
+            "p95_s": 0.007314830087125301
           },
           "model_construction_s": {
-            "maximum_s": 0.013955857139080763,
-            "median_s": 0.013955857139080763,
-            "minimum_s": 0.013955857139080763,
-            "p95_s": 0.013955857139080763
+            "maximum_s": 0.017285848967731,
+            "median_s": 0.017285848967731,
+            "minimum_s": 0.017285848967731,
+            "p95_s": 0.017285848967731
           },
           "optimization_mode_s": {
-            "maximum_s": 14.584006989840418,
-            "median_s": 14.584006989840418,
-            "minimum_s": 14.584006989840418,
-            "p95_s": 14.584006989840418
+            "maximum_s": 14.67745554074645,
+            "median_s": 14.67745554074645,
+            "minimum_s": 14.67745554074645,
+            "p95_s": 14.67745554074645
           },
           "result_extraction_s": {
-            "maximum_s": 0.0038076709024608135,
-            "median_s": 0.0038076709024608135,
-            "minimum_s": 0.0038076709024608135,
-            "p95_s": 0.0038076709024608135
+            "maximum_s": 0.005844722036272287,
+            "median_s": 0.005844722036272287,
+            "minimum_s": 0.005844722036272287,
+            "p95_s": 0.005844722036272287
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 14.56596004171297,
-            "median_s": 14.56596004171297,
-            "minimum_s": 14.56596004171297,
-            "p95_s": 14.56596004171297
+            "maximum_s": 14.654024504125118,
+            "median_s": 14.654024504125118,
+            "minimum_s": 14.654024504125118,
+            "p95_s": 14.654024504125118
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.009356878697872162,
+            "median_s": 0.009356878697872162,
+            "minimum_s": 0.009356878697872162,
+            "p95_s": 0.009356878697872162
           }
         },
         "warm": {
-          "canonicalization_and_wrapper_s": {
-            "maximum_s": 0.01117599569261074,
-            "median_s": 0.00821892567910254,
-            "minimum_s": 0.008060936816036701,
-            "p95_s": 0.010749494773335753
+          "cvxpy_compilation_s": {
+            "maximum_s": 0.001272439956665039,
+            "median_s": 0.0012198686599731445,
+            "minimum_s": 0.0011959075927734375,
+            "p95_s": 0.001266145706176758
           },
           "end_to_end_s": {
-            "maximum_s": 0.35064636962488294,
-            "median_s": 0.3461552041117102,
-            "minimum_s": 0.34207055205479264,
-            "p95_s": 0.35037572726141664
+            "maximum_s": 0.36928753182291985,
+            "median_s": 0.356070133857429,
+            "minimum_s": 0.3407941861078143,
+            "p95_s": 0.3684291364392266
           },
           "final_solver_s": {
-            "maximum_s": 0.31581759452819824,
-            "median_s": 0.31343817710876465,
-            "minimum_s": 0.3116176128387451,
-            "p95_s": 0.3155723333358765
+            "maximum_s": 0.3352396488189697,
+            "median_s": 0.32466602325439453,
+            "minimum_s": 0.309847354888916,
+            "p95_s": 0.3346761703491211
           },
           "input_setup_s": {
-            "maximum_s": 0.006503606215119362,
-            "median_s": 0.0056366033386439085,
-            "minimum_s": 0.005257073789834976,
-            "p95_s": 0.006381811085157096
+            "maximum_s": 0.005989240948110819,
+            "median_s": 0.005495402961969376,
+            "minimum_s": 0.005303993355482817,
+            "p95_s": 0.005929809901863336
           },
           "model_construction_s": {
-            "maximum_s": 0.0012680389918386936,
-            "median_s": 0.0007599268574267626,
-            "minimum_s": 0.0006921850144863129,
-            "p95_s": 0.0011944773141294716
+            "maximum_s": 0.0007421602495014668,
+            "median_s": 0.0007148843724280596,
+            "minimum_s": 0.0006985650397837162,
+            "p95_s": 0.0007398877060040832
           },
           "optimization_mode_s": {
-            "maximum_s": 0.3325060890056193,
-            "median_s": 0.32624180894345045,
-            "minimum_s": 0.3247747221030295,
-            "p95_s": 0.33168623682577164
+            "maximum_s": 0.3504597586579621,
+            "median_s": 0.33790758019313216,
+            "minimum_s": 0.3228282416239381,
+            "p95_s": 0.3495850793318823
           },
           "result_extraction_s": {
-            "maximum_s": 0.0038559488020837307,
-            "median_s": 0.0037419397849589586,
-            "minimum_s": 0.003675699234008789,
-            "p95_s": 0.003843550989404321
+            "maximum_s": 0.004753496032208204,
+            "median_s": 0.003970304504036903,
+            "minimum_s": 0.003686134237796068,
+            "p95_s": 0.004653962329030037
           },
           "solve_call_including_fallback_s": {
-            "maximum_s": 0.326993590220809,
-            "median_s": 0.3215212430804968,
-            "minimum_s": 0.3199502690695226,
-            "p95_s": 0.32628770894370973
+            "maximum_s": 0.3447147561237216,
+            "median_s": 0.3329277508892119,
+            "minimum_s": 0.3181273890659213,
+            "p95_s": 0.34396851821802554
+          },
+          "solve_wrapper_overhead_s": {
+            "maximum_s": 0.008279199711978436,
+            "median_s": 0.007041858974844217,
+            "minimum_s": 0.007007594220340252,
+            "p95_s": 0.00809594253078103
           }
         }
       }
     }
   ],
-  "repetition_note": "The first repetition is a cold construction; all later repetitions reuse its cached Optimization object.",
+  "repetition_note": "The first repetition is a cold construction; all later repetitions reuse its cached Optimization and CVXPY Problem objects. CVXPY compilation_time still measures each solve's compilation or cache lookup.",
   "repetitions": 5,
   "reproduction": {
     "dependency_lock": {
@@ -6338,10 +6440,13 @@
         "d6d9f91ff0bfe2f0e4034fe2da9284df81976184",
         "2c34ba8525676449f6972c6432dcb5e502002060",
         "e9074bd5fe445f828ecec33998c6858d5ab71808",
-        "a5ad22f3cf13e3a08f3d501298b68c8539a912e4"
+        "a5ad22f3cf13e3a08f3d501298b68c8539a912e4",
+        "37e72e9abf46e2f505cf6b01c30d5f6ab5f9b431",
+        "5f9abf3b02da9e441626b73d17b97a3918afc869",
+        "1ac3b38001c6c3e14979604d31d96aa4ac6fe978"
       ],
       "merge_base": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
-      "tested_commit": "a5ad22f3cf13e3a08f3d501298b68c8539a912e4",
+      "tested_commit": "1ac3b38001c6c3e14979604d31d96aa4ac6fe978",
       "worktree_clean": true
     },
     "offline_inputs": {
@@ -6465,6 +6570,71 @@
       "threads": 1,
       "timeout_s": 30
     },
+    "tested_modules": {
+      "modules": {
+        "emhass": {
+          "path": "src/emhass/__init__.py",
+          "sha256": "318fa44b1e500d31e34d02c946435ad628776ec30c88614caf6eb83cf9526516"
+        },
+        "emhass.battery_identification": {
+          "path": "src/emhass/battery_identification.py",
+          "sha256": "2e1d93159c696ad4c03d5daa40d8ded554543a2b7a35d7e887ea31c3f7ed91fb"
+        },
+        "emhass.command_line": {
+          "path": "src/emhass/command_line.py",
+          "sha256": "3a94bab4adaff0b1b3bfd158fa9f299e448f72bb6bb12beea948529f3c92c917"
+        },
+        "emhass.connection_manager": {
+          "path": "src/emhass/connection_manager.py",
+          "sha256": "283578e94af0494c0dfc186d7a606f8f7500efde3451a3d786a2ee1f2cc57fc2"
+        },
+        "emhass.forecast": {
+          "path": "src/emhass/forecast.py",
+          "sha256": "b3f40875f3d7c5b33ba9a538317b71435d954e5578466d86d6020e519894cdb7"
+        },
+        "emhass.forecast_calibration": {
+          "path": "src/emhass/forecast_calibration.py",
+          "sha256": "4473e407d3defb5db537bcaf3f6a7b363506611001468d08525aa9b63cbd40f9"
+        },
+        "emhass.last_run": {
+          "path": "src/emhass/last_run.py",
+          "sha256": "efffe1cb1a349b15a0051e6be5fc1eb37e4cba481a2b06ab4eb4525a096ab5c5"
+        },
+        "emhass.machine_learning_forecaster": {
+          "path": "src/emhass/machine_learning_forecaster.py",
+          "sha256": "49f75fcb70618ede8065920c83e4411b6e58494c130d41ad48da730f3b10e762"
+        },
+        "emhass.machine_learning_regressor": {
+          "path": "src/emhass/machine_learning_regressor.py",
+          "sha256": "c94435e64131ed191293ae4aaa58d268a263ac15b1165ed035ea11d0c2c2ab08"
+        },
+        "emhass.optimization": {
+          "path": "src/emhass/optimization.py",
+          "sha256": "ce5336b5533f8bd72b39869085c97217aa5e17ab45622e70476850f7a9f379a6"
+        },
+        "emhass.plan_store": {
+          "path": "src/emhass/plan_store.py",
+          "sha256": "810245d982517bd4083338e9b784136e0bccb73a4e51295c230dcc2f1dc2e360"
+        },
+        "emhass.retrieve_hass": {
+          "path": "src/emhass/retrieve_hass.py",
+          "sha256": "4c46ed61c15f611e9462f69c4b8c91b6c65d2f84b96cb25228423e92ec66e8b3"
+        },
+        "emhass.soc_power_profiles": {
+          "path": "src/emhass/soc_power_profiles.py",
+          "sha256": "464f3b5ecc6ee9a05ca4195e9e4e11a54a2baba9981d4247dff8ab2ecac09143"
+        },
+        "emhass.utils": {
+          "path": "src/emhass/utils.py",
+          "sha256": "b4c102183d0f625a08c54dbe95e8b068b4e24db97df68198c17e432b32f7c2fe"
+        },
+        "emhass.websocket_client": {
+          "path": "src/emhass/websocket_client.py",
+          "sha256": "141c3cf76854fe5cecda98b5e729bdea0231f208d0f6241b81e270cc8f406ee5"
+        }
+      },
+      "source_root": "/home/coder/git/emhass-ticket-02-baseline/src"
+    },
     "tested_source_provenance": {
       "base_commit": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
       "branch": "feature/issue-2-benchmark-baseline",
@@ -6482,10 +6652,13 @@
         "d6d9f91ff0bfe2f0e4034fe2da9284df81976184",
         "2c34ba8525676449f6972c6432dcb5e502002060",
         "e9074bd5fe445f828ecec33998c6858d5ab71808",
-        "a5ad22f3cf13e3a08f3d501298b68c8539a912e4"
+        "a5ad22f3cf13e3a08f3d501298b68c8539a912e4",
+        "37e72e9abf46e2f505cf6b01c30d5f6ab5f9b431",
+        "5f9abf3b02da9e441626b73d17b97a3918afc869",
+        "1ac3b38001c6c3e14979604d31d96aa4ac6fe978"
       ],
       "merge_base": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
-      "tested_commit": "a5ad22f3cf13e3a08f3d501298b68c8539a912e4",
+      "tested_commit": "1ac3b38001c6c3e14979604d31d96aa4ac6fe978",
       "worktree_clean": true
     }
   },
@@ -6493,10 +6666,11 @@
     "added_linear_rows": 2592,
     "boolean_selectors": 1152
   },
-  "schema_version": 2,
+  "schema_version": 3,
   "timing_notes": {
-    "canonicalization_and_wrapper": "Derived as the instrumented CVXPY solve-call wall time minus solver_stats.solve_time; current instrumentation cannot isolate canonicalization from the remaining CVXPY wrapper overhead.",
+    "cvxpy_compilation": "CVXPY Problem.compilation_time reported by the pinned CVXPY version for the final solve attempt.",
     "end_to_end": "Runner wall time around input preparation and the complete optimisation mode.",
-    "model_construction": "Existing optim_solve.build instrumentation covers model expression and problem construction inside perform_optimization."
+    "model_construction": "Existing optim_solve.build instrumentation covers model expression and problem construction inside perform_optimization.",
+    "solve_wrapper_overhead": "Solve-call wall time minus CVXPY compilation_time and solver_stats.solve_time. It is null after relaxed fallback because the solve-call timer then spans more than the final attempt."
   }
 }
