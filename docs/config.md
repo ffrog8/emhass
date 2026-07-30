@@ -302,7 +302,7 @@ Then the additional technical parameters:
 If your system has a battery (set_use_battery=True), then you should define the following parameters:
 
 - `number_of_batteries`: The number of physical batteries in the plant. Defaults to 1, matching every EMHASS config written before this parameter existed - every existing config keeps working unchanged. Set it above 1 to model a fleet of distinct batteries (for example two different chemistries or sizes) as separate storage devices sharing the same PV/load balance, instead of a single lumped battery.
-- `battery_soc_power_profiles`: Optional positional JSON list with exactly one object per configured battery. Omit it to keep the existing scalar power-limit model. In this release an entry may contain a `charge` profile or be `{}`; `discharge`, direction-level `null`, partial lists, and unknown members are rejected because discharge profiles are not yet enforced.
+- `battery_soc_power_profiles`: Optional positional JSON list with exactly one object per configured battery. Omit it to keep the existing scalar power-limit model. Each entry may independently contain a complete `charge` profile, a complete `discharge` profile, both directions, or neither (`{}`). Direction-level `null`, partial lists, and unknown members are rejected.
 - `battery_discharge_power_max`: The maximum discharge power in Watts. Defaults to 1000.
 - `battery_charge_power_max`: The maximum charge power in Watts. Defaults to 1000.
 - `battery_discharge_efficiency`: The discharge efficiency. Defaults to 0.95.
@@ -314,7 +314,7 @@ If your system has a battery (set_use_battery=True), then you should define the 
 
 With `number_of_batteries` at its default of 1, the scalar per-battery parameters above stay plain scalars, byte-identical to every config written before this parameter existed. With `number_of_batteries` greater than 1, each of `battery_discharge_power_max`, `battery_charge_power_max`, `battery_discharge_efficiency`, `battery_charge_efficiency`, `battery_nominal_energy_capacity`, `battery_minimum_state_of_charge`, `battery_maximum_state_of_charge`, `battery_target_state_of_charge` and `battery_stress_cost` (below) accepts either a single scalar, which is broadcast to every battery, or a list of exactly `number_of_batteries` entries, one per battery in order. A list of any other length is rejected with an error naming the parameter and the expected length - it is not padded or truncated, unlike the per-deferrable-load arrays above. `battery_target_state_of_charge` also becomes the per-battery fallback for `soc_init`/`soc_final` at runtime: `soc_final` is clamped per battery to that battery's own `[battery_minimum_state_of_charge, battery_maximum_state_of_charge]`, while `soc_init` is passed through unclamped (existing recovery behaviour), also per battery. `set_use_battery`, `set_nocharge_from_grid`, `set_nodischarge_to_grid`, `set_battery_first_priority`, `set_battery_dynamic`, `battery_dynamic_max`, `battery_dynamic_min` and `battery_stress_segments` stay global scalars that apply to every battery; they are not per-battery arrays.
 
-Each charge profile contains `soc_breakpoints` and `power_max`. Breakpoints are finite SOC fractions in the closed interval `[0, 1]`, are strictly increasing, and divide the SOC range into bands. `power_max` contains one finite power limit in watts per band, so it has exactly one more value than `soc_breakpoints`. Charge limits must be non-negative and non-increasing as SOC rises. A single-band profile therefore uses an empty breakpoint list and one power value:
+Each direction profile contains `soc_breakpoints` and `power_max`. Breakpoints are finite SOC fractions in the closed interval `[0, 1]`, are strictly increasing, and divide the SOC range into bands. `power_max` contains one finite power limit in watts per band, so it has exactly one more value than `soc_breakpoints`. Charge limits must be non-negative and non-increasing as SOC rises; discharge limits must be non-negative and non-decreasing. Charge and discharge band counts are independent. A single-band profile therefore uses an empty breakpoint list and one power value:
 
 ```json
 {
@@ -324,16 +324,27 @@ Each charge profile contains `soc_breakpoints` and `power_max`. Breakpoints are 
       "charge": {
         "soc_breakpoints": [0.8, 0.95],
         "power_max": [5000, 3000, 1000]
+      },
+      "discharge": {
+        "soc_breakpoints": [0.2],
+        "power_max": [500, 5000]
       }
     },
-    {}
+    {
+      "discharge": {
+        "soc_breakpoints": [],
+        "power_max": [1200]
+      }
+    }
   ]
 }
 ```
 
-The optimizer selects each interval's charge band from that battery's predicted SOC at the end of the interval. The higher-SOC, lower-power band applies when predicted SOC equals a breakpoint, so an interval that crosses a breakpoint uses the conservative cap for the full interval. The selected profile value cannot raise `battery_charge_power_max`; the lower limit applies. Existing maximum-SOC and stored-energy constraints remain independent and may reduce delivered charge below both power limits.
+The optimizer selects each interval's charge and discharge bands from that battery's predicted SOC at the end of the interval. At a breakpoint, the conservative lower-power side applies: the higher-SOC band for charge and the lower-SOC band for discharge. An interval that crosses a breakpoint therefore uses the reduced cap for the full interval. A forecast discharge can restore a later high charge limit, and a forecast recharge can restore a later high discharge limit.
 
-Runtime requests follow replacement rather than nested-merge semantics. Omitting `battery_soc_power_profiles`, or passing top-level JSON `null`, inherits the static configuration. A non-null list replaces it completely and must still contain exactly one object per battery. Use a complete list of empty objects, such as `[{}, {}]`, to request scalar-only behavior for that optimization.
+The selected profile value cannot raise the corresponding `battery_charge_power_max` or `battery_discharge_power_max`; the lower limit applies. Existing maximum-SOC headroom and minimum-SOC or planning-reserve constraints remain independent and may reduce delivered power below both limits.
+
+Runtime requests follow replacement rather than nested-merge semantics. Omitting `battery_soc_power_profiles`, or passing top-level JSON `null`, inherits the static configuration. A non-null list replaces it completely and must still contain exactly one object per battery. An omitted direction inside a replacement entry is disabled for that entry; it is not inherited from static configuration. Use a complete list of empty objects, such as `[{}, {}]`, to request scalar-only behavior for that optimization.
 
 The same shapes are accepted when overriding these parameters at runtime, and a runtime value always wins over the configured one. Note that this includes the broadcast: with `number_of_batteries` greater than 1, a runtime scalar replaces the configured value for every battery, even when the configuration held a per-battery list. So a payload that passes an aggregate value like `battery_charge_power_max: 4200` on a two-battery plant silently turns per-unit limits of `[2500, 2400]` into `[4200, 4200]`. When the masked configured list held genuinely distinct per-battery values, a warning is logged naming the parameter and both values. If you run more than one battery, pass runtime battery parameters as lists of `number_of_batteries` entries.
 

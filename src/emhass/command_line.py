@@ -398,9 +398,12 @@ class OptimizationCache:
             inverter_is_hybrid=plant_conf.get("inverter_is_hybrid", False),
             compute_curtailment=plant_conf.get("compute_curtailment", False),
             battery_soc_power_profile_shape=tuple(
-                (True, len(entry["charge"]["power_max"]))
-                if entry.get("charge") is not None
-                else (False, 0)
+                tuple(
+                    (True, len(entry[direction]["power_max"]))
+                    if entry.get(direction) is not None
+                    else (False, 0)
+                    for direction in ("charge", "discharge")
+                )
                 for entry in plant_conf.get("battery_soc_power_profiles", []) or []
             ),
             optimization_time_step_s=to_seconds(retrieve_hass_conf.get("optimization_time_step")),

@@ -191,7 +191,7 @@ class TestBuildSpec(unittest.TestCase):
         self.assertEqual(schema["type"], "object")
         self.assertTrue(schema["additionalProperties"])
 
-    def test_battery_soc_power_profiles_schema_is_nullable_and_charge_only(self):
+    def test_battery_soc_power_profiles_schema_is_nullable_and_direction_independent(self):
         schema = gen.build_spec()["components"]["schemas"]["Config"]["properties"][
             "battery_soc_power_profiles"
         ]
@@ -201,21 +201,22 @@ class TestBuildSpec(unittest.TestCase):
         self.assertEqual(item["type"], "object")
         self.assertFalse(item["additionalProperties"])
         self.assertNotIn("required", item)
-        self.assertEqual(set(item["properties"]), {"charge"})
-        charge = item["properties"]["charge"]
-        self.assertEqual(charge["type"], "object")
-        self.assertFalse(charge["additionalProperties"])
-        self.assertEqual(
-            set(charge["required"]), {"soc_breakpoints", "power_max"}
-        )
-        self.assertEqual(
-            charge["properties"]["soc_breakpoints"]["items"],
-            {"type": "number", "minimum": 0, "maximum": 1},
-        )
-        self.assertEqual(
-            charge["properties"]["power_max"]["items"],
-            {"type": "number", "minimum": 0},
-        )
+        self.assertEqual(set(item["properties"]), {"charge", "discharge"})
+        for direction in ("charge", "discharge"):
+            profile = item["properties"][direction]
+            self.assertEqual(profile["type"], "object")
+            self.assertFalse(profile["additionalProperties"])
+            self.assertEqual(
+                set(profile["required"]), {"soc_breakpoints", "power_max"}
+            )
+            self.assertEqual(
+                profile["properties"]["soc_breakpoints"]["items"],
+                {"type": "number", "minimum": 0, "maximum": 1},
+            )
+            self.assertEqual(
+                profile["properties"]["power_max"]["items"],
+                {"type": "number", "minimum": 0},
+            )
 
     def test_battery_soc_power_profiles_schema_rejects_empty_lists(self):
         schema = gen.build_spec()["components"]["schemas"]["Config"]["properties"][
@@ -223,8 +224,11 @@ class TestBuildSpec(unittest.TestCase):
         ]
 
         self.assertEqual(schema["minItems"], 1)
-        power_max = schema["items"]["properties"]["charge"]["properties"]["power_max"]
-        self.assertEqual(power_max["minItems"], 1)
+        for direction in ("charge", "discharge"):
+            power_max = schema["items"]["properties"][direction]["properties"][
+                "power_max"
+            ]
+            self.assertEqual(power_max["minItems"], 1)
 
 
 class TestOpenapiArtifact(unittest.TestCase):

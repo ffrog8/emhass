@@ -3568,12 +3568,10 @@ BATT_WEIGHT_PARAMS: tuple[str, ...] = ("weight_battery_charge", "weight_battery_
 
 
 def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict]:
-    """Validate and normalize charge-only SOC power profiles to battery order.
+    """Validate and normalize charge/discharge SOC power profiles to battery order.
 
     The list is positional and replaces as a whole at runtime. An empty object
-    disables profiling for that battery. Only ``charge`` is supported in this
-    capability slice; accepting ``discharge`` here would expose configuration
-    that the optimizer does not yet enforce.
+    disables profiling for that battery.
     """
     if value is None:
         return [{} for _ in range(num_batteries)]
@@ -3590,74 +3588,91 @@ def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict
         context = f"battery_soc_power_profiles battery {battery_index}"
         if not isinstance(entry, dict):
             raise ValueError(f"{context} must be an object")
-        unsupported_entry_members = sorted(set(entry) - {"charge"})
+        unsupported_entry_members = sorted(set(entry) - {"charge", "discharge"})
         if unsupported_entry_members:
             raise ValueError(
-                f"{context} has unsupported member {unsupported_entry_members[0]!r}; "
-                "this release supports only 'charge'"
+                f"{context} has unsupported member {unsupported_entry_members[0]!r}"
             )
-        if "charge" not in entry:
-            normalized.append({})
-            continue
+        normalized_entry = {}
+        for direction in ("charge", "discharge"):
+            if direction not in entry:
+                continue
+            profile = entry[direction]
+            if not isinstance(profile, dict):
+                raise ValueError(f"{context} {direction} must be an object, not null")
+            unsupported_profile_members = sorted(
+                set(profile) - {"soc_breakpoints", "power_max"}
+            )
+            if unsupported_profile_members:
+                raise ValueError(
+                    f"{context} {direction} has unsupported member "
+                    f"{unsupported_profile_members[0]!r}"
+                )
+            missing_members = {"soc_breakpoints", "power_max"} - set(profile)
+            if missing_members:
+                raise ValueError(
+                    f"{context} {direction} is missing required member "
+                    f"{sorted(missing_members)[0]!r}"
+                )
 
-        charge = entry["charge"]
-        if not isinstance(charge, dict):
-            raise ValueError(f"{context} charge must be an object, not null")
-        unsupported_charge_members = sorted(set(charge) - {"soc_breakpoints", "power_max"})
-        if unsupported_charge_members:
-            raise ValueError(
-                f"{context} charge has unsupported member {unsupported_charge_members[0]!r}"
-            )
-        missing_members = {"soc_breakpoints", "power_max"} - set(charge)
-        if missing_members:
-            raise ValueError(
-                f"{context} charge is missing required member {sorted(missing_members)[0]!r}"
-            )
+            soc_breakpoints = profile["soc_breakpoints"]
+            power_max = profile["power_max"]
+            if not isinstance(soc_breakpoints, list):
+                raise ValueError(f"{context} {direction} soc_breakpoints must be a list")
+            if not isinstance(power_max, list):
+                raise ValueError(f"{context} {direction} power_max must be a list")
+            if len(power_max) != len(soc_breakpoints) + 1:
+                raise ValueError(
+                    f"{context} {direction} must provide exactly one more power_max value "
+                    "than soc_breakpoints"
+                )
 
-        soc_breakpoints = charge["soc_breakpoints"]
-        power_max = charge["power_max"]
-        if not isinstance(soc_breakpoints, list):
-            raise ValueError(f"{context} charge soc_breakpoints must be a list")
-        if not isinstance(power_max, list):
-            raise ValueError(f"{context} charge power_max must be a list")
-        if len(power_max) != len(soc_breakpoints) + 1:
-            raise ValueError(
-                f"{context} charge must provide exactly one more power_max value "
-                "than soc_breakpoints"
-            )
-
-        for name, values in (
-            ("soc_breakpoints", soc_breakpoints),
-            ("power_max", power_max),
-        ):
-            if any(
-                isinstance(item, bool)
-                or not isinstance(item, int | float)
-                or not np.isfinite(item)
-                for item in values
+            for name, values in (
+                ("soc_breakpoints", soc_breakpoints),
+                ("power_max", power_max),
             ):
-                raise ValueError(f"{context} charge {name} values must be finite numbers")
-        if any(item < 0 or item > 1 for item in soc_breakpoints):
-            raise ValueError(
-                f"{context} charge soc_breakpoints must be in the closed interval [0, 1]"
-            )
-        if any(left >= right for left, right in zip(soc_breakpoints, soc_breakpoints[1:])):
-            raise ValueError(f"{context} charge soc_breakpoints must be strictly increasing")
-        if any(item < 0 for item in power_max):
-            raise ValueError(f"{context} charge power_max values must be non-negative")
-        if any(left < right for left, right in zip(power_max, power_max[1:])):
-            raise ValueError(
-                f"{context} charge power_max values must be non-increasing as SOC rises"
-            )
+                if any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int | float)
+                    or not np.isfinite(item)
+                    for item in values
+                ):
+                    raise ValueError(
+                        f"{context} {direction} {name} values must be finite numbers"
+                    )
+            if any(item < 0 or item > 1 for item in soc_breakpoints):
+                raise ValueError(
+                    f"{context} {direction} soc_breakpoints must be in the "
+                    "closed interval [0, 1]"
+                )
+            if any(
+                left >= right for left, right in zip(soc_breakpoints, soc_breakpoints[1:])
+            ):
+                raise ValueError(
+                    f"{context} {direction} soc_breakpoints must be strictly increasing"
+                )
+            if any(item < 0 for item in power_max):
+                raise ValueError(
+                    f"{context} {direction} power_max values must be non-negative"
+                )
+            if direction == "charge" and any(
+                left < right for left, right in zip(power_max, power_max[1:])
+            ):
+                raise ValueError(
+                    f"{context} charge power_max values must be non-increasing as SOC rises"
+                )
+            if direction == "discharge" and any(
+                left > right for left, right in zip(power_max, power_max[1:])
+            ):
+                raise ValueError(
+                    f"{context} discharge power_max values must be non-decreasing as SOC rises"
+                )
 
-        normalized.append(
-            {
-                "charge": {
-                    "soc_breakpoints": [float(item) for item in soc_breakpoints],
-                    "power_max": [float(item) for item in power_max],
-                }
+            normalized_entry[direction] = {
+                "soc_breakpoints": [float(item) for item in soc_breakpoints],
+                "power_max": [float(item) for item in power_max],
             }
-        )
+        normalized.append(normalized_entry)
     return normalized
 
 

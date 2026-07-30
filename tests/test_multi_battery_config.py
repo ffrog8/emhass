@@ -137,13 +137,34 @@ def test_battery_soc_power_profiles_accept_charge_profile_per_battery():
     assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
 
 
+def test_battery_soc_power_profiles_accept_independent_charge_and_discharge_profiles():
+    profiles = [
+        {
+            "charge": {
+                "soc_breakpoints": [0.8],
+                "power_max": [5000, 1000],
+            },
+            "discharge": {
+                "soc_breakpoints": [0.2, 0.4],
+                "power_max": [500, 2000, 5000],
+            },
+        },
+        {"discharge": {"soc_breakpoints": [], "power_max": [1200]}},
+    ]
+
+    params = build_params(
+        {"number_of_batteries": 2, "battery_soc_power_profiles": profiles}
+    )
+
+    assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
+
+
 @pytest.mark.parametrize(
     ("profiles", "message"),
     [
         ({}, "must be a list"),
         ([{}], "number_of_batteries=2"),
         ([{}, []], "battery 1 must be an object"),
-        ([{"discharge": {}}, {}], "unsupported member 'discharge'"),
         ([{"charge": None}, {}], "battery 0 charge must be an object"),
         ([{"charge": {"power_max": [1000]}}, {}], "soc_breakpoints"),
         (
@@ -183,6 +204,37 @@ def test_battery_soc_power_profiles_accept_charge_profile_per_battery():
 def test_battery_soc_power_profiles_reject_malformed_charge_contract(profiles, message):
     with pytest.raises(ValueError, match=re.escape(message)):
         build_params({"number_of_batteries": 2, "battery_soc_power_profiles": profiles})
+
+
+@pytest.mark.parametrize(
+    ("profile", "message"),
+    [
+        (None, "battery 0 discharge must be an object"),
+        ({"power_max": [1000]}, "soc_breakpoints"),
+        (
+            {"soc_breakpoints": [], "power_max": [1000], "other": 1},
+            "unsupported member 'other'",
+        ),
+        ({"soc_breakpoints": [0.2], "power_max": [1000]}, "exactly one more power_max"),
+        (
+            {"soc_breakpoints": [0.2, 0.2], "power_max": [1, 2, 3]},
+            "strictly increasing",
+        ),
+        ({"soc_breakpoints": [-0.1], "power_max": [1, 2]}, "closed interval [0, 1]"),
+        ({"soc_breakpoints": [float("nan")], "power_max": [1, 2]}, "finite"),
+        ({"soc_breakpoints": [0.2], "power_max": [1, float("inf")]}, "finite"),
+        ({"soc_breakpoints": [0.2], "power_max": [-1, 2]}, "non-negative"),
+        ({"soc_breakpoints": [0.2], "power_max": [2, 1]}, "non-decreasing"),
+    ],
+)
+def test_battery_soc_power_profiles_reject_malformed_discharge_contract(profile, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        build_params(
+            {
+                "number_of_batteries": 2,
+                "battery_soc_power_profiles": [{"discharge": profile}, {}],
+            }
+        )
 
 
 # ──────────── per-battery array broadcast / validate (check_batt_params) ────────
@@ -658,8 +710,17 @@ def test_runtime_battery_soc_power_profiles_non_null_list_replaces_without_neste
         {
             "number_of_batteries": 2,
             "battery_soc_power_profiles": [
-                {"charge": {"soc_breakpoints": [0.8], "power_max": [3000, 1000]}},
-                {"charge": {"soc_breakpoints": [], "power_max": [1500]}},
+                {
+                    "charge": {
+                        "soc_breakpoints": [0.8],
+                        "power_max": [3000, 1000],
+                    },
+                    "discharge": {
+                        "soc_breakpoints": [0.3],
+                        "power_max": [500, 3000],
+                    },
+                },
+                {"discharge": {"soc_breakpoints": [], "power_max": [1500]}},
             ],
         }
     )
@@ -697,11 +758,11 @@ def test_runtime_battery_soc_power_profiles_all_empty_objects_restore_scalar_onl
     "replacement",
     [
         [{}],
-        [{"discharge": {"soc_breakpoints": [], "power_max": [1000]}}, {}],
         [{"charge": None}, {}],
+        [{"discharge": None}, {}],
     ],
 )
-def test_runtime_battery_soc_power_profiles_reject_partial_or_unsupported_replacement(
+def test_runtime_battery_soc_power_profiles_reject_partial_or_null_replacement(
     replacement,
 ):
     base = build_params({"number_of_batteries": 2})
