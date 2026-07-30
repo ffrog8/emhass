@@ -633,6 +633,13 @@
       "default_value": 1,
       "unit": "count"
     },
+    "battery_soc_power_profiles": {
+      "friendly_name": "Battery SOC charge power profiles",
+      "Description": "Optional JSON list with exactly one object per configured battery. Use {} for no profile. A charge profile contains soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative, non-increasing value in watts. Only the charge member is supported; discharge profiles are rejected.",
+      "input": "array.object",
+      "default_value": null,
+      "unit": "none"
+    },
     "set_nocharge_from_grid": {
       "friendly_name": "Forbid charging battery from grid",
       "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV",

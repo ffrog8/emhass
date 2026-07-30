@@ -483,6 +483,7 @@ function buildParamElement(
       //format selects later
       break;
     case "object":
+    case "array.object":
     case "array.array.float":
       type = "text";
       placeholder = parameter_definition_object["default_value"] === null
@@ -531,7 +532,7 @@ function buildParamElement(
           `;
     }
     // The nested-object path below is designed only for load_peak_hour_periods.
-    if (parameter_definition_object["input"] === "object") {
+    if (["object", "array.object"].includes(parameter_definition_object["input"])) {
       return `<input class="param_input" type="text" placeholder="${placeholder}" value="${JSON.stringify(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')}">`;
     }
     //for items such as load_peak_hour_periods (object of objects with arrays)
@@ -855,7 +856,7 @@ async function saveConfiguration(param_definitions) {
           //build parameters using values extracted from param_inputs
 
           // object-type: JSON.parse the text-box value; treat "" and "null" as JSON null
-          if (parameter_definition_object["input"] === "object") {
+          if (["object", "array.object"].includes(parameter_definition_object["input"])) {
             const raw = (param_values[0] ?? "").toString();
             if (raw === "" || raw === "null") {
               config[parameter_definition_name] = null;

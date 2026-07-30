@@ -3287,6 +3287,49 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         # Cache key should be the same (hit)
         self.assertEqual(stats_after_second["cache_key"], first_cache_key)
 
+    async def test_mpc_cache_hit_refreshes_same_shape_charge_profile_coefficients(self):
+        base_runtime = {
+            "set_use_battery": True,
+            "battery_charge_power_max": 5000,
+            "pv_power_forecast": [5000.0] * 10,
+            "load_power_forecast": [0.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.4,
+            "soc_final": 0.7,
+        }
+        first_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [], "power_max": [1000.0]}}
+            ],
+        }
+        first_input = await self._run_set_input(first_runtime)
+        first_opt = first_input["opt"]
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+
+        second_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [], "power_max": [500.0]}}
+            ],
+        }
+        second_input = await self._run_set_input(second_runtime)
+        second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_opt)
+        self.assertAlmostEqual(
+            float(
+                second_input["opt"]
+                .param_battery_charge_profile_power_max[0]
+                .value[0]
+            ),
+            500.0,
+        )
+        self.assertGreater(float((-first_result["P_batt"]).max()), 500.0)
+        self.assertLessEqual(float((-second_result["P_batt"]).max()), 500.0 + 1e-5)
+
     async def test_mpc_cache_hit_with_different_time_windows(self):
         """Test that changing start/end timesteps results in cache HIT (parameterized)."""
         costfun = "profit"

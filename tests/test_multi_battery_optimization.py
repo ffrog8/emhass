@@ -860,6 +860,58 @@ class TestMultiBatteryStructuralCache(unittest.TestCase):
         )
         self.assertIsNone(result, "number_of_batteries change should invalidate the cache")
 
+    def test_charge_profile_shape_is_structural_but_coefficients_are_not(self):
+        base_profiles = [
+            {"charge": {"soc_breakpoints": [0.8], "power_max": [3000.0, 1000.0]}},
+            {},
+        ]
+        base_plant_conf = {
+            **self.plant_conf,
+            "number_of_batteries": 2,
+            "battery_soc_power_profiles": base_profiles,
+        }
+        base_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            base_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+        )
+        recalibrated_plant_conf = {
+            **base_plant_conf,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [0.7], "power_max": [2500.0, 800.0]}},
+                {},
+            ],
+        }
+        recalibrated_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            recalibrated_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+        )
+        resized_plant_conf = {
+            **base_plant_conf,
+            "battery_soc_power_profiles": [
+                {
+                    "charge": {
+                        "soc_breakpoints": [0.7, 0.9],
+                        "power_max": [2500.0, 1600.0, 800.0],
+                    }
+                },
+                {},
+            ],
+        }
+        resized_key = OptimizationCache._compute_cache_key(
+            self.optim_conf,
+            resized_plant_conf,
+            self.costfun,
+            self.retrieve_hass_conf,
+        )
+
+        self.assertEqual(base_key.battery_soc_power_profile_shape, ((True, 2), (False, 0)))
+        self.assertEqual(base_key, recalibrated_key)
+        self.assertNotEqual(base_key, resized_key)
+
 
 class TestMultiBatteryUpdatePowerLimits(unittest.TestCase):
     """Per-k Parameter update path for update_battery_power_limits (#610):
@@ -890,6 +942,391 @@ class TestMultiBatteryUpdatePowerLimits(unittest.TestCase):
         self.assertEqual(opt.param_battery_discharge_power_max[1].value, 5678)
         self.assertEqual(opt.param_battery_charge_power_max[0].value, 1111)
         self.assertEqual(opt.param_battery_charge_power_max[1].value, 2222)
+
+
+class TestBatterySocChargeProfiles(unittest.TestCase):
+    def test_single_band_profile_caps_observable_charge_schedule(self):
+        opt = build_optimization(
+            plant_overrides={
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {"charge": {"soc_breakpoints": [], "power_max": [1000.0]}}
+                ],
+            }
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {
+                "unit_load_cost": [0.30] * 4,
+                "unit_prod_price": [0.0] * 4,
+            },
+            index=index,
+        )
+        p_pv = pd.Series([5000.0] * 4, index=index)
+        p_load = pd.Series([0.0] * 4, index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.6
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(float((-result["P_batt"]).max()), 1000.0 + 1e-5)
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[-1]), 0.6, delta=1e-5)
+
+    def test_charge_crossing_breakpoint_uses_high_soc_cap_for_full_interval(self):
+        opt = build_optimization(
+            plant_overrides={
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.8],
+                            "power_max": [5000.0, 1000.0],
+                        }
+                    }
+                ],
+            }
+        )
+        index = pd.date_range("2026-02-01", periods=2, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 2, "unit_prod_price": [0.0] * 2},
+            index=index,
+        )
+        p_pv = pd.Series([5000.0] * 2, index=index)
+        p_load = pd.Series([0.0] * 2, index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.79, soc_final=0.95
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(float((-result["P_batt"]).max()), 1000.0 + 1e-5)
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[-1]), 0.89, delta=1e-5)
+
+    def test_nominal_breakpoint_selects_conservative_high_soc_band(self):
+        opt = build_optimization(
+            optim_overrides={
+                "set_nocharge_from_grid": True,
+                "set_nodischarge_to_grid": True,
+            },
+            plant_overrides={
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.8],
+                            "power_max": [1000.0, 500.0],
+                        }
+                    }
+                ],
+            },
+        )
+        index = pd.date_range("2026-02-01", periods=2, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 2, "unit_prod_price": [0.0] * 2},
+            index=index,
+        )
+        p_pv = pd.Series([500.0, 0.0], index=index)
+        p_load = pd.Series([0.0, 0.0], index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.775, soc_final=0.8
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[0]), 0.8, delta=1e-7)
+        selectors = opt.vars["battery_charge_profile_selectors"][0].value
+        self.assertAlmostEqual(float(selectors[0, 0]), 1.0, delta=1e-7)
+
+    def test_forecast_discharge_restores_later_high_charge_capability(self):
+        opt = build_optimization(
+            optim_overrides={
+                "set_nocharge_from_grid": True,
+                "set_nodischarge_to_grid": True,
+            },
+            plant_overrides={
+                "maximum_power_from_grid": 0,
+                "battery_charge_power_max": 5000,
+                "battery_discharge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.8],
+                            "power_max": [3000.0, 500.0],
+                        }
+                    }
+                ],
+            },
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 4, "unit_prod_price": [0.0] * 4},
+            index=index,
+        )
+        p_pv = pd.Series([0.0, 5000.0, 5000.0, 5000.0], index=index)
+        p_load = pd.Series([5000.0, 0.0, 0.0, 0.0], index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.9, soc_final=0.9
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertAlmostEqual(float(result["P_batt"].iloc[0]), 5000.0, delta=1e-5)
+        self.assertGreater(float(-result["P_batt"].iloc[1]), 2500.0)
+        self.assertLess(float(result["SOC_opt"].iloc[1]), 0.8)
+
+    def test_charge_profile_problem_remains_dpp_compliant(self):
+        opt = build_optimization(
+            plant_overrides={
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.7, 0.9],
+                            "power_max": [3000.0, 1500.0, 500.0],
+                        }
+                    }
+                ]
+            }
+        )
+        index, p_pv, p_load, df_input = make_pin_scenario()
+
+        opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
+        )
+
+        self.assertTrue(opt.prob.is_dcp(dpp=True))
+
+    def test_same_shape_profile_coefficients_update_without_rebuilding_problem(self):
+        opt = build_optimization(
+            plant_overrides={
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.8],
+                            "power_max": [1000.0, 500.0],
+                        }
+                    }
+                ],
+            }
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {
+                "unit_load_cost": [0.30] * 4,
+                "unit_prod_price": [0.0] * 4,
+            },
+            index=index,
+        )
+        p_pv = pd.Series([5000.0] * 4, index=index)
+        p_load = pd.Series([0.0] * 4, index=index)
+        first_result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.6
+        )
+        problem = opt.prob
+
+        opt.update_battery_soc_power_profiles(
+            [
+                {
+                    "charge": {
+                        "soc_breakpoints": [0.45],
+                        "power_max": [800.0, 300.0],
+                    }
+                }
+            ]
+        )
+        second_result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.6
+        )
+
+        self.assertIs(opt.prob, problem)
+        self.assertAlmostEqual(
+            float(opt.param_battery_charge_profile_power_max[0].value[0]),
+            800.0,
+        )
+        self.assertAlmostEqual(
+            float(opt.param_battery_charge_profile_breakpoints[0].value[0]),
+            0.45,
+        )
+        self.assertAlmostEqual(float(first_result["SOC_opt"].iloc[-1]), 0.6, delta=1e-5)
+        self.assertAlmostEqual(float(second_result["SOC_opt"].iloc[-1]), 0.485, delta=1e-5)
+        self.assertLessEqual(float((-second_result["P_batt"]).max()), 800.0 + 1e-5)
+
+    def test_profile_cannot_raise_existing_hardware_charge_ceiling(self):
+        opt = build_optimization(
+            plant_overrides={
+                "battery_charge_power_max": 750,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {"charge": {"soc_breakpoints": [], "power_max": [10000.0]}}
+                ],
+            }
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 4, "unit_prod_price": [0.0] * 4},
+            index=index,
+        )
+        p_pv = pd.Series([5000.0] * 4, index=index)
+        p_load = pd.Series([0.0] * 4, index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.7
+        )
+
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(float((-result["P_batt"]).max()), 750.0 + 1e-5)
+
+    def test_stored_energy_headroom_can_bind_below_selected_profile_cap(self):
+        opt = build_optimization(
+            optim_overrides={
+                "set_nocharge_from_grid": True,
+                "set_nodischarge_to_grid": True,
+            },
+            plant_overrides={
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 0.9,
+                "battery_soc_power_profiles": [
+                    {"charge": {"soc_breakpoints": [], "power_max": [5000.0]}}
+                ],
+            },
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 4, "unit_prod_price": [0.0] * 4},
+            index=index,
+        )
+        p_pv = pd.Series([5000.0] * 4, index=index)
+        p_load = pd.Series([0.0] * 4, index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.89, soc_final=0.9
+        )
+
+        delivered_charge_wh = float((-result["P_batt"]).sum()) * 0.5
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertAlmostEqual(delivered_charge_wh, 100.0, delta=1e-4)
+        self.assertLess(float((-result["P_batt"]).max()), 5000.0)
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[-1]), 0.9, delta=1e-7)
+
+    def test_empty_profiles_add_no_variables_rows_or_output_changes(self):
+        index, p_pv, p_load, df_input = make_pin_scenario()
+        without_profile = build_optimization()
+        explicit_empty = build_optimization(
+            plant_overrides={"battery_soc_power_profiles": [{}]}
+        )
+
+        without_result = without_profile.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
+        )
+        empty_result = explicit_empty.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
+        )
+
+        without_metrics = without_profile.prob.size_metrics
+        empty_metrics = explicit_empty.prob.size_metrics
+        self.assertEqual(
+            empty_metrics.num_scalar_variables,
+            without_metrics.num_scalar_variables,
+        )
+        self.assertEqual(
+            empty_metrics.num_scalar_eq_constr + empty_metrics.num_scalar_leq_constr,
+            without_metrics.num_scalar_eq_constr
+            + without_metrics.num_scalar_leq_constr,
+        )
+        self.assertFalse(
+            any(
+                variable.name().startswith("battery_charge_profile_selectors")
+                for variable in explicit_empty.prob.variables()
+            )
+        )
+        self.assertEqual(list(empty_result.columns), list(without_result.columns))
+        self.assertEqual(
+            empty_result["optim_status"].tolist(),
+            without_result["optim_status"].tolist(),
+        )
+        np.testing.assert_allclose(
+            empty_result.select_dtypes(include=[np.number]).to_numpy(),
+            without_result.select_dtypes(include=[np.number]).to_numpy(),
+            atol=1e-7,
+        )
+
+    def test_profile_model_size_matches_documented_selector_and_row_formulas(self):
+        index, p_pv, p_load, df_input = make_pin_scenario()
+        common_overrides = {
+            "number_of_batteries": 2,
+            "battery_nominal_energy_capacity": [10000, 10000],
+            "battery_discharge_power_max": [5000, 5000],
+            "battery_charge_power_max": [5000, 5000],
+            "battery_discharge_efficiency": [1.0, 1.0],
+            "battery_charge_efficiency": [1.0, 1.0],
+            "battery_minimum_state_of_charge": [0.3, 0.3],
+            "battery_maximum_state_of_charge": [0.9, 0.9],
+            "battery_target_state_of_charge": [0.5, 0.5],
+            "battery_stress_cost": [0.0, 0.0],
+        }
+        without_profile = build_optimization(plant_overrides=common_overrides)
+        with_profile = build_optimization(
+            plant_overrides={
+                **common_overrides,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.6, 0.8],
+                            "power_max": [5000.0, 3000.0, 1000.0],
+                        }
+                    },
+                    {"charge": {"soc_breakpoints": [], "power_max": [4000.0]}},
+                ],
+            }
+        )
+        without_profile.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=[0.4, 0.4], soc_final=[0.5, 0.5]
+        )
+        with_profile.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=[0.4, 0.4], soc_final=[0.5, 0.5]
+        )
+
+        def boolean_count(opt):
+            return sum(
+                int(np.prod(variable.shape))
+                for variable in opt.prob.variables()
+                if variable.attributes["boolean"]
+            )
+
+        timesteps = len(index)
+        breakpoints = 2
+        directions = 2
+        expected_selectors = timesteps * breakpoints
+        expected_rows = 2 * timesteps * breakpoints + timesteps * directions
+        without_metrics = without_profile.prob.size_metrics
+        with_metrics = with_profile.prob.size_metrics
+
+        self.assertEqual(
+            boolean_count(with_profile) - boolean_count(without_profile),
+            expected_selectors,
+        )
+        self.assertEqual(
+            with_metrics.num_scalar_variables
+            - without_metrics.num_scalar_variables,
+            expected_selectors,
+        )
+        self.assertEqual(
+            (
+                with_metrics.num_scalar_eq_constr
+                + with_metrics.num_scalar_leq_constr
+            )
+            - (
+                without_metrics.num_scalar_eq_constr
+                + without_metrics.num_scalar_leq_constr
+            ),
+            expected_rows,
+        )
 
 
 if __name__ == "__main__":

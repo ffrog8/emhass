@@ -69,6 +69,7 @@ _INPUT_TYPE_TO_PY_TYPES: dict[str, tuple[type, ...]] = {
     "array.boolean": (list, type(None)),
     "array.time": (list, type(None)),
     "array.array.float": (list, type(None)),
+    "array.object": (list, type(None)),
     "object": (dict, type(None)),
 }
 

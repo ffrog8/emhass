@@ -71,6 +71,11 @@ CURTAILMENT_TIEBREAK_EPS = 1e-7
 # multi-battery.
 BATTERY_TIEBREAK_EPS = 1e-9
 
+# Exact SOC step-profile selectors leave this gap below each nominal
+# breakpoint. Equality is therefore forced onto the conservative high-SOC
+# band while staying outside the solver's feasibility tolerance.
+SOC_POWER_PROFILE_GUARD = 1e-4
+
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
 # on, importing from the grid while the battery is still above its minimum SoC is
 # penalized at this multiple of the prevailing import tariff. Making it a soft
@@ -305,6 +310,8 @@ class Optimization:
             self.param_battery_charge_power_max[k].value = float(_charge_max_list[k])
             self.param_battery_discharge_power_max[k].value = float(_discharge_max_list[k])
 
+        self._init_battery_soc_power_profile_params()
+
         # SOC recovery parameters
         self._init_soc_recovery_params()
 
@@ -322,6 +329,36 @@ class Optimization:
 
         # Note: The self.prob object will be constructed in a subsequent step
         self.prob = None
+
+    def _init_battery_soc_power_profile_params(self) -> None:
+        """Create fixed-shape charge-profile coefficient parameters."""
+        profiles = self.plant_conf.get("battery_soc_power_profiles") or [
+            {} for _ in range(self.n_batt)
+        ]
+        self.param_battery_charge_profile_breakpoints = []
+        self.param_battery_charge_profile_power_max = []
+        for k, entry in enumerate(profiles):
+            charge = entry.get("charge")
+            if charge is None:
+                self.param_battery_charge_profile_breakpoints.append(None)
+                self.param_battery_charge_profile_power_max.append(None)
+                continue
+            breakpoints = charge["soc_breakpoints"]
+            breakpoint_param = (
+                cp.Parameter(len(breakpoints), name=f"battery_charge_profile_breakpoints_{k}")
+                if breakpoints
+                else None
+            )
+            if breakpoint_param is not None:
+                breakpoint_param.value = breakpoints
+            power_param = cp.Parameter(
+                len(charge["power_max"]),
+                nonneg=True,
+                name=f"battery_charge_profile_power_max_{k}",
+            )
+            power_param.value = charge["power_max"]
+            self.param_battery_charge_profile_breakpoints.append(breakpoint_param)
+            self.param_battery_charge_profile_power_max.append(power_param)
 
     def _init_soc_recovery_params(self) -> None:
         """Initialize CVXPY parameters used for out-of-band SOC recovery.
@@ -1188,6 +1225,17 @@ class Optimization:
             if self.param_battery_discharge_power_max[k].value != new_discharge_max:
                 self.param_battery_discharge_power_max[k].value = new_discharge_max
 
+    def update_battery_soc_power_profiles(self, profiles: list[dict]) -> None:
+        """Refresh charge-profile coefficients for the compiled profile shape."""
+        for k, entry in enumerate(profiles):
+            charge = entry.get("charge")
+            if charge is None:
+                continue
+            breakpoint_param = self.param_battery_charge_profile_breakpoints[k]
+            if breakpoint_param is not None:
+                breakpoint_param.value = charge["soc_breakpoints"]
+            self.param_battery_charge_profile_power_max[k].value = charge["power_max"]
+
     def update_thermal_start_temps(self, optim_conf: dict) -> None:
         """
         Update thermal start temperature parameters from optim_conf.
@@ -1616,6 +1664,7 @@ class Optimization:
             vars_dict["soc_high_recovered"] = []
             vars_dict["soc_deficit_cost"] = []
             vars_dict["soc_surplus_cost"] = []
+            vars_dict["battery_charge_profile_selectors"] = []
             for k in range(self.n_batt):
                 p_sto_pos_k = cp.Variable(n, nonneg=True, name=f"p_sto_pos_{k}")
                 constraints.append(p_sto_pos_k <= self.param_battery_discharge_power_max[k])
@@ -1636,6 +1685,16 @@ class Optimization:
                 )
                 vars_dict["soc_surplus_cost"].append(
                     cp.Variable(n, nonneg=True, name=f"soc_surplus_cost_{k}")
+                )
+                breakpoint_param = self.param_battery_charge_profile_breakpoints[k]
+                vars_dict["battery_charge_profile_selectors"].append(
+                    cp.Variable(
+                        (n, breakpoint_param.size),
+                        boolean=True,
+                        name=f"battery_charge_profile_selectors_{k}",
+                    )
+                    if breakpoint_param is not None
+                    else None
                 )
             # Terminal-SoC slacks: the signed miss on the horizon's net energy change,
             # split into two non-negative parts so the deviation stays linear. Priced in
@@ -2316,6 +2375,32 @@ class Optimization:
             # (Subtracting because positive flow is Discharge/Depletion)
             current_stored_energy = (soc_init_k * cap) - cumulative_energy
             current_stored_energy_list.append(current_stored_energy)
+
+            charge_profile_power = self.param_battery_charge_profile_power_max[k]
+            if charge_profile_power is not None:
+                selected_charge_cap = charge_profile_power[0]
+                charge_profile_breakpoints = (
+                    self.param_battery_charge_profile_breakpoints[k]
+                )
+                charge_profile_selectors = self.vars[
+                    "battery_charge_profile_selectors"
+                ][k]
+                if charge_profile_breakpoints is not None:
+                    end_soc = current_stored_energy / cap
+                    for breakpoint_index in range(charge_profile_breakpoints.size):
+                        selector = charge_profile_selectors[:, breakpoint_index]
+                        breakpoint = charge_profile_breakpoints[breakpoint_index]
+                        constraints.append(
+                            end_soc
+                            <= breakpoint - SOC_POWER_PROFILE_GUARD + selector
+                        )
+                        constraints.append(end_soc >= breakpoint - (1 - selector))
+                        selected_charge_cap = selected_charge_cap + cp.multiply(
+                            charge_profile_power[breakpoint_index + 1]
+                            - charge_profile_power[breakpoint_index],
+                            selector,
+                        )
+                constraints.append(p_sto_neg[k] >= -selected_charge_cap)
 
             # Min/Max SOC bounds with a single recovery transition.
             # Before recovery the trajectory stays on the initial out-of-band side.

@@ -186,6 +186,7 @@ class OptimizationCacheKey:
     is_electric_load: tuple  # per-load electric-bus membership flag
     inverter_is_hybrid: bool
     compute_curtailment: bool
+    battery_soc_power_profile_shape: tuple
     optimization_time_step_s: float | None
     delta_forecast_daily_s: float | None
     num_timesteps: int | None
@@ -281,6 +282,7 @@ class OptimizationCache:
             "battery_target_state_of_charge",
             "battery_charge_power_max",
             "battery_discharge_power_max",
+            "battery_soc_power_profiles",
         }
         # Optim conf parameters that don't affect problem structure
         # (parameterized via CVXPY Parameters, solver options, or forecast method selection)
@@ -395,6 +397,12 @@ class OptimizationCache:
             is_electric_load=to_tuple(optim_conf.get("is_electric_load", [])),
             inverter_is_hybrid=plant_conf.get("inverter_is_hybrid", False),
             compute_curtailment=plant_conf.get("compute_curtailment", False),
+            battery_soc_power_profile_shape=tuple(
+                (True, len(entry["charge"]["power_max"]))
+                if entry.get("charge") is not None
+                else (False, 0)
+                for entry in plant_conf.get("battery_soc_power_profiles", []) or []
+            ),
             optimization_time_step_s=to_seconds(retrieve_hass_conf.get("optimization_time_step")),
             delta_forecast_daily_s=to_seconds(optim_conf.get("delta_forecast_daily")),
             num_timesteps=num_timesteps,
@@ -1554,6 +1562,9 @@ async def set_input_data_dict(
                 # constraints via cp.Parameter and need the runtime value
                 # propagated even on a cache hit.
                 opt.update_battery_power_limits(plant_conf)
+                opt.update_battery_soc_power_profiles(
+                    plant_conf["battery_soc_power_profiles"]
+                )
             # Update runtime-configurable solver options from optim_conf
             # These don't affect problem structure, so they're safe to update on cached object
             runtime_solver_opts = [

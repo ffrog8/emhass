@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
 
 import numpy as np
 import orjson
@@ -94,6 +95,94 @@ def test_number_of_batteries_defaults_to_one():
 def test_number_of_batteries_overridable_via_config():
     params = build_params({"number_of_batteries": 3})
     assert params["plant_conf"]["number_of_batteries"] == 3
+
+
+def test_battery_soc_power_profiles_omission_normalizes_to_one_empty_entry_per_battery():
+    params = build_params({"number_of_batteries": 3})
+
+    assert params["plant_conf"]["battery_soc_power_profiles"] == [{}, {}, {}]
+
+
+def test_battery_soc_power_profiles_static_schema_is_optional_json():
+    defaults = _default_config()
+    definitions = json.loads(
+        (root / "src/emhass/static/data/param_definitions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert "battery_soc_power_profiles" in defaults
+    assert defaults["battery_soc_power_profiles"] is None
+    definition = definitions["Battery"]["battery_soc_power_profiles"]
+    assert definition["input"] == "array.object"
+    assert definition["default_value"] is None
+    assert definition["unit"] == "none"
+
+
+def test_battery_soc_power_profiles_accept_charge_profile_per_battery():
+    profiles = [
+        {
+            "charge": {
+                "soc_breakpoints": [0.8, 0.95],
+                "power_max": [5000, 3000, 1000],
+            }
+        },
+        {},
+    ]
+
+    params = build_params(
+        {"number_of_batteries": 2, "battery_soc_power_profiles": profiles}
+    )
+
+    assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
+
+
+@pytest.mark.parametrize(
+    ("profiles", "message"),
+    [
+        ({}, "must be a list"),
+        ([{}], "number_of_batteries=2"),
+        ([{}, []], "battery 1 must be an object"),
+        ([{"discharge": {}}, {}], "unsupported member 'discharge'"),
+        ([{"charge": None}, {}], "battery 0 charge must be an object"),
+        ([{"charge": {"power_max": [1000]}}, {}], "soc_breakpoints"),
+        (
+            [{"charge": {"soc_breakpoints": [], "power_max": [1000], "other": 1}}, {}],
+            "unsupported member 'other'",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [0.8], "power_max": [1000]}}, {}],
+            "exactly one more power_max",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [0.8, 0.8], "power_max": [3, 2, 1]}}, {}],
+            "strictly increasing",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [1.1], "power_max": [3, 2]}}, {}],
+            "closed interval [0, 1]",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [float("nan")], "power_max": [3, 2]}}, {}],
+            "finite",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [0.8], "power_max": [3, float("inf")]}}, {}],
+            "finite",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [0.8], "power_max": [3, -1]}}, {}],
+            "non-negative",
+        ),
+        (
+            [{"charge": {"soc_breakpoints": [0.8], "power_max": [3, 4]}}, {}],
+            "non-increasing",
+        ),
+    ],
+)
+def test_battery_soc_power_profiles_reject_malformed_charge_contract(profiles, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        build_params({"number_of_batteries": 2, "battery_soc_power_profiles": profiles})
 
 
 # ──────────── per-battery array broadcast / validate (check_batt_params) ────────
@@ -546,6 +635,79 @@ def test_treat_runtimeparams_n1_scalar_override_stays_scalar():
     _, optim_conf, plant_conf = treat_runtime({"battery_charge_power_max": 4321}, base)
     assert plant_conf["battery_charge_power_max"] == 4321
     assert not isinstance(plant_conf["battery_charge_power_max"], list)
+
+
+def test_runtime_battery_soc_power_profiles_omission_and_null_inherit_static_configuration():
+    configured = [
+        {"charge": {"soc_breakpoints": [0.8], "power_max": [3000, 1000]}},
+        {},
+    ]
+    base = build_params(
+        {"number_of_batteries": 2, "battery_soc_power_profiles": configured}
+    )
+
+    _, _, omitted = treat_runtime({}, base)
+    _, _, explicit_null = treat_runtime({"battery_soc_power_profiles": None}, base)
+
+    assert omitted["battery_soc_power_profiles"] == configured
+    assert explicit_null["battery_soc_power_profiles"] == configured
+
+
+def test_runtime_battery_soc_power_profiles_non_null_list_replaces_without_nested_merge():
+    base = build_params(
+        {
+            "number_of_batteries": 2,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [0.8], "power_max": [3000, 1000]}},
+                {"charge": {"soc_breakpoints": [], "power_max": [1500]}},
+            ],
+        }
+    )
+    replacement = [
+        {},
+        {"charge": {"soc_breakpoints": [0.7], "power_max": [2500, 1200]}},
+    ]
+
+    _, _, plant_conf = treat_runtime(
+        {"battery_soc_power_profiles": replacement}, base
+    )
+
+    assert plant_conf["battery_soc_power_profiles"] == replacement
+
+
+def test_runtime_battery_soc_power_profiles_all_empty_objects_restore_scalar_only_behavior():
+    base = build_params(
+        {
+            "number_of_batteries": 2,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [0.8], "power_max": [3000, 1000]}},
+                {"charge": {"soc_breakpoints": [], "power_max": [1500]}},
+            ],
+        }
+    )
+
+    _, _, plant_conf = treat_runtime(
+        {"battery_soc_power_profiles": [{}, {}]}, base
+    )
+
+    assert plant_conf["battery_soc_power_profiles"] == [{}, {}]
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        [{}],
+        [{"discharge": {"soc_breakpoints": [], "power_max": [1000]}}, {}],
+        [{"charge": None}, {}],
+    ],
+)
+def test_runtime_battery_soc_power_profiles_reject_partial_or_unsupported_replacement(
+    replacement,
+):
+    base = build_params({"number_of_batteries": 2})
+
+    with pytest.raises(ValueError, match="battery_soc_power_profiles"):
+        treat_runtime({"battery_soc_power_profiles": replacement}, base)
 
 
 # ──────────── runtime scalar masking a configured per-battery list ──────────
