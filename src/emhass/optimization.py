@@ -2392,10 +2392,12 @@ class Optimization:
                         breakpoint = charge_profile_breakpoints[breakpoint_index]
                         guarded_breakpoint = breakpoint - SOC_POWER_PROFILE_GUARD
                         constraints.append(
-                            end_soc <= guarded_breakpoint + selector
+                            end_soc
+                            <= guarded_breakpoint
+                            + (1 - guarded_breakpoint) * selector
                         )
                         constraints.append(
-                            end_soc >= guarded_breakpoint - (1 - selector)
+                            end_soc >= guarded_breakpoint * selector
                         )
                         selected_charge_cap = selected_charge_cap + cp.multiply(
                             charge_profile_power[breakpoint_index + 1]

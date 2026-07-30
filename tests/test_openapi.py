@@ -217,6 +217,15 @@ class TestBuildSpec(unittest.TestCase):
             {"type": "number", "minimum": 0},
         )
 
+    def test_battery_soc_power_profiles_schema_rejects_empty_lists(self):
+        schema = gen.build_spec()["components"]["schemas"]["Config"]["properties"][
+            "battery_soc_power_profiles"
+        ]
+
+        self.assertEqual(schema["minItems"], 1)
+        power_max = schema["items"]["properties"]["charge"]["properties"]["power_max"]
+        self.assertEqual(power_max["minItems"], 1)
+
 
 class TestOpenapiArtifact(unittest.TestCase):
     OUT = REPO_ROOT / "src" / "emhass" / "static" / "openapi.json"

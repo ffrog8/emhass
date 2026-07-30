@@ -1078,6 +1078,43 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
         self.assertAlmostEqual(float(result["SOC_opt"].iloc[0]), 0.79995, delta=1e-7)
         self.assertAlmostEqual(float(result["P_batt"].iloc[0]), -400.0, delta=1e-5)
 
+    def test_zero_breakpoint_allows_full_predicted_soc(self):
+        opt = build_optimization(
+            optim_overrides={
+                "set_nocharge_from_grid": True,
+                "set_nodischarge_to_grid": True,
+            },
+            plant_overrides={
+                "maximum_power_from_grid": 0,
+                "maximum_power_to_grid": 0,
+                "battery_charge_power_max": 5000,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_soc_power_profiles": [
+                    {
+                        "charge": {
+                            "soc_breakpoints": [0.0],
+                            "power_max": [2000.0, 500.0],
+                        }
+                    }
+                ],
+            },
+        )
+        index = pd.date_range("2026-02-01", periods=2, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 2, "unit_prod_price": [0.0] * 2},
+            index=index,
+        )
+        p_pv = pd.Series([500.0, 0.0], index=index)
+        p_load = pd.Series([0.0, 0.0], index=index)
+
+        result = opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.975, soc_final=1.0
+        )
+
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertAlmostEqual(float(result["SOC_opt"].iloc[0]), 1.0, delta=1e-7)
+        self.assertAlmostEqual(float(result["P_batt"].iloc[0]), -500.0, delta=1e-5)
+
     def test_forecast_discharge_restores_later_high_charge_capability(self):
         opt = build_optimization(
             optim_overrides={
