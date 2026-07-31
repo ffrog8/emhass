@@ -121,6 +121,19 @@ advisory warning. Solver timeout starts only when solving after problem
 construction; this warning is not a request-size, memory, or service-safety
 control. The benchmark and warning do not authorize real control use.
 
+For this fork's controlled-trial candidate, a profiled solve is capped at the
+lower of `lp_solver_timeout` and 30 seconds. A `user_limit` result then receives
+one true scalar retry capped at the lower of `lp_solver_timeout` and 15
+seconds. Other unsuccessful statuses retain the existing profiled fallback.
+The scalar retry preserves every non-profile constraint and does not replace
+the cached profiled problem. After `perform_optimization`, the candidate exposes
+the attempt outcomes in `soc_profile_fallback_diagnostics` with
+`profile_budget_seconds`, `profile_status`, `scalar_fallback_reason`,
+`scalar_budget_seconds`, and `scalar_status`. Benchmark code should read these
+fields instead of treating the cached problem's final solver statistics as the
+scalar retry's statistics. The external runner, not the solver method, remains
+responsible for measuring and enforcing the complete request deadline.
+
 ## Retained paired result
 
 The raw 30 July 2026 reports are retained in

@@ -15,7 +15,9 @@ import logging
 import math
 import pathlib
 import unittest
+from unittest.mock import patch
 
+import cvxpy as cp
 import numpy as np
 import pandas as pd
 
@@ -145,6 +147,185 @@ class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
                 "96 Boolean selectors and 288 linear rows" in message
                 for message in captured.output
             )
+        )
+
+
+class TestSocPowerProfileFallbackBudget(unittest.TestCase):
+    @staticmethod
+    def _case(timeout, *, with_profile=True):
+        plant_overrides = {"battery_maximum_state_of_charge": 1.0}
+        if with_profile:
+            plant_overrides["battery_soc_power_profiles"] = [
+                {
+                    "charge": {
+                        "soc_breakpoints": [0.8],
+                        "power_max": [100.0, 100.0],
+                    }
+                }
+            ]
+        opt = build_optimization(
+            optim_overrides={"lp_solver_timeout": timeout},
+            plant_overrides=plant_overrides,
+        )
+        index = pd.date_range("2026-02-01", periods=4, freq="30min", tz="Europe/Tallinn")
+        df_input = pd.DataFrame(
+            {"unit_load_cost": [0.30] * 4, "unit_prod_price": [0.0] * 4},
+            index=index,
+        )
+        return (
+            opt,
+            df_input,
+            pd.Series([5000.0] * 4, index=index),
+            pd.Series([0.0] * 4, index=index),
+        )
+
+    def test_profile_timeout_uses_bounded_scalar_fallback_and_retains_profile_problem(self):
+        opt, df_input, p_pv, p_load = self._case(45)
+        solve_calls = []
+        original_solve = cp.Problem.solve
+
+        def simulate_profile_timeout(problem, *args, **kwargs):
+            solve_calls.append(
+                {
+                    "problem": problem,
+                    "time_limit": kwargs["time_limit"],
+                    "variables": [variable.name() for variable in problem.variables()],
+                }
+            )
+            if len(solve_calls) == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=simulate_profile_timeout):
+            fallback_result = opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
+            )
+
+        self.assertEqual(len(solve_calls), 2)
+        self.assertEqual(solve_calls[0]["time_limit"], 30.0)
+        self.assertEqual(solve_calls[1]["time_limit"], 15.0)
+        self.assertTrue(
+            any("battery_charge_profile_selectors" in name for name in solve_calls[0]["variables"])
+        )
+        self.assertFalse(
+            any("profile_selectors" in name for name in solve_calls[1]["variables"])
+        )
+        self.assertIs(opt.prob, solve_calls[0]["problem"])
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertGreater(float((-fallback_result["P_batt"]).max()), 100.0)
+        self.assertEqual(
+            opt.soc_profile_fallback_diagnostics,
+            {
+                "profile_budget_seconds": 30.0,
+                "profile_status": "user_limit",
+                "scalar_fallback_reason": "user_limit",
+                "scalar_budget_seconds": 15.0,
+                "scalar_status": "optimal",
+            },
+        )
+
+        scalar_opt, _, _, _ = self._case(45, with_profile=False)
+        scalar_result = scalar_opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
+        )
+        pd.testing.assert_frame_equal(
+            fallback_result.drop(columns="optim_status"),
+            scalar_result.drop(columns="optim_status"),
+            check_freq=False,
+            rtol=0,
+            atol=1e-8,
+        )
+
+        later_calls = []
+
+        def record_profile_retry(problem, *args, **kwargs):
+            later_calls.append(problem)
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=record_profile_retry):
+            profile_result = opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41
+            )
+
+        self.assertEqual(later_calls, [solve_calls[0]["problem"]])
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertLessEqual(float((-profile_result["P_batt"]).max()), 100.0 + 1e-5)
+
+    def test_profile_and_scalar_budgets_preserve_lower_configured_timeout(self):
+        opt, df_input, p_pv, p_load = self._case(10)
+        solve_timeouts = []
+        original_solve = cp.Problem.solve
+
+        def simulate_profile_timeout(problem, *args, **kwargs):
+            solve_timeouts.append(kwargs["time_limit"])
+            if len(solve_timeouts) == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=simulate_profile_timeout):
+            result = opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
+            )
+
+        self.assertEqual(solve_timeouts, [10.0, 10.0])
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertGreater(float((-result["P_batt"]).max()), 100.0)
+
+    def test_no_profile_retry_keeps_existing_full_timeout_behavior(self):
+        opt, df_input, p_pv, p_load = self._case(45, with_profile=False)
+        solve_timeouts = []
+        original_solve = cp.Problem.solve
+
+        def simulate_primary_timeout(problem, *args, **kwargs):
+            solve_timeouts.append(kwargs["time_limit"])
+            if len(solve_timeouts) == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=simulate_primary_timeout):
+            opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
+            )
+
+        self.assertEqual(solve_timeouts, [45.0, 45.0])
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertEqual(
+            opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"], None
+        )
+
+    def test_profile_non_timeout_keeps_existing_profiled_relaxed_retry(self):
+        opt, df_input, p_pv, p_load = self._case(45)
+        solve_calls = []
+        original_solve = cp.Problem.solve
+
+        def simulate_primary_infeasible(problem, *args, **kwargs):
+            solve_calls.append(
+                (kwargs["time_limit"], [variable.name() for variable in problem.variables()])
+            )
+            if len(solve_calls) == 1:
+                problem._status = cp.INFEASIBLE
+                problem._value = math.inf
+                return math.inf
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=simulate_primary_infeasible):
+            opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41
+            )
+
+        self.assertEqual([call[0] for call in solve_calls], [30.0, 30.0])
+        self.assertTrue(
+            any("profile_selectors" in name for name in solve_calls[1][1])
+        )
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertIsNone(
+            opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"]
         )
 
 

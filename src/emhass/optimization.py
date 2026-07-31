@@ -92,6 +92,13 @@ BATTERY_TIEBREAK_EPS = 1e-9
 # lower-discharge-power band over the corresponding equality and guard region.
 SOC_POWER_PROFILE_GUARD = 1e-4
 
+# Fork controlled-trial policy: the retained in-envelope cold maximum was
+# 17.376 s, while the same-payload scalar cold solve took 0.763 s. These caps
+# leave 15 s outside the solver calls before the approved 60 s request gate.
+# They are operational evidence bounds, not battery-domain band-count limits.
+SOC_POWER_PROFILE_SOLVE_BUDGET_SECONDS = 30.0
+SOC_POWER_PROFILE_SCALAR_FALLBACK_BUDGET_SECONDS = 15.0
+
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
 # on, importing from the grid while the battery is still above its minimum SoC is
 # penalized at this multiple of the prevailing import tariff. Making it a soft
@@ -3051,8 +3058,15 @@ class Optimization:
                 seg_params,
             )
 
-    def _add_battery_constraints(self, constraints, batt_stress_conf):
-        """Add all battery-related constraints for generic and indexed batteries."""
+    def _add_battery_constraints(
+        self, constraints, batt_stress_conf, *, include_soc_power_profiles=True
+    ):
+        """Add all battery-related constraints for generic and indexed batteries.
+
+        ``include_soc_power_profiles=False`` is reserved for the bounded
+        scalar fallback after a profiled solve reaches its solver time limit.
+        Hardware power and stored-energy constraints remain active.
+        """
         self._battery_block_expressions = {}
         self._battery_soc_balance_deviation_vars = {}
         self._battery_soc_balance_penalty = None
@@ -3191,7 +3205,11 @@ class Optimization:
                 }
             end_soc = current_stored_energy / cap
 
-            charge_profile_power = self.param_battery_charge_profile_power_max[k]
+            charge_profile_power = (
+                self.param_battery_charge_profile_power_max[k]
+                if include_soc_power_profiles
+                else None
+            )
             if charge_profile_power is not None:
                 selected_charge_cap = charge_profile_power[0]
                 charge_profile_breakpoints = (
@@ -3220,7 +3238,11 @@ class Optimization:
                         )
                 constraints.append(p_sto_neg[k] >= -selected_charge_cap)
 
-            discharge_profile_power = self.param_battery_discharge_profile_power_max[k]
+            discharge_profile_power = (
+                self.param_battery_discharge_profile_power_max[k]
+                if include_soc_power_profiles
+                else None
+            )
             if discharge_profile_power is not None:
                 selected_discharge_cap = discharge_profile_power[0]
                 discharge_profile_breakpoints = (
@@ -5486,7 +5508,9 @@ class Optimization:
     ) -> pd.DataFrame:
         r"""
         Perform the actual optimization using Convex Programming (CVXPY).
-        Includes automatic fallback to relaxed LP if MILP fails or times out.
+        Includes automatic fallback to scalar battery limits when a profiled
+        solve reaches its time limit, or to the established relaxed LP for
+        other failures.
 
         If ``stage_times`` is provided, the wall-clock duration of three
         internal phases is recorded under the keys ``optim_solve.build``,
@@ -6422,7 +6446,28 @@ class Optimization:
 
         # Retrieve Constraints (Time & Threads)
         threads = self.optim_conf.get("num_threads", 0)
-        timeout = self.optim_conf.get("lp_solver_timeout", 180)
+        timeout = float(self.optim_conf.get("lp_solver_timeout", 180))
+        has_soc_power_profiles = any(
+            profile is not None
+            for profiles in (
+                self.param_battery_charge_profile_power_max,
+                self.param_battery_discharge_profile_power_max,
+            )
+            for profile in profiles
+        )
+        primary_timeout = timeout
+        if has_soc_power_profiles:
+            primary_timeout = min(
+                timeout,
+                SOC_POWER_PROFILE_SOLVE_BUDGET_SECONDS,
+            )
+        self.soc_profile_fallback_diagnostics = {
+            "profile_budget_seconds": primary_timeout if has_soc_power_profiles else None,
+            "profile_status": None,
+            "scalar_fallback_reason": None,
+            "scalar_budget_seconds": None,
+            "scalar_status": None,
+        }
 
         # Select Solver
         # We strictly default to HiGHS.
@@ -6432,7 +6477,7 @@ class Optimization:
         if requested_solver == "GUROBI":
             if "GUROBI" in cp.installed_solvers():
                 selected_solver = cp.GUROBI
-                solver_opts["TimeLimit"] = timeout
+                solver_opts["TimeLimit"] = primary_timeout
                 if threads > 0:
                     solver_opts["Threads"] = threads
             else:
@@ -6443,7 +6488,7 @@ class Optimization:
         elif requested_solver == "CPLEX":
             if "CPLEX" in cp.installed_solvers():
                 selected_solver = cp.CPLEX
-                cplex_params = {"timelimit": timeout}
+                cplex_params = {"timelimit": primary_timeout}
                 if threads > 0:
                     cplex_params["threads"] = threads
                 solver_opts["cplex_params"] = cplex_params
@@ -6454,7 +6499,7 @@ class Optimization:
 
         # Configure HiGHS (The Default)
         if selected_solver == cp.HIGHS:
-            solver_opts["time_limit"] = float(timeout)
+            solver_opts["time_limit"] = primary_timeout
             if threads > 0:
                 solver_opts["threads"] = int(threads)
             # 'run_crossover' ensures a cleaner solution (closer to simplex vertex)
@@ -6499,13 +6544,25 @@ class Optimization:
                 f"Solver {selected_solver} failed: {e}. Checking status for fallback..."
             )
 
+        result_problem = self.prob
+        if has_soc_power_profiles:
+            self.soc_profile_fallback_diagnostics["profile_status"] = self.prob.status
+
         # Check for failure or "bad" status
         # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
         fail_statuses = ["infeasible", "unbounded", "user_limit", None]
         if self.prob.status in fail_statuses or self.prob.value is None:
+            use_scalar_profile_fallback = (
+                has_soc_power_profiles and self.prob.status == "user_limit"
+            )
+            fallback_description = (
+                "scalar battery limits"
+                if use_scalar_profile_fallback
+                else "relaxed constraints (Continuous LP)"
+            )
             self.logger.warning(
                 f"Optimization failed with status: '{self.prob.status}'. "
-                "Retrying with relaxed constraints (Continuous LP)..."
+                f"Retrying with {fallback_description}..."
             )
 
             # Backup Configuration
@@ -6516,10 +6573,13 @@ class Optimization:
                 self.optim_conf.get("set_deferrable_load_single_constant", [])
             )
 
-            # Relax Configuration: Disable Binary Logic
+            # Preserve the scalar model exactly when only the SOC profile is
+            # being removed. Other failures keep the established relaxed-LP
+            # retry behavior.
             n_def = self.optim_conf["number_of_deferrable_loads"]
-            self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False] * n_def
-            self.optim_conf["set_deferrable_load_single_constant"] = [False] * n_def
+            if not use_scalar_profile_fallback:
+                self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False] * n_def
+                self.optim_conf["set_deferrable_load_single_constant"] = [False] * n_def
 
             # Re-build Constraints (Clean Slate)
             constraints_relaxed = self.constraints[:]  # Start with base bound constraints
@@ -6534,7 +6594,11 @@ class Optimization:
             if self.plant_conf.get("inverter_is_hybrid", False):
                 self._add_hybrid_inverter_constraints(constraints_relaxed, inv_stress_conf)
             if self.optim_conf.get("set_use_battery", False):
-                self._add_battery_constraints(constraints_relaxed, batt_stress_conf)
+                self._add_battery_constraints(
+                    constraints_relaxed,
+                    batt_stress_conf,
+                    include_soc_power_profiles=not use_scalar_profile_fallback,
+                )
 
             self._add_curtailment_bounds(constraints_relaxed)
             if self.costfun == "self-consumption" and "SC" in self.vars:
@@ -6559,7 +6623,10 @@ class Optimization:
             )
 
             # Deferrable Load Group Constraints (shared power budget only in relaxed mode)
-            self._add_deferrable_group_constraints(constraints_relaxed, relaxed=True)
+            self._add_deferrable_group_constraints(
+                constraints_relaxed,
+                relaxed=not use_scalar_profile_fallback,
+            )
 
             # Re-build Objective
             objective_expr = self._build_objective_function(batt_stress_conf, inv_stress_conf)
@@ -6569,19 +6636,46 @@ class Optimization:
             # Solve Relaxed Problem
             prob_relaxed = cp.Problem(objective_expr, constraints_relaxed)
             try:
-                self.logger.info("Solving relaxed problem (LP)...")
-                prob_relaxed.solve(solver=selected_solver, **solver_opts)
+                if use_scalar_profile_fallback:
+                    scalar_timeout = min(
+                        timeout,
+                        SOC_POWER_PROFILE_SCALAR_FALLBACK_BUDGET_SECONDS,
+                    )
+                    self.soc_profile_fallback_diagnostics.update(
+                        {
+                            "scalar_fallback_reason": "user_limit",
+                            "scalar_budget_seconds": scalar_timeout,
+                        }
+                    )
+                    if selected_solver == cp.GUROBI:
+                        solver_opts["TimeLimit"] = scalar_timeout
+                    elif selected_solver == cp.CPLEX:
+                        solver_opts["cplex_params"]["timelimit"] = scalar_timeout
+                    else:
+                        solver_opts["time_limit"] = scalar_timeout
+                    self.logger.info("Solving scalar battery fallback...")
+                    prob_relaxed.solve(solver=selected_solver, **solver_opts)
+                    self.soc_profile_fallback_diagnostics["scalar_status"] = (
+                        prob_relaxed.status
+                    )
+                else:
+                    self.logger.info("Solving relaxed problem (LP)...")
+                    prob_relaxed.solve(solver=selected_solver, **solver_opts)
 
                 if prob_relaxed.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                    self.logger.info("Relaxed optimization successful!")
-                    self.prob = prob_relaxed  # Use this result
+                    self.logger.info("Fallback optimization successful!")
                     # Mark status so user knows it was relaxed
-                    self.prob._status = "Optimal (Relaxed)"
+                    prob_relaxed._status = "Optimal (Relaxed)"
+                    result_problem = prob_relaxed
+                    if not use_scalar_profile_fallback:
+                        self.prob = prob_relaxed
                 else:
                     self.logger.error(
                         f"Relaxed optimization also failed with status: {prob_relaxed.status}"
                     )
-                    self.prob = prob_relaxed
+                    result_problem = prob_relaxed
+                    if not use_scalar_profile_fallback:
+                        self.prob = prob_relaxed
             except Exception as e:
                 self.logger.error(f"Relaxed optimization crashed: {e}")
 
@@ -6595,11 +6689,11 @@ class Optimization:
             stage_times["optim_solve.solve"] = _extract_start_perf - _solve_start_perf
 
         # Fix for Status Case: Map "optimal" -> "Optimal"
-        status_raw = self.prob.status
+        status_raw = result_problem.status
         self.optim_status = status_raw.title() if status_raw else "Failure"
 
         # Helper: Ensure we return "Optimal" for tests if it was "Optimal (Relaxed)" or "Optimal_Inaccurate"
-        if self.prob.value is None or self.prob.status not in [
+        if result_problem.value is None or result_problem.status not in [
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,
             "Optimal (Relaxed)",
@@ -6619,7 +6713,7 @@ class Optimization:
         else:
             self.logger.info(
                 "Total value of the Cost function = %.02f",
-                self.prob.value,
+                result_problem.value,
             )
 
         # Results Extraction
