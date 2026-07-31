@@ -6576,6 +6576,11 @@ class Optimization:
             use_scalar_profile_fallback = (
                 has_soc_power_profiles and self.prob.status == "user_limit"
             )
+            fallback_label = (
+                "Scalar battery fallback"
+                if use_scalar_profile_fallback
+                else "Relaxed optimization"
+            )
             fallback_description = (
                 "scalar battery limits"
                 if use_scalar_profile_fallback
@@ -6677,39 +6682,24 @@ class Optimization:
                     )
 
                 if fallback_problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                    success_description = (
-                        "Scalar battery fallback"
-                        if use_scalar_profile_fallback
-                        else "Relaxed optimization"
-                    )
-                    self.logger.info(f"{success_description} successful!")
-                    # Preserve the established downstream fallback status.
-                    # soc_profile_fallback_diagnostics distinguishes the scalar
-                    # profile fallback from the continuous-LP relaxation.
-                    fallback_problem._status = "Optimal (Relaxed)"
+                    self.logger.info(f"{fallback_label} successful!")
+                    # Preserve the established downstream marker only when the
+                    # fallback actually relaxes the model to a continuous LP.
+                    if not use_scalar_profile_fallback:
+                        fallback_problem._status = "Optimal (Relaxed)"
                     result_problem = fallback_problem
                     if not use_scalar_profile_fallback:
                         self.prob = fallback_problem
                 else:
-                    failure_description = (
-                        "Scalar battery fallback"
-                        if use_scalar_profile_fallback
-                        else "Relaxed optimization"
-                    )
                     self.logger.error(
-                        f"{failure_description} failed with status: "
+                        f"{fallback_label} failed with status: "
                         f"{fallback_problem.status}"
                     )
                     result_problem = fallback_problem
                     if not use_scalar_profile_fallback:
                         self.prob = fallback_problem
             except Exception as e:
-                failure_description = (
-                    "Scalar battery fallback"
-                    if use_scalar_profile_fallback
-                    else "Relaxed optimization"
-                )
-                self.logger.error(f"{failure_description} crashed: {e}")
+                self.logger.error(f"{fallback_label} crashed: {e}")
 
             # 5. Restore Configuration
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
@@ -6724,8 +6714,8 @@ class Optimization:
         status_raw = result_problem.status
         self.optim_status = status_raw.title() if status_raw else "Failure"
 
-        # Accept the established downstream fallback marker. It is retained for
-        # compatibility by both the continuous-LP and scalar-profile branches.
+        # Accept the established downstream fallback marker retained for the
+        # continuous-LP relaxation path.
         if result_problem.value is None or result_problem.status not in [
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,

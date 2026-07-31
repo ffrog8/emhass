@@ -227,7 +227,8 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             any("profile_selectors" in name for name in solve_calls[1]["variables"])
         )
         self.assertIs(opt.prob, solve_calls[0]["problem"])
-        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertEqual(fallback_result["optim_status"].unique().tolist(), ["Optimal"])
         self.assertGreater(float((-fallback_result["P_batt"]).max()), 100.0)
         self.assertEqual(
             opt.soc_profile_fallback_diagnostics,
@@ -286,7 +287,7 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             )
 
         self.assertEqual(solve_timeouts, [10.0, 10.0])
-        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertEqual(opt.optim_status, "Optimal")
         self.assertGreater(float((-result["P_batt"]).max()), 100.0)
 
     def test_no_profile_retry_keeps_existing_full_timeout_behavior(self):
