@@ -5,6 +5,7 @@ Stdlib only. Run: python scripts/generate_openapi.py
 """
 
 import argparse
+import copy
 import json
 import re
 from pathlib import Path
@@ -49,18 +50,22 @@ def _base_schema(base: str, param: dict) -> dict:
 def _input_to_schema(input_str: str, param: dict) -> dict:
     """Map a param_definitions `input` string + param dict to an OpenAPI schema.
 
-    For array.* inputs, the param `default_value` is the per-element scalar template,
-    so it is placed on items.default; scalars get `default` directly. title/description/
-    x-unit annotate the outermost property.
+    An `openapi_schema` override preserves nested contracts that the flat input
+    notation cannot express. Otherwise, array.* inputs place the per-element
+    `default_value` on items.default and scalars get `default` directly.
+    title/description/x-unit annotate the outermost property.
     """
-    parts = input_str.split(".")
-    leaf = _base_schema(parts[-1], param)
-    dv = param.get("default_value", None)
-    if dv is not None:
-        leaf["default"] = dv
-    schema = leaf
-    for _ in parts[:-1]:  # one wrap per leading "array"
-        schema = {"type": "array", "items": schema}
+    if "openapi_schema" in param:
+        schema = copy.deepcopy(param["openapi_schema"])
+    else:
+        parts = input_str.split(".")
+        leaf = _base_schema(parts[-1], param)
+        dv = param.get("default_value", None)
+        if dv is not None:
+            leaf["default"] = dv
+        schema = leaf
+        for _ in parts[:-1]:  # one wrap per leading "array"
+            schema = {"type": "array", "items": schema}
     if param.get("friendly_name"):
         schema["title"] = param["friendly_name"]
     desc = (param.get("Description") or "").strip()

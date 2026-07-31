@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import logging
 import os
 import pathlib
 import pickle
@@ -5356,6 +5357,185 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stats_after_second["has_instance"])
         # Cache key should be the same (hit)
         self.assertEqual(stats_after_second["cache_key"], first_cache_key)
+
+    async def test_mpc_cache_hit_refreshes_same_shape_charge_profile_coefficients(self):
+        base_runtime = {
+            "set_use_battery": True,
+            "battery_charge_power_max": 5000,
+            "pv_power_forecast": [5000.0] * 10,
+            "load_power_forecast": [0.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.4,
+            "soc_final": 0.7,
+        }
+        first_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [], "power_max": [1000.0]}}
+            ],
+        }
+        with self.assertLogs(logger, logging.INFO) as first_logs:
+            first_input = await self._run_set_input(first_runtime)
+        first_opt = first_input["opt"]
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+
+        second_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"charge": {"soc_breakpoints": [], "power_max": [500.0]}}
+            ],
+        }
+        with self.assertLogs(logger, logging.INFO) as second_logs:
+            second_input = await self._run_set_input(second_runtime)
+        second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_opt)
+        self.assertEqual(
+            sum(
+                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows"
+                in message
+                for message in first_logs.output
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows"
+                in message
+                for message in second_logs.output
+            ),
+            1,
+        )
+        self.assertAlmostEqual(
+            float(
+                second_input["opt"]
+                .param_battery_charge_profile_power_max[0]
+                .value[0]
+            ),
+            500.0,
+        )
+        self.assertGreater(float((-first_result["P_batt"]).max()), 500.0)
+        self.assertLessEqual(float((-second_result["P_batt"]).max()), 500.0 + 1e-5)
+
+    async def test_mpc_explicit_scalar_only_replacement_logs_zero_model_increase(self):
+        runtime = {
+            "set_use_battery": True,
+            "number_of_batteries": 2,
+            "battery_soc_power_profiles": [{}, {}],
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [1000.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": [0.5, 0.5],
+            "soc_final": [0.5, 0.5],
+        }
+
+        with self.assertLogs(logger, logging.INFO) as captured:
+            input_data = await self._run_set_input(runtime)
+
+        self.assertIsNotNone(input_data["opt"])
+        self.assertEqual(
+            sum(
+                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows"
+                in message
+                for message in captured.output
+            ),
+            1,
+        )
+
+    async def test_mpc_disabled_battery_logs_no_profile_model_increase_or_warning(self):
+        oversized_profile = {
+            "charge": {
+                "soc_breakpoints": [
+                    float(value) for value in np.linspace(0.01, 0.99, 49)
+                ],
+                "power_max": [
+                    float(value) for value in np.linspace(5000, 100, 50)
+                ],
+            }
+        }
+        runtime = {
+            "set_use_battery": False,
+            "number_of_batteries": 3,
+            "battery_soc_power_profiles": [
+                oversized_profile,
+                oversized_profile,
+                oversized_profile,
+            ],
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [1000.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+        }
+
+        with self.assertLogs(logger, logging.INFO) as captured:
+            input_data = await self._run_set_input(runtime)
+
+        self.assertEqual(
+            input_data["plant_conf"]["battery_soc_power_profiles"],
+            [oversized_profile, oversized_profile, oversized_profile],
+        )
+        self.assertEqual(
+            sum(
+                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows"
+                in message
+                for message in captured.output
+            ),
+            1,
+        )
+        self.assertFalse(
+            any(
+                "Battery SOC power-profile model size" in message
+                for message in captured.output
+            )
+        )
+
+    async def test_mpc_cache_hit_refreshes_same_shape_discharge_profile_coefficients(self):
+        base_runtime = {
+            "set_use_battery": True,
+            "battery_discharge_power_max": 5000,
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [5000.0] * 10,
+            "load_cost_forecast": [0.30] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.8,
+            "soc_final": 0.4,
+        }
+        first_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"discharge": {"soc_breakpoints": [], "power_max": [1000.0]}}
+            ],
+        }
+        first_input = await self._run_set_input(first_runtime)
+        first_opt = first_input["opt"]
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+
+        second_runtime = {
+            **base_runtime,
+            "battery_soc_power_profiles": [
+                {"discharge": {"soc_breakpoints": [], "power_max": [500.0]}}
+            ],
+        }
+        second_input = await self._run_set_input(second_runtime)
+        second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_opt)
+        self.assertAlmostEqual(
+            float(
+                second_input["opt"]
+                .param_battery_discharge_profile_power_max[0]
+                .value[0]
+            ),
+            500.0,
+        )
+        self.assertGreater(float(first_result["P_batt"].max()), 500.0)
+        self.assertLessEqual(float(second_result["P_batt"].max()), 500.0 + 1e-5)
 
     async def test_mpc_cache_hit_with_different_time_windows(self):
         """Test that changing start/end timesteps results in cache HIT (parameterized)."""

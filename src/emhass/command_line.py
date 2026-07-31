@@ -41,6 +41,7 @@ from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.optimization import Optimization
 from emhass.retrieve_hass import RetrieveHass
+from emhass.soc_power_profiles import log_model_size_increase
 from emhass.utils import log_runtime_banner, stage_timer
 
 default_csv_filename = "opt_res_latest.csv"
@@ -256,6 +257,7 @@ class OptimizationCacheKey:
     inverter_block_structure: tuple
     inverter_is_hybrid: bool
     compute_curtailment: bool
+    battery_soc_power_profile_shape: tuple
     optimization_time_step_s: float | None
     delta_forecast_daily_s: float | None
     num_timesteps: int | None
@@ -352,6 +354,7 @@ class OptimizationCache:
             "battery_charge_power_max",
             "battery_discharge_power_max",
             INVERTER_BLOCK_CONFIGS_KEY,
+            "battery_soc_power_profiles",
         }
         # Optim conf parameters that don't affect problem structure
         # (parameterized via CVXPY Parameters, solver options, or forecast method selection)
@@ -468,6 +471,15 @@ class OptimizationCache:
             inverter_block_structure=inverter_block_structure_signature(plant_conf),
             inverter_is_hybrid=plant_conf.get("inverter_is_hybrid", False),
             compute_curtailment=plant_conf.get("compute_curtailment", False),
+            battery_soc_power_profile_shape=tuple(
+                tuple(
+                    (True, len(entry[direction]["power_max"]))
+                    if entry.get(direction) is not None
+                    else (False, 0)
+                    for direction in ("charge", "discharge")
+                )
+                for entry in plant_conf.get("battery_soc_power_profiles", []) or []
+            ),
             optimization_time_step_s=to_seconds(retrieve_hass_conf.get("optimization_time_step")),
             delta_forecast_daily_s=to_seconds(optim_conf.get("delta_forecast_daily")),
             num_timesteps=num_timesteps,
@@ -1654,6 +1666,16 @@ async def set_input_data_dict(
         else:
             # Try to get cached Optimization object for warm-starting
             _num_ts = len(fcst.forecast_dates)
+            log_model_size_increase(
+                logger,
+                (
+                    plant_conf.get("battery_soc_power_profiles")
+                    if optim_conf.get("set_use_battery", False)
+                    else None
+                ),
+                _num_ts,
+                battery_count=int(plant_conf.get("number_of_batteries", 1)),
+            )
             opt = OptimizationCache.get(
                 optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts
             )
@@ -1692,6 +1714,9 @@ async def set_input_data_dict(
                 # propagated even on a cache hit.
                 opt.update_battery_power_limits(plant_conf)
                 _update_cached_inverter_block_runtime(opt, plant_conf)
+                opt.update_battery_soc_power_profiles(
+                    plant_conf["battery_soc_power_profiles"]
+                )
             # Update runtime-configurable solver options from optim_conf
             # These don't affect problem structure, so they're safe to update on cached object
             runtime_solver_opts = [

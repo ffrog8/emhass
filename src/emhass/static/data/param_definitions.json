@@ -659,6 +659,78 @@
       "default_value": 1,
       "unit": "count"
     },
+    "battery_soc_power_profiles": {
+      "friendly_name": "Battery SOC power profiles",
+      "Description": "Optional JSON list with exactly one object per configured battery. Use {} for no profile. Charge and discharge profiles independently contain soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative value in watts. Charge power must be non-increasing and discharge power must be non-decreasing as SOC rises.",
+      "input": "array.object",
+      "default_value": null,
+      "openapi_schema": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "charge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "soc_breakpoints",
+                "power_max"
+              ],
+              "properties": {
+                "soc_breakpoints": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "power_max": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "discharge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "soc_breakpoints",
+                "power_max"
+              ],
+              "properties": {
+                "soc_breakpoints": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "power_max": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "unit": "none"
+    },
     "set_nocharge_from_grid": {
       "friendly_name": "Forbid charging battery from grid",
       "Description": "Set this to true if you want to forbid charging the battery from the grid. The battery will only be charged from excess PV. In split-PV hybrid multi-inverter solving this is a top-level site topology flag that uses aggregate raw site PV across configured split-PV inverters plus aggregate signed battery charging; it is not inverter-local source tracking. Battery-only multi-inverter solving rejects this flag.",

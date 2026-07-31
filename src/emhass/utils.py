@@ -1564,6 +1564,11 @@ async def treat_runtimeparams(
         # N=1 is a no-op (see check_batt_params); this only does real work once
         # number_of_batteries > 1.
         num_batteries = validate_num_batteries(params["plant_conf"])
+        params["plant_conf"]["battery_soc_power_profiles"] = (
+            normalize_battery_soc_power_profiles(
+                params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
+            )
+        )
         for batt_param_name, batt_default in BATT_ARRAY_PARAMS_PLANT_CONF.items():
             _warn_if_runtime_scalar_masks_batt_list(
                 num_batteries,
@@ -3531,6 +3536,9 @@ async def build_params(
         )
     for batt_param_name in BATT_WEIGHT_PARAMS:
         check_batt_weight_params(num_batteries, params["optim_conf"], batt_param_name, logger)
+    params["plant_conf"]["battery_soc_power_profiles"] = normalize_battery_soc_power_profiles(
+        params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
+    )
 
     # historic_days_to_retrieve should be no less then 2
     if params["retrieve_hass_conf"].get("historic_days_to_retrieve", None) is not None:
@@ -3697,6 +3705,115 @@ BATT_ARRAY_PARAMS_OPTIM_CONF: dict[str, bool | int | float] = {
     "battery_soc_surplus_cost": 0.0,
 }
 BATT_WEIGHT_PARAMS: tuple[str, ...] = ("weight_battery_charge", "weight_battery_discharge")
+
+
+def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict]:
+    """Validate and normalize charge/discharge SOC power profiles to battery order.
+
+    The list is positional and replaces as a whole at runtime. An empty object
+    disables profiling for that battery.
+    """
+    if value is None:
+        return [{} for _ in range(num_batteries)]
+    if not isinstance(value, list):
+        raise ValueError("battery_soc_power_profiles must be a list")
+    if len(value) != num_batteries:
+        raise ValueError(
+            f"battery_soc_power_profiles has {len(value)} entries but "
+            f"number_of_batteries={num_batteries}; provide exactly one object per battery"
+        )
+
+    normalized = []
+    for battery_index, entry in enumerate(value):
+        context = f"battery_soc_power_profiles battery {battery_index}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{context} must be an object")
+        unsupported_entry_members = sorted(set(entry) - {"charge", "discharge"})
+        if unsupported_entry_members:
+            raise ValueError(
+                f"{context} has unsupported member {unsupported_entry_members[0]!r}"
+            )
+        normalized_entry = {}
+        for direction in ("charge", "discharge"):
+            if direction not in entry:
+                continue
+            profile = entry[direction]
+            if not isinstance(profile, dict):
+                raise ValueError(f"{context} {direction} must be an object, not null")
+            unsupported_profile_members = sorted(
+                set(profile) - {"soc_breakpoints", "power_max"}
+            )
+            if unsupported_profile_members:
+                raise ValueError(
+                    f"{context} {direction} has unsupported member "
+                    f"{unsupported_profile_members[0]!r}"
+                )
+            missing_members = {"soc_breakpoints", "power_max"} - set(profile)
+            if missing_members:
+                raise ValueError(
+                    f"{context} {direction} is missing required member "
+                    f"{sorted(missing_members)[0]!r}"
+                )
+
+            soc_breakpoints = profile["soc_breakpoints"]
+            power_max = profile["power_max"]
+            if not isinstance(soc_breakpoints, list):
+                raise ValueError(f"{context} {direction} soc_breakpoints must be a list")
+            if not isinstance(power_max, list):
+                raise ValueError(f"{context} {direction} power_max must be a list")
+            if len(power_max) != len(soc_breakpoints) + 1:
+                raise ValueError(
+                    f"{context} {direction} must provide exactly one more power_max value "
+                    "than soc_breakpoints"
+                )
+
+            for name, values in (
+                ("soc_breakpoints", soc_breakpoints),
+                ("power_max", power_max),
+            ):
+                if any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int | float)
+                    or not np.isfinite(item)
+                    for item in values
+                ):
+                    raise ValueError(
+                        f"{context} {direction} {name} values must be finite numbers"
+                    )
+            if any(item < 0 or item > 1 for item in soc_breakpoints):
+                raise ValueError(
+                    f"{context} {direction} soc_breakpoints must be in the "
+                    "closed interval [0, 1]"
+                )
+            if any(
+                left >= right for left, right in zip(soc_breakpoints, soc_breakpoints[1:])
+            ):
+                raise ValueError(
+                    f"{context} {direction} soc_breakpoints must be strictly increasing"
+                )
+            if any(item < 0 for item in power_max):
+                raise ValueError(
+                    f"{context} {direction} power_max values must be non-negative"
+                )
+            if direction == "charge" and any(
+                left < right for left, right in zip(power_max, power_max[1:])
+            ):
+                raise ValueError(
+                    f"{context} charge power_max values must be non-increasing as SOC rises"
+                )
+            if direction == "discharge" and any(
+                left > right for left, right in zip(power_max, power_max[1:])
+            ):
+                raise ValueError(
+                    f"{context} discharge power_max values must be non-decreasing as SOC rises"
+                )
+
+            normalized_entry[direction] = {
+                "soc_breakpoints": [float(item) for item in soc_breakpoints],
+                "power_max": [float(item) for item in power_max],
+            }
+        normalized.append(normalized_entry)
+    return normalized
 
 
 def _coerce_batt_element(

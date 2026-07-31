@@ -1,0 +1,290 @@
+{
+  "schema_version": 3,
+  "base_commit": "aef76a4ba9286d5a12f1ca476e56076c70a74951",
+  "mode": "naive-mpc-optim",
+  "execution_environment": {
+    "container_image": "ghcr.io/astral-sh/uv:python3.11-bookworm",
+    "runtime": "Docker containers on one remote Docker host",
+    "process_settings": {
+      "python_processes_per_report": 1,
+      "payload_order": "file order",
+      "cache_order": "one cold run followed by warm-cache runs",
+      "network_inputs": "disabled"
+    }
+  },
+  "solver": {
+    "name": "HIGHS",
+    "timeout_s": 30,
+    "mip_relative_gap": 0.01,
+    "threads": 1
+  },
+  "default_repetitions": 5,
+  "payloads": [
+    {
+      "name": "one_battery",
+      "description": "Eight-interval scalar battery baseline with a charge/discharge price spread.",
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 1,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": 10000,
+        "battery_discharge_power_max": 2500,
+        "battery_charge_power_max": 2500,
+        "battery_discharge_efficiency": 0.95,
+        "battery_charge_efficiency": 0.95,
+        "battery_minimum_state_of_charge": 0.2,
+        "battery_maximum_state_of_charge": 0.9,
+        "battery_target_state_of_charge": 0.5,
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "runtime": {
+        "prediction_horizon": 8,
+        "pv_power_forecast": [0, 0, 500, 1800, 2200, 500, 0, 0],
+        "load_power_forecast": [1200, 1100, 1000, 900, 1000, 1400, 1800, 1600],
+        "load_cost_forecast": [0.12, 0.12, 0.14, 0.18, 0.24, 0.42, 0.48, 0.30],
+        "prod_price_forecast": [0.05, 0.05, 0.06, 0.08, 0.10, 0.12, 0.12, 0.08],
+        "soc_init": 0.5,
+        "soc_final": 0.5
+      }
+    },
+    {
+      "name": "two_batteries",
+      "description": "Eight-interval heterogeneous two-battery baseline using per-battery SOC schedules.",
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 2,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": [8000, 12000],
+        "battery_discharge_power_max": [2000, 3500],
+        "battery_charge_power_max": [1800, 3000],
+        "battery_discharge_efficiency": [0.92, 0.96],
+        "battery_charge_efficiency": [0.9, 0.95],
+        "battery_minimum_state_of_charge": [0.2, 0.25],
+        "battery_maximum_state_of_charge": [0.85, 0.92],
+        "battery_target_state_of_charge": [0.5, 0.6],
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "runtime": {
+        "prediction_horizon": 8,
+        "pv_power_forecast": [0, 0, 400, 1600, 2600, 900, 0, 0],
+        "load_power_forecast": [1500, 1400, 1200, 1000, 1100, 1700, 2400, 2100],
+        "load_cost_forecast": [0.11, 0.12, 0.15, 0.19, 0.25, 0.44, 0.50, 0.32],
+        "prod_price_forecast": [0.04, 0.04, 0.06, 0.08, 0.11, 0.14, 0.14, 0.09],
+        "soc_init": [0.5, 0.6],
+        "soc_final": [0.5, 0.6]
+      }
+    },
+    {
+      "name": "one_battery_two_band",
+      "description": "Eight-interval representative two-band charge and discharge profile.",
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 1,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": 10000,
+        "battery_discharge_power_max": 5000,
+        "battery_charge_power_max": 5000,
+        "battery_discharge_efficiency": 0.95,
+        "battery_charge_efficiency": 0.95,
+        "battery_minimum_state_of_charge": 0.2,
+        "battery_maximum_state_of_charge": 0.9,
+        "battery_target_state_of_charge": 0.5,
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "candidate_profiles": [
+        {
+          "charge": {
+            "soc_breakpoints": [0.9],
+            "power_max": [4200, 2000]
+          },
+          "discharge": {
+            "soc_breakpoints": [0.1],
+            "power_max": [1700, 4200]
+          }
+        }
+      ],
+      "runtime": {
+        "prediction_horizon": 8,
+        "pv_power_forecast": [0, 0, 500, 1800, 2200, 500, 0, 0],
+        "load_power_forecast": [1200, 1100, 1000, 900, 1000, 1400, 1800, 1600],
+        "load_cost_forecast": [0.12, 0.12, 0.14, 0.18, 0.24, 0.42, 0.48, 0.30],
+        "prod_price_forecast": [0.05, 0.05, 0.06, 0.08, 0.10, 0.12, 0.12, 0.08],
+        "soc_init": 0.5,
+        "soc_final": 0.5
+      }
+    },
+    {
+      "name": "one_battery_three_band",
+      "description": "Eight-interval representative three-band charge and discharge profile.",
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 1,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": 10000,
+        "battery_discharge_power_max": 5000,
+        "battery_charge_power_max": 5000,
+        "battery_discharge_efficiency": 0.95,
+        "battery_charge_efficiency": 0.95,
+        "battery_minimum_state_of_charge": 0.2,
+        "battery_maximum_state_of_charge": 0.9,
+        "battery_target_state_of_charge": 0.5,
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "candidate_profiles": [
+        {
+          "charge": {
+            "soc_breakpoints": [0.8, 0.95],
+            "power_max": [5000, 3000, 1000]
+          },
+          "discharge": {
+            "soc_breakpoints": [0.1, 0.25],
+            "power_max": [1000, 3000, 5000]
+          }
+        }
+      ],
+      "runtime": {
+        "prediction_horizon": 8,
+        "pv_power_forecast": [0, 0, 500, 1800, 2200, 500, 0, 0],
+        "load_power_forecast": [1200, 1100, 1000, 900, 1000, 1400, 1800, 1600],
+        "load_cost_forecast": [0.12, 0.12, 0.14, 0.18, 0.24, 0.42, 0.48, 0.30],
+        "prod_price_forecast": [0.05, 0.05, 0.06, 0.08, 0.10, 0.12, 0.12, 0.08],
+        "soc_init": 0.5,
+        "soc_final": 0.5
+      }
+    },
+    {
+      "name": "three_battery_mixed_48",
+      "description": "Full 48-interval three-battery mixed N/M profile with 288 selectors and 816 rows.",
+      "benchmark_envelope": false,
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 3,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": [10000, 10000, 10000],
+        "battery_discharge_power_max": [5000, 5000, 5000],
+        "battery_charge_power_max": [5000, 5000, 5000],
+        "battery_discharge_efficiency": [0.95, 0.95, 0.95],
+        "battery_charge_efficiency": [0.95, 0.95, 0.95],
+        "battery_minimum_state_of_charge": [0.04, 0.04, 0.04],
+        "battery_maximum_state_of_charge": [0.9, 0.9, 0.9],
+        "battery_target_state_of_charge": [0.5, 0.5, 0.5],
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "candidate_profiles": [
+        {
+          "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
+          "discharge": {"soc_breakpoints": [0.1], "power_max": [1700, 4200]}
+        },
+        {
+          "charge": {
+            "soc_breakpoints": [0.9, 0.98],
+            "power_max": [4500, 3200, 1000]
+          }
+        },
+        {
+          "charge": {"soc_breakpoints": [0.9], "power_max": [4200, 2000]},
+          "discharge": {"soc_breakpoints": [0.1], "power_max": [2000, 4200]}
+        }
+      ],
+      "runtime": {
+        "prediction_horizon": 48,
+        "pv_power_forecast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "load_power_forecast": [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+        "load_cost_forecast": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4],
+        "prod_price_forecast": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+        "soc_init": [0.5, 0.5, 0.5],
+        "soc_final": [0.5, 0.5, 0.5]
+      }
+    },
+    {
+      "name": "three_battery_large_48",
+      "description": "Deliberately larger valid 48-interval shape retained as the warning evidence boundary.",
+      "benchmark_envelope": true,
+      "configuration": {
+        "costfun": "profit",
+        "set_use_pv": true,
+        "set_use_battery": true,
+        "number_of_batteries": 3,
+        "number_of_deferrable_loads": 0,
+        "inverter_is_hybrid": false,
+        "battery_nominal_energy_capacity": [10000, 10000, 10000],
+        "battery_discharge_power_max": [5000, 5000, 5000],
+        "battery_charge_power_max": [5000, 5000, 5000],
+        "battery_discharge_efficiency": [0.95, 0.95, 0.95],
+        "battery_charge_efficiency": [0.95, 0.95, 0.95],
+        "battery_minimum_state_of_charge": [0.04, 0.04, 0.04],
+        "battery_maximum_state_of_charge": [0.9, 0.9, 0.9],
+        "battery_target_state_of_charge": [0.5, 0.5, 0.5],
+        "set_nocharge_from_grid": false,
+        "set_nodischarge_to_grid": false,
+        "weather_forecast_method": "list",
+        "load_forecast_method": "list",
+        "load_cost_forecast_method": "list",
+        "production_price_forecast_method": "list"
+      },
+      "candidate_profiles": [
+        {
+          "charge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [5000, 4000, 3000, 2000, 1000]},
+          "discharge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [1000, 2000, 3000, 4000, 5000]}
+        },
+        {
+          "charge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [5000, 4000, 3000, 2000, 1000]},
+          "discharge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [1000, 2000, 3000, 4000, 5000]}
+        },
+        {
+          "charge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [5000, 4000, 3000, 2000, 1000]},
+          "discharge": {"soc_breakpoints": [0.2, 0.4, 0.6, 0.8], "power_max": [1000, 2000, 3000, 4000, 5000]}
+        }
+      ],
+      "runtime": {
+        "prediction_horizon": 48,
+        "pv_power_forecast": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "load_power_forecast": [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+        "load_cost_forecast": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4],
+        "prod_price_forecast": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+        "soc_init": [0.5, 0.5, 0.5],
+        "soc_final": [0.5, 0.5, 0.5]
+      }
+    }
+  ]
+}
