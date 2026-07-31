@@ -932,10 +932,36 @@ async def adjust_pv_forecast(
             logger.error("Cannot recover from this error")
             return False
     # Call the predict method
-    p_pv_forecast = p_pv_forecast.rename("forecast").to_frame()
-    p_pv_forecast = fcst.adjust_pv_forecast_predict(forecasted_pv=p_pv_forecast)
+    p_pv_forecast_in = p_pv_forecast.rename("forecast").to_frame()
+    try:
+        p_pv_forecast_out = fcst.adjust_pv_forecast_predict(forecasted_pv=p_pv_forecast_in)
+    except ValueError as e:
+        # A model persisted by an older version may have been trained on a
+        # different feature set (e.g. the raw integer "hour" feature that was
+        # replaced by the cyclic hour encoding). scikit-learn then raises a
+        # ValueError on predict (feature-name mismatch). Re-fit once with the
+        # current feature set and retry; other exception types propagate.
+        logger.warning(
+            f"Adjusted PV model prediction failed ({type(e).__name__}: {e}). "
+            "The saved model may predate a feature-set change. Re-fitting."
+        )
+        success = await _retrieve_and_fit_pv_model(
+            fcst,
+            get_data_from_file,
+            retrieve_hass_conf,
+            optim_conf,
+            rh,
+            emhass_conf,
+            test_df_literal,
+        )
+        if not success:
+            logger.warning(
+                "Could not re-fit the adjusted PV model, falling back to unadjusted PV forecast."
+            )
+            return p_pv_forecast
+        p_pv_forecast_out = fcst.adjust_pv_forecast_predict(forecasted_pv=p_pv_forecast_in)
     # Update the PV forecast
-    return p_pv_forecast["adjusted_forecast"].rename(None)
+    return p_pv_forecast_out["adjusted_forecast"].rename(None)
 
 
 # Suggest-tier HA sensor entity ids (fixed; not user-configurable).
@@ -1103,6 +1129,13 @@ async def _identify_battery_impl(
     test_df_literal: str,
 ) -> None:
     """Implementation of :func:`identify_battery`; wrapped for the never-raise guarantee."""
+    num_batteries = utils.validate_num_batteries(plant_conf)
+    if num_batteries > 1:
+        logger.warning(
+            "Battery identification supports a single battery only; skipping "
+            f"(number_of_batteries={num_batteries})."
+        )
+        return
     data_path = pathlib.Path(emhass_conf["data_path"])
     json_path = data_path / "battery_identification.json"
     max_age_hours = optim_conf.get("battery_identification_model_max_age", 24)
@@ -1506,6 +1539,11 @@ async def set_input_data_dict(
             params = dict(orjson.loads(params))
     else:
         params = {}
+    publish_multi_inverter_mode = (
+        set_type == "publish-data"
+        and isinstance(params.get("plant_conf"), dict)
+        and params["plant_conf"].get("multi_inverter_mode") == "multi"
+    )
     # publish-data reads saved results and export-influxdb-to-csv retrieves InfluxDB data.
     # Neither action constructs an optimizer horizon.
     actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
@@ -1529,6 +1567,12 @@ async def set_input_data_dict(
         logger,
         emhass_conf,
     )
+    if publish_multi_inverter_mode:
+        # Publish-only input preparation temporarily selects single mode so a
+        # saved result does not require live indexed runtime forecasts. Restore
+        # the configured mode after parsing so publication retains the indexed
+        # entity contract encoded by the saved result columns.
+        plant_conf["multi_inverter_mode"] = "multi"
     if isinstance(params, str):
         params = dict(orjson.loads(params))
     if set_type not in actions_without_fcst_or_opt:
@@ -3135,6 +3179,113 @@ async def _publish_block_result_group(
     return cols
 
 
+_BATTERY_POWER_ENTITY_TEMPLATE = "sensor.p_batt_forecast_battery{k}"
+_BATTERY_SOC_ENTITY_TEMPLATE = "sensor.soc_batt_forecast_battery{k}"
+_DEFAULT_SOC_ENTITY_ID = "sensor.soc_batt_forecast"
+
+
+async def _publish_battery_data(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
+    """Publish Battery Power (fleet total; per-battery at N>1) and SOC
+    (bare at N=1, per-battery only at N>1)."""
+    cols = []
+    if not ctx.optim_conf["set_use_battery"]:
+        return cols
+    if "P_batt" not in opt_res_latest.columns:
+        ctx.logger.error("P_batt was not found in results DataFrame.")
+        return cols
+    # Power - fleet total. custom_batt_forecast_id overrides this one entity at
+    # any N: unchanged code path, so this stays a true no-op at N=1.
+    custom_batt = ctx.params["passed_data"]["custom_batt_forecast_id"]
+    await ctx.rh.post_data(
+        opt_res_latest["P_batt"],
+        ctx.idx,
+        custom_batt["entity_id"],
+        "power",
+        custom_batt["unit_of_measurement"],
+        custom_batt["friendly_name"],
+        type_var="batt",
+        **ctx.common_kwargs,
+    )
+    cols.append("P_batt")
+
+    n_batt = utils.validate_num_batteries(ctx.plant_conf)
+    if n_batt == 1:
+        # N=1: exactly today's entity set, zero new entities. Still
+        # overridable via custom_batt_soc_forecast_id.
+        # Guard the bare SOC_opt read the same way P_batt is guarded above: a
+        # stale N>1 results frame (fleet P_batt + SOC_opt_0/1, no bare
+        # SOC_opt) replayed under a config reverted to N=1 must warn+skip
+        # SOC, never KeyError.
+        if "SOC_opt" not in opt_res_latest.columns:
+            ctx.logger.error("SOC_opt was not found in results DataFrame.")
+            return cols
+        custom_soc = ctx.params["passed_data"]["custom_batt_soc_forecast_id"]
+        await ctx.rh.post_data(
+            opt_res_latest["SOC_opt"] * 100,
+            ctx.idx,
+            custom_soc["entity_id"],
+            "battery",
+            custom_soc["unit_of_measurement"],
+            custom_soc["friendly_name"],
+            type_var="SOC",
+            **ctx.common_kwargs,
+        )
+        cols.append("SOC_opt")
+        return cols
+
+    # N > 1: no bare fleet SOC sensor - SOC has no meaningful fleet aggregate.
+    # custom_batt_soc_forecast_id has no natural single target here (it
+    # customizes the bare sensor that no longer exists at N>1), so a runtime
+    # override is ignored with a one-time warning rather than silently
+    # reinterpreted as a prefix. This keeps every per-battery entity id
+    # exactly the pinned sensor.*_battery<K> name regardless of a legacy
+    # single-battery override, adding no new config surface.
+    custom_soc = ctx.params["passed_data"].get("custom_batt_soc_forecast_id") or {}
+    if custom_soc.get("entity_id") not in (None, _DEFAULT_SOC_ENTITY_ID):
+        ctx.logger.warning(
+            "custom_batt_soc_forecast_id override (%s) has no effect when "
+            "number_of_batteries=%d: SOC has no meaningful fleet aggregate, so "
+            "per-battery SOC always publishes on the fixed "
+            "sensor.soc_batt_forecast_battery<K> entity ids.",
+            custom_soc.get("entity_id"),
+            n_batt,
+        )
+
+    for k in range(n_batt):
+        p_col = f"P_batt_{k}"
+        if p_col in opt_res_latest.columns:
+            await ctx.rh.post_data(
+                opt_res_latest[p_col],
+                ctx.idx,
+                _BATTERY_POWER_ENTITY_TEMPLATE.format(k=k),
+                "power",
+                "W",
+                f"Battery Power Forecast Battery {k}",
+                type_var="batt",
+                **ctx.common_kwargs,
+            )
+            cols.append(p_col)
+        else:
+            ctx.logger.error(f"{p_col} was not found in results DataFrame.")
+
+        soc_col = f"SOC_opt_{k}"
+        if soc_col in opt_res_latest.columns:
+            await ctx.rh.post_data(
+                opt_res_latest[soc_col] * 100,
+                ctx.idx,
+                _BATTERY_SOC_ENTITY_TEMPLATE.format(k=k),
+                "battery",
+                "%",
+                f"Battery SOC Forecast Battery {k}",
+                type_var="SOC",
+                **ctx.common_kwargs,
+            )
+            cols.append(soc_col)
+        else:
+            ctx.logger.error(f"{soc_col} was not found in results DataFrame.")
+    return cols
+
+
 async def _publish_grid_power(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
     """Publish the site grid power forecast."""
     custom_grid = ctx.params["passed_data"]["custom_grid_forecast_id"]
@@ -3301,22 +3452,30 @@ async def publish_data(
             "power",
         )
     )
-    cols_published.extend(
-        await _publish_block_result_group(
-            ctx, opt_res_latest, "P_batt", "custom_batt_forecast_id", "power", "batt"
+    if ctx.plant_conf.get("multi_inverter_mode") == "multi":
+        cols_published.extend(
+            await _publish_block_result_group(
+                ctx,
+                opt_res_latest,
+                "P_batt",
+                "custom_batt_forecast_id",
+                "power",
+                "batt",
+            )
         )
-    )
-    cols_published.extend(
-        await _publish_block_result_group(
-            ctx,
-            opt_res_latest,
-            "SOC_opt",
-            "custom_batt_soc_forecast_id",
-            "battery",
-            "SOC",
-            100.0,
+        cols_published.extend(
+            await _publish_block_result_group(
+                ctx,
+                opt_res_latest,
+                "SOC_opt",
+                "custom_batt_soc_forecast_id",
+                "battery",
+                "SOC",
+                100.0,
+            )
         )
-    )
+    else:
+        cols_published.extend(await _publish_battery_data(ctx, opt_res_latest))
     cols_published.extend(await _publish_deferrable_loads(ctx, opt_res_latest))
     cols_published.extend(await _publish_deferrable_states(ctx, opt_res_latest))
     cols_published.extend(await _publish_thermal_loads(ctx, opt_res_latest))

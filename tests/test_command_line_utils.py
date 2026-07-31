@@ -2709,6 +2709,58 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             # Cleanup - unlink_missing_ok handles non-existent files safely
             model_path.unlink(missing_ok=True)
 
+    async def test_adjust_pv_forecast_stale_feature_model_refit(self):
+        """A saved model trained on an older feature set fails on predict:
+        adjust_pv_forecast must re-fit once and retry instead of erroring."""
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix=".pkl")
+        os.close(tmp_fd)
+        tmp_path = pathlib.Path(tmp_name)
+        # A valid pickle (so the load path succeeds); predict fails later
+        async with aiofiles.open(tmp_path, "wb") as tmp:
+            await tmp.write(pickle.dumps({"legacy": "model"}))
+        try:
+            fcst = MagicMock(spec=Forecast)
+            p_pv_forecast = pd.Series([100, 200, 300], name="P_PV")
+            test_emhass_conf = {
+                "data_path": tmp_path.parent,
+            }
+            test_optim_conf = {
+                "adjusted_pv_model_max_age": 24,
+                "adjusted_pv_regression_model": "LassoRegression",
+            }
+            test_retrieve_hass_conf = {}
+            rh = MagicMock()
+            model_path = tmp_path.parent / "adjust_pv_regressor.pkl"
+            tmp_path.rename(model_path)
+            with patch("emhass.command_line.retrieve_home_assistant_data") as mock_retrieve:
+                mock_retrieve.return_value = (True, pd.DataFrame(), None)
+                fcst.adjust_pv_forecast_data_prep = MagicMock()
+                fcst.adjust_pv_forecast_fit = AsyncMock()
+                # First predict raises like scikit-learn does on a feature-name
+                # mismatch; after the re-fit the retry succeeds
+                fcst.adjust_pv_forecast_predict = MagicMock(
+                    side_effect=[
+                        ValueError("The feature names should match those that were passed"),
+                        pd.DataFrame({"adjusted_forecast": [100, 200, 300]}),
+                    ]
+                )
+                result = await adjust_pv_forecast(
+                    logger,
+                    fcst,
+                    p_pv_forecast,
+                    True,
+                    test_retrieve_hass_conf,
+                    test_optim_conf,
+                    rh,
+                    test_emhass_conf,
+                    pd.DataFrame(),
+                )
+                fcst.adjust_pv_forecast_fit.assert_called_once()
+                self.assertEqual(fcst.adjust_pv_forecast_predict.call_count, 2)
+                self.assertIsNotNone(result, "Should return valid result after re-fit")
+        finally:
+            model_path.unlink(missing_ok=True)
+
     async def test_adjusted_pv_model_max_age_affects_model_refit_behavior(self):
         """
         Test that adjusted_pv_model_max_age controls whether a cached model is reused
@@ -3005,6 +3057,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         )
         params["plant_conf"].update(
             {
+                "multi_inverter_mode": "multi",
                 "inverter_is_hybrid": True,
                 "compute_curtailment": True,
             }
@@ -3278,6 +3331,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         params = await TestCommandLineAsyncUtils.get_test_params()
         params["optim_conf"]["set_use_battery"] = True
         params["optim_conf"]["number_of_deferrable_loads"] = 0
+        params["plant_conf"]["multi_inverter_mode"] = "multi"
         input_data_dict = await set_input_data_dict(
             emhass_conf,
             "profit",
@@ -6239,8 +6293,8 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIs(opt_2.inverter_block_config[0].optim_conf, opt_2.optim_conf)
         self.assertIs(opt_2.inverter_block_config[0].plant_conf, opt_2.plant_conf)
         self.assertEqual(opt_2.inverter_block_config[0].plant_conf["battery_charge_power_max"], 8888)
-        self.assertAlmostEqual(float(opt_2.param_battery_charge_power_max.value), 8888.0)
-        self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max.value), 9999.0)
+        self.assertAlmostEqual(float(opt_2.param_battery_charge_power_max[0].value), 8888.0)
+        self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max[0].value), 9999.0)
 
 
 if __name__ == "__main__":

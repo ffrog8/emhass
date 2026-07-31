@@ -985,7 +985,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             set_nocharge_from_grid=False,
             set_nodischarge_to_grid=False,
         )
-        nocharge_opt, _ = self._run_legacy_deterministic_battery_case(
+        nocharge_opt, nocharge_res = self._run_legacy_deterministic_battery_case(
             soc_init=0.0,
             soc_final=0.5,
             set_nocharge_from_grid=True,
@@ -997,7 +997,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             set_nocharge_from_grid=False,
             set_nodischarge_to_grid=False,
         )
-        nodischarge_opt, _ = self._run_legacy_deterministic_battery_case(
+        nodischarge_opt, nodischarge_res = self._run_legacy_deterministic_battery_case(
             soc_init=0.5,
             soc_final=0.0,
             set_nocharge_from_grid=False,
@@ -1006,8 +1006,10 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(charge_allowed_opt.optim_status, "Optimal")
         self.assertEqual(discharge_allowed_opt.optim_status, "Optimal")
-        self.assertEqual(nocharge_opt.optim_status, "Infeasible")
-        self.assertEqual(nodischarge_opt.optim_status, "Infeasible")
+        self.assertEqual(nocharge_opt.optim_status, "Optimal")
+        self.assertEqual(nodischarge_opt.optim_status, "Optimal")
+        self.assertLessEqual(nocharge_res["P_batt"].abs().max(), 1e-6)
+        self.assertLessEqual(nodischarge_res["P_batt"].abs().max(), 1e-6)
 
     def test_legacy_hybrid_grid_charge_and_discharge_flags_block_forbidden_paths(self):
         hybrid_charge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
@@ -1017,12 +1019,14 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             set_nodischarge_to_grid=False,
             inverter_is_hybrid=True,
         )
-        hybrid_nocharge_opt, _ = self._run_legacy_deterministic_battery_case(
-            soc_init=0.0,
-            soc_final=0.5,
-            set_nocharge_from_grid=True,
-            set_nodischarge_to_grid=False,
-            inverter_is_hybrid=True,
+        hybrid_nocharge_opt, hybrid_nocharge_res = (
+            self._run_legacy_deterministic_battery_case(
+                soc_init=0.0,
+                soc_final=0.5,
+                set_nocharge_from_grid=True,
+                set_nodischarge_to_grid=False,
+                inverter_is_hybrid=True,
+            )
         )
         hybrid_discharge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
             soc_init=0.5,
@@ -1031,18 +1035,22 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             set_nodischarge_to_grid=False,
             inverter_is_hybrid=True,
         )
-        hybrid_nodischarge_opt, _ = self._run_legacy_deterministic_battery_case(
-            soc_init=0.5,
-            soc_final=0.0,
-            set_nocharge_from_grid=False,
-            set_nodischarge_to_grid=True,
-            inverter_is_hybrid=True,
+        hybrid_nodischarge_opt, hybrid_nodischarge_res = (
+            self._run_legacy_deterministic_battery_case(
+                soc_init=0.5,
+                soc_final=0.0,
+                set_nocharge_from_grid=False,
+                set_nodischarge_to_grid=True,
+                inverter_is_hybrid=True,
+            )
         )
 
         self.assertEqual(hybrid_charge_allowed_opt.optim_status, "Optimal")
         self.assertEqual(hybrid_discharge_allowed_opt.optim_status, "Optimal")
-        self.assertEqual(hybrid_nocharge_opt.optim_status, "Infeasible")
-        self.assertEqual(hybrid_nodischarge_opt.optim_status, "Infeasible")
+        self.assertEqual(hybrid_nocharge_opt.optim_status, "Optimal")
+        self.assertEqual(hybrid_nodischarge_opt.optim_status, "Optimal")
+        self.assertLessEqual(hybrid_nocharge_res["P_batt"].abs().max(), 1e-6)
+        self.assertLessEqual(hybrid_nodischarge_res["P_batt"].abs().max(), 1e-6)
 
     def run_thermal_battery_optimization(self, thermal_config, outdoor_temps=None, ghi=None):
         """Helper to run thermal battery optimization tests.
@@ -1580,7 +1588,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
         self.assertEqual(opt.inverter_block_config[0].runtime_conf["soc_target"], 0.4)
-        self.assertAlmostEqual(opt.param_soc_target_floor.value[-1], 400.0)
+        self.assertAlmostEqual(opt.param_soc_target_floor[0].value[-1], 400.0)
         self.assertTrue(
             any(
                 "hybrid_inverter_config_1.soc_target=0.75" in line
@@ -1647,7 +1655,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(opt.inverter_block_config[0].runtime_conf["soc_target"], 0.3)
-        self.assertAlmostEqual(opt.param_soc_target_floor.value[-1], 300.0)
+        self.assertAlmostEqual(opt.param_soc_target_floor[0].value[-1], 300.0)
         warning_mock.assert_called_once_with(
             "Passed hybrid_inverter_config_%s.soc_target=%s is outside [%s, %s], "
             "clamping to soc_target=%s",
@@ -1671,7 +1679,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                     target,
                 )
                 self.assertAlmostEqual(
-                    opt.param_soc_target_floor.value[-1],
+                    opt.param_soc_target_floor[0].value[-1],
                     target * 1000.0,
                 )
                 warning_mock.assert_not_called()
@@ -1763,8 +1771,8 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(sorted(opt.inverter_block_variables), [0, 1])
-        self.assertIs(opt.inverter_block_variables[0].p_sto_pos, opt.vars["p_sto_pos"])
-        self.assertIs(opt.inverter_block_variables[0].p_sto_neg, opt.vars["p_sto_neg"])
+        self.assertIs(opt.inverter_block_variables[0].p_sto_pos, opt.vars["p_sto_pos"][0])
+        self.assertIs(opt.inverter_block_variables[0].p_sto_neg, opt.vars["p_sto_neg"][0])
         self.assertIs(opt.inverter_block_variables[1].p_sto_pos, opt.vars["p_sto_pos_1"])
         self.assertIs(opt.inverter_block_variables[1].p_sto_neg, opt.vars["p_sto_neg_1"])
         self.assertIs(opt.inverter_block_variables[1].battery_mode, opt.vars["E_1"])
@@ -1789,7 +1797,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertNotIn("E_site", opt.vars)
-        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
+        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"][0])
         self.assertIs(opt.inverter_block_variables[1].battery_mode, opt.vars["E_1"])
         self.assertIsNot(
             opt.inverter_block_variables[0].battery_mode,
@@ -2020,7 +2028,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(np.max(block_1_discharge), 1e-6)
         self.assertTrue(np.all((block_1_discharge <= 1e-6) | (-block_1_charge <= 1e-6)))
 
-    def test_multi_block_battery_mode_lock_site_rejects_forced_cross_block_mixing(self):
+    def test_multi_block_battery_mode_lock_site_avoids_forced_cross_block_mixing(self):
         optim_conf, plant_conf = self._battery_only_confs()
         optim_conf["battery_mode_lock"] = "site"
         payload = {
@@ -2042,8 +2050,9 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "soc_final": 0.5,
         }
 
-        status, _no_mixed_direction = self._run_in_clean_solver_process(payload)
-        self.assertNotIn(status, VALID_OPTIMAL_STATUSES)
+        status, no_mixed_direction = self._run_in_clean_solver_process(payload)
+        self.assertIn(status, VALID_OPTIMAL_STATUSES)
+        self.assertTrue(no_mixed_direction)
 
     def test_multi_block_battery_mode_lock_site_separates_charge_and_discharge_timesteps(self):
         df = self._make_multi_block_battery_df(periods=4)
@@ -2090,7 +2099,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
 
         self.assertIn("E_site", opt.vars)
-        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
+        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"][0])
         self.assertIs(opt.inverter_block_variables[2].battery_mode, opt.vars["E_2"])
 
     def test_multi_block_battery_soc_balance_cost_zero_is_structure_noop(self):
@@ -2633,7 +2642,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.5,
         )
 
-        self.assertNotIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(
+            np.max(np.asarray(opt.vars["p_hybrid_inverter"].value)),
+            400.0 + 1e-6,
+        )
 
     def test_multi_block_hybrid_extra_block_respects_own_ac_input_limit(self):
         df = self._make_multi_block_hybrid_df(periods=1)
@@ -2667,7 +2680,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.5,
         )
 
-        self.assertNotIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertGreaterEqual(
+            np.min(np.asarray(opt.vars["p_hybrid_inverter"].value)),
+            -400.0 - 1e-6,
+        )
 
     def test_multi_block_split_pv_extra_block_curtailment_is_block_local(self):
         extra_pv_forecast = [750.0, 500.0]
@@ -2792,7 +2809,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.5,
         )
 
-        self.assertNotIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(
+            np.max(np.asarray(opt.vars["p_sto_pos"][0].value)),
+            1e-6,
+        )
 
     def test_multi_block_battery_first_priority_uses_aggregate_stored_energy(self):
         df = self._make_multi_block_battery_df(periods=2)
@@ -3001,7 +3022,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.5,
         )
 
-        self.assertNotIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(
+            np.max(np.asarray(opt.vars["p_grid_pos"].value)),
+            700.0 + 1e-6,
+        )
 
     def test_multi_block_hybrid_site_export_limit_is_aggregate(self):
         df = self._make_multi_block_hybrid_df(periods=1, root_pv=0.0, load=0.0)
@@ -3032,7 +3057,11 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.5,
         )
 
-        self.assertNotIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertLessEqual(
+            np.max(-np.asarray(opt.vars["p_grid_neg"].value)),
+            700.0 + 1e-6,
+        )
 
     def test_multi_block_hybrid_result_columns_use_unsuffixed_totals(self):
         df = self._make_multi_block_hybrid_df(periods=2, root_pv=100.0)
@@ -3465,7 +3494,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
 
         self.assertIn("E_site", opt.vars)
-        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"])
+        self.assertIs(opt.inverter_block_variables[0].battery_mode, opt.vars["E"][0])
         self.assertIs(opt.inverter_block_variables[2].battery_mode, opt.vars["E_2"])
 
         opt.perform_optimization(
@@ -10368,10 +10397,15 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         Same high-PV, large-SoC-shed scenario as the non-hybrid test, but with
         inverter_is_hybrid=True.  The fix must leave the hybrid branch unchanged
-        (E<=D), so every export timestep (D=0) still blocks battery discharge (E=0),
-        making the large SoC shed infeasible.  If the fix accidentally removed E<=D
-        from the hybrid branch this test would pass (feasible) and must be treated
-        as a regression.
+        (E<=D), so every export timestep (D=0) still blocks battery discharge (E=0).
+
+        This used to assert infeasibility, using "no schedule exists" as the proxy for
+        "E<=D is still applied".  That proxy no longer holds now that soc_final is a
+        soft target: an unreachable shed relaxes instead of failing the solve, so the
+        scenario returns the closest reachable schedule.  The invariant is therefore
+        asserted directly -- no battery discharge in any exporting timestep -- which
+        also tests the intent more precisely than the status did.  If the fix ever
+        removed E<=D from the hybrid branch, discharge during export would appear here.
         """
         df, soc_init, soc_final = self._make_nodischarge_scenario(inverter_is_hybrid=True)
 
@@ -10385,7 +10419,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             emhass_conf,
             logger,
         )
-        opt.perform_optimization(
+        opt_res = opt.perform_optimization(
             df,
             df["p_pv_forecast"].values,
             df["p_load_forecast"].values,
@@ -10394,11 +10428,28 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_init=soc_init,
             soc_final=soc_final,
         )
-        self.assertNotIn(
-            opt.optim_status,
-            VALID_OPTIMAL_STATUSES,
-            f"Hybrid set_nodischarge_to_grid must keep E<=D, blocking discharge during export "
-            f"-> infeasible for large SoC shed; got status={opt.optim_status!r} (issue #936)",
+        if opt.optim_status not in VALID_OPTIMAL_STATUSES:
+            # Also acceptable: E<=D can leave no schedule for the shed at all.
+            return
+
+        epsilon = 1e-3  # W - numerical tolerance
+        p_grid_neg = opt_res["P_grid_neg"].values  # <= 0; grid export
+        p_batt = opt_res["P_batt"].values  # > 0 = discharging
+        exporting = 0
+        for t in range(len(p_batt)):
+            if p_grid_neg[t] < -epsilon:
+                exporting += 1
+                self.assertLessEqual(
+                    p_batt[t],
+                    epsilon,
+                    f"Step {t}: hybrid inverter discharged {p_batt[t]:.1f} W while exporting "
+                    f"(P_grid_neg={p_grid_neg[t]:.1f} W); set_nodischarge_to_grid must keep "
+                    f"E<=D on hybrid inverters (issue #936)",
+                )
+        self.assertGreater(
+            exporting,
+            0,
+            "Scenario misconfigured: expected exporting timesteps to exercise E<=D",
         )
 
     def test_nodischarge_to_grid_curtailment_no_battery_export_issue936(self):
@@ -10521,6 +10572,109 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 f"P_PV_curtailment={p_pv_curt[t]:.1f}, pv_avail={pv_available[t]:.1f}); "
                 f"set_nodischarge_to_grid + compute_curtailment must prevent this "
                 f"(issue #936 curtailment fix)",
+            )
+
+    def test_nodischarge_to_grid_deficit_no_battery_export_issue1023(self):
+        """Issue #1023 as originally reported: load exceeds PV, yet the battery covered
+        the whole load so the untouched PV could be exported.
+
+        This is the deficit counterpart to the #936 tests, which all use PV > load. With
+        PV=400 W against a 1000 W load there is no surplus at all, so the correct export
+        is exactly zero and the battery may at most serve the local deficit.
+
+        RED on the raw-PV bound (p_grid_neg + p_pv >= 0): export is capped at 400 W, not
+        at the (zero) surplus, so the solver discharges 1400 W -- 1000 W to the load and
+        400 W to free the PV for export -- and sells battery energy at the feed-in price.
+        GREEN with the surplus bound (p_grid_neg + param_export_ceiling >= 0): the
+        ceiling is max(0, 400 - 1000) = 0, so no export is possible and the battery
+        discharge cannot exceed the load.
+
+        Feed-in is priced above import here so exporting is strictly the more profitable
+        option; the constraint, not the economics, has to be what prevents it.
+        """
+        tz = self.retrieve_hass_conf["time_zone"]
+        n = 6
+        dates = pd.date_range(
+            start=pd.Timestamp("2024-06-15 19:00:00", tz=tz),
+            periods=n,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df = pd.DataFrame(index=dates)
+        p_pv_w = 400.0
+        p_load_w = 1000.0
+        df["p_pv_forecast"] = p_pv_w
+        df["p_load_forecast"] = p_load_w
+        df[self.fcst.var_load_cost] = 0.20
+        df[self.fcst.var_prod_price] = 1.00  # exporting is the tempting option
+
+        cap = 10000.0  # Wh, loss-free
+        self.plant_conf.update(
+            {
+                "inverter_is_hybrid": False,
+                "compute_curtailment": False,
+                "battery_nominal_energy_capacity": cap,
+                "battery_discharge_power_max": 4000.0,  # >> load, so the cap is not the limiter
+                "battery_charge_power_max": 4000.0,
+                "battery_discharge_efficiency": 1.0,
+                "battery_charge_efficiency": 1.0,
+                "battery_minimum_state_of_charge": 0.0,
+                "battery_maximum_state_of_charge": 1.0,
+            }
+        )
+        self.optim_conf.update(
+            {
+                "set_use_battery": True,
+                "set_nodischarge_to_grid": True,
+                "set_nocharge_from_grid": True,
+                "set_battery_dynamic": False,
+                "number_of_deferrable_loads": 0,
+                "weight_battery_discharge": 0.0,
+                "weight_battery_charge": 0.0,
+            }
+        )
+
+        opt = Optimization(
+            self.retrieve_hass_conf,
+            self.optim_conf,
+            self.plant_conf,
+            self.fcst.var_load_cost,
+            self.fcst.var_prod_price,
+            "profit",
+            emhass_conf,
+            logger,
+        )
+        opt_res = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+            soc_init=0.9,
+            soc_final=0.5,  # wants to shed more than the local deficit can absorb
+        )
+        self.assertIn(
+            opt.optim_status,
+            VALID_OPTIMAL_STATUSES,
+            f"Deficit scenario must stay solvable (soc_final is a soft target); "
+            f"got status={opt.optim_status!r} (issue #1023)",
+        )
+
+        epsilon = 1e-3  # W
+        p_grid_neg = opt_res["P_grid_neg"].values  # <= 0; grid export
+        p_batt = opt_res["P_batt"].values  # > 0 = discharging
+        for t in range(n):
+            self.assertGreaterEqual(
+                p_grid_neg[t],
+                -epsilon,
+                f"Step {t}: exported {-p_grid_neg[t]:.1f} W while load ({p_load_w:.0f} W) "
+                f"exceeds PV ({p_pv_w:.0f} W) -- there is no surplus, so this can only be "
+                f"battery energy routed to the grid (issue #1023)",
+            )
+            self.assertLessEqual(
+                p_batt[t],
+                p_load_w + epsilon,
+                f"Step {t}: battery discharged {p_batt[t]:.1f} W, more than the {p_load_w:.0f} W "
+                f"local load; the excess can only be leaving via the grid (issue #1023)",
             )
 
     # ---------------------------------------------------------------------------
