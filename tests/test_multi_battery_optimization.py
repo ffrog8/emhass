@@ -152,7 +152,7 @@ class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
 
 class TestSocPowerProfileFallbackBudget(unittest.TestCase):
     @staticmethod
-    def _case(timeout, *, with_profile=True):
+    def _case(timeout, *, with_profile=True, with_stress=False):
         plant_overrides = {"battery_maximum_state_of_charge": 1.0}
         if with_profile:
             plant_overrides["battery_soc_power_profiles"] = [
@@ -163,6 +163,20 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
                     }
                 }
             ]
+        if with_stress:
+            plant_overrides.update(
+                {
+                    "battery_stress_cost": 0.4,
+                    "battery_stress_segments": 3,
+                    "inverter_is_hybrid": True,
+                    "inverter_ac_output_max": 10000,
+                    "inverter_ac_input_max": 10000,
+                    "inverter_efficiency_dc_ac": 1.0,
+                    "inverter_efficiency_ac_dc": 1.0,
+                    "inverter_stress_cost": 0.6,
+                    "inverter_stress_segments": 4,
+                }
+            )
         opt = build_optimization(
             optim_overrides={"lp_solver_timeout": timeout},
             plant_overrides=plant_overrides,
@@ -299,6 +313,59 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"], None
         )
 
+    def test_cached_profile_timeout_removes_only_profile_constraints(self):
+        opt, df_input, p_pv, p_load = self._case(45, with_stress=True)
+        opt.perform_dayahead_forecast_optim(
+            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41
+        )
+        cached_profile_problem = opt.prob
+        solve_calls = []
+        original_solve = cp.Problem.solve
+
+        def simulate_cached_profile_timeout(problem, *args, **kwargs):
+            solve_calls.append(problem)
+            if len(solve_calls) == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return original_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=simulate_cached_profile_timeout):
+            opt.perform_dayahead_forecast_optim(
+                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
+            )
+
+        self.assertEqual(len(solve_calls), 2)
+        self.assertIs(solve_calls[0], cached_profile_problem)
+        profile_problem, scalar_problem = solve_calls
+        profile_variable_names = sorted(
+            variable.name() for variable in profile_problem.variables()
+        )
+        scalar_variable_names = sorted(
+            variable.name() for variable in scalar_problem.variables()
+        )
+        self.assertIn("battery_stress_cost_0", scalar_variable_names)
+        self.assertIn("inv_stress_cost", scalar_variable_names)
+        self.assertEqual(
+            [name for name in profile_variable_names if "profile_" not in name],
+            scalar_variable_names,
+        )
+        self.assertTrue(
+            any("profile_" in str(constraint) for constraint in profile_problem.constraints)
+        )
+        self.assertFalse(
+            any("profile_" in str(constraint) for constraint in scalar_problem.constraints)
+        )
+        self.assertEqual(
+            sorted(
+                str(constraint)
+                for constraint in profile_problem.constraints
+                if "profile_" not in str(constraint)
+            ),
+            sorted(str(constraint) for constraint in scalar_problem.constraints),
+        )
+        self.assertEqual(str(profile_problem.objective), str(scalar_problem.objective))
+
     def test_profile_non_timeout_keeps_existing_profiled_relaxed_retry(self):
         opt, df_input, p_pv, p_load = self._case(45)
         solve_calls = []
@@ -319,7 +386,7 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
                 df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41
             )
 
-        self.assertEqual([call[0] for call in solve_calls], [30.0, 30.0])
+        self.assertEqual([call[0] for call in solve_calls], [30.0, 45.0])
         self.assertTrue(
             any("profile_selectors" in name for name in solve_calls[1][1])
         )

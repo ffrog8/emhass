@@ -99,6 +99,17 @@ SOC_POWER_PROFILE_GUARD = 1e-4
 SOC_POWER_PROFILE_SOLVE_BUDGET_SECONDS = 30.0
 SOC_POWER_PROFILE_SCALAR_FALLBACK_BUDGET_SECONDS = 15.0
 
+
+def _set_solver_timeout(solver, solver_opts: dict, timeout: float) -> None:
+    """Set the selected solver's time-limit option without changing other options."""
+    if solver == cp.GUROBI:
+        solver_opts["TimeLimit"] = timeout
+    elif solver == cp.CPLEX:
+        solver_opts.setdefault("cplex_params", {})["timelimit"] = timeout
+    else:
+        solver_opts["time_limit"] = timeout
+
+
 # Battery-first priority (issue #834/#1002): when set_battery_first_priority is
 # on, importing from the grid while the battery is still above its minimum SoC is
 # penalized at this multiple of the prevailing import tariff. Making it a soft
@@ -398,6 +409,12 @@ class Optimization:
 
         # Initialize Variables & Bound Constraints
         self.vars, self.constraints = self._initialize_decision_variables()
+
+        # Retain the exact stress configuration and Variable objects used by
+        # the compiled problem. A cache-hit fallback rebuild must preserve
+        # those constraints and objective terms.
+        self._problem_batt_stress_conf = None
+        self._problem_inv_stress_conf = None
 
         # Note: The self.prob object will be constructed in a subsequent step
         self.prob = None
@@ -6347,10 +6364,11 @@ class Optimization:
                         f"Deferrable load {k}: deactivated (no operating timesteps, not thermal)"
                     )
 
-        # Initialize stress config variables (needed by retry path even when
-        # self.prob is cached from a previous call, see #770)
-        inv_stress_conf = None
-        batt_stress_conf = None
+        # Reuse the stress configuration that belongs to the cached problem.
+        # Replacing it with None would silently drop stress constraints and
+        # objective terms from a cache-hit fallback.
+        inv_stress_conf = self._problem_inv_stress_conf
+        batt_stress_conf = self._problem_batt_stress_conf
 
         # Build Problem (Lazy Construction)
         if self.prob is None:
@@ -6395,6 +6413,9 @@ class Optimization:
                 if inv_stress_conf["active"]:
                     self.vars["inv_stress_cost"] = inv_stress_conf["vars"]
                     self._refresh_inverter_block_variables()
+
+            self._problem_batt_stress_conf = batt_stress_conf
+            self._problem_inv_stress_conf = inv_stress_conf
 
             # Add Constraints
             self._add_main_power_balance_constraints(constraints)
@@ -6477,7 +6498,6 @@ class Optimization:
         if requested_solver == "GUROBI":
             if "GUROBI" in cp.installed_solvers():
                 selected_solver = cp.GUROBI
-                solver_opts["TimeLimit"] = primary_timeout
                 if threads > 0:
                     solver_opts["Threads"] = threads
             else:
@@ -6488,7 +6508,7 @@ class Optimization:
         elif requested_solver == "CPLEX":
             if "CPLEX" in cp.installed_solvers():
                 selected_solver = cp.CPLEX
-                cplex_params = {"timelimit": primary_timeout}
+                cplex_params = {}
                 if threads > 0:
                     cplex_params["threads"] = threads
                 solver_opts["cplex_params"] = cplex_params
@@ -6499,7 +6519,6 @@ class Optimization:
 
         # Configure HiGHS (The Default)
         if selected_solver == cp.HIGHS:
-            solver_opts["time_limit"] = primary_timeout
             if threads > 0:
                 solver_opts["threads"] = int(threads)
             # 'run_crossover' ensures a cleaner solution (closer to simplex vertex)
@@ -6530,6 +6549,8 @@ class Optimization:
                 self.logger.debug(f"MIP gap tolerance set to {mip_gap:.1%}")
             else:
                 self.logger.debug("MIP gap tolerance disabled (exact optimal)")
+
+        _set_solver_timeout(selected_solver, solver_opts, primary_timeout)
 
         # Stage-timer breadcrumb: end of build phase, start of solve phase.
         _solve_start_perf = time.perf_counter() if stage_times is not None else 0.0
@@ -6581,36 +6602,33 @@ class Optimization:
                 self.optim_conf["treat_deferrable_load_as_semi_cont"] = [False] * n_def
                 self.optim_conf["set_deferrable_load_single_constant"] = [False] * n_def
 
-            # Re-build Constraints (Clean Slate)
-            constraints_relaxed = self.constraints[:]  # Start with base bound constraints
+            # Re-build the selected fallback from the base bound constraints.
+            fallback_constraints = self.constraints[:]
 
             # Re-apply main constraints
-            self._add_main_power_balance_constraints(constraints_relaxed)
-            # (Note: We reuse previous stress configs as they don't change with relaxation)
-            # Guard on feature flags, not on the stress conf objects: stress conf is None
-            # on cached-problem retry paths (self.prob is not None), so guarding on the
-            # object itself would silently skip these constraints on every retry after the
-            # first call, leaving the relaxed problem without battery/inverter constraints.
+            self._add_main_power_balance_constraints(fallback_constraints)
             if self.plant_conf.get("inverter_is_hybrid", False):
-                self._add_hybrid_inverter_constraints(constraints_relaxed, inv_stress_conf)
+                self._add_hybrid_inverter_constraints(
+                    fallback_constraints, inv_stress_conf
+                )
             if self.optim_conf.get("set_use_battery", False):
                 self._add_battery_constraints(
-                    constraints_relaxed,
+                    fallback_constraints,
                     batt_stress_conf,
                     include_soc_power_profiles=not use_scalar_profile_fallback,
                 )
 
-            self._add_curtailment_bounds(constraints_relaxed)
+            self._add_curtailment_bounds(fallback_constraints)
             if self.costfun == "self-consumption" and "SC" in self.vars:
-                constraints_relaxed.append(self.vars["SC"] <= self.param_pv_forecast)
-                constraints_relaxed.append(
+                fallback_constraints.append(self.vars["SC"] <= self.param_pv_forecast)
+                fallback_constraints.append(
                     self.vars["SC"] <= self.param_load_forecast + self.vars["p_def_sum"]
                 )
 
             # Re-call deferrable load constraints (Skipping binary logic due to config change)
             self.predicted_temps, self.heating_demands, penalty_terms_total, self.q_inputs = (
                 self._add_deferrable_load_constraints(
-                    constraints_relaxed,
+                    fallback_constraints,
                     data_opt,
                     def_total_hours,
                     def_total_timestep,
@@ -6622,9 +6640,9 @@ class Optimization:
                 )
             )
 
-            # Deferrable Load Group Constraints (shared power budget only in relaxed mode)
+            # Only the established continuous-LP branch relaxes deferrable groups.
             self._add_deferrable_group_constraints(
-                constraints_relaxed,
+                fallback_constraints,
                 relaxed=not use_scalar_profile_fallback,
             )
 
@@ -6633,51 +6651,65 @@ class Optimization:
             if not isinstance(penalty_terms_total, int) or penalty_terms_total != 0:
                 objective_expr.args[0] += penalty_terms_total
 
-            # Solve Relaxed Problem
-            prob_relaxed = cp.Problem(objective_expr, constraints_relaxed)
+            fallback_problem = cp.Problem(objective_expr, fallback_constraints)
             try:
                 if use_scalar_profile_fallback:
-                    scalar_timeout = min(
+                    fallback_timeout = min(
                         timeout,
                         SOC_POWER_PROFILE_SCALAR_FALLBACK_BUDGET_SECONDS,
                     )
                     self.soc_profile_fallback_diagnostics.update(
                         {
                             "scalar_fallback_reason": "user_limit",
-                            "scalar_budget_seconds": scalar_timeout,
+                            "scalar_budget_seconds": fallback_timeout,
                         }
                     )
-                    if selected_solver == cp.GUROBI:
-                        solver_opts["TimeLimit"] = scalar_timeout
-                    elif selected_solver == cp.CPLEX:
-                        solver_opts["cplex_params"]["timelimit"] = scalar_timeout
-                    else:
-                        solver_opts["time_limit"] = scalar_timeout
                     self.logger.info("Solving scalar battery fallback...")
-                    prob_relaxed.solve(solver=selected_solver, **solver_opts)
-                    self.soc_profile_fallback_diagnostics["scalar_status"] = (
-                        prob_relaxed.status
-                    )
                 else:
-                    self.logger.info("Solving relaxed problem (LP)...")
-                    prob_relaxed.solve(solver=selected_solver, **solver_opts)
+                    fallback_timeout = timeout
+                    self.logger.info("Solving relaxed problem (Continuous LP)...")
 
-                if prob_relaxed.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                    self.logger.info("Fallback optimization successful!")
-                    # Mark status so user knows it was relaxed
-                    prob_relaxed._status = "Optimal (Relaxed)"
-                    result_problem = prob_relaxed
-                    if not use_scalar_profile_fallback:
-                        self.prob = prob_relaxed
-                else:
-                    self.logger.error(
-                        f"Relaxed optimization also failed with status: {prob_relaxed.status}"
+                _set_solver_timeout(selected_solver, solver_opts, fallback_timeout)
+                fallback_problem.solve(solver=selected_solver, **solver_opts)
+                if use_scalar_profile_fallback:
+                    self.soc_profile_fallback_diagnostics["scalar_status"] = (
+                        fallback_problem.status
                     )
-                    result_problem = prob_relaxed
+
+                if fallback_problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+                    success_description = (
+                        "Scalar battery fallback"
+                        if use_scalar_profile_fallback
+                        else "Relaxed optimization"
+                    )
+                    self.logger.info(f"{success_description} successful!")
+                    # Preserve the established downstream fallback status.
+                    # soc_profile_fallback_diagnostics distinguishes the scalar
+                    # profile fallback from the continuous-LP relaxation.
+                    fallback_problem._status = "Optimal (Relaxed)"
+                    result_problem = fallback_problem
                     if not use_scalar_profile_fallback:
-                        self.prob = prob_relaxed
+                        self.prob = fallback_problem
+                else:
+                    failure_description = (
+                        "Scalar battery fallback"
+                        if use_scalar_profile_fallback
+                        else "Relaxed optimization"
+                    )
+                    self.logger.error(
+                        f"{failure_description} failed with status: "
+                        f"{fallback_problem.status}"
+                    )
+                    result_problem = fallback_problem
+                    if not use_scalar_profile_fallback:
+                        self.prob = fallback_problem
             except Exception as e:
-                self.logger.error(f"Relaxed optimization crashed: {e}")
+                failure_description = (
+                    "Scalar battery fallback"
+                    if use_scalar_profile_fallback
+                    else "Relaxed optimization"
+                )
+                self.logger.error(f"{failure_description} crashed: {e}")
 
             # 5. Restore Configuration
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
@@ -6692,7 +6724,8 @@ class Optimization:
         status_raw = result_problem.status
         self.optim_status = status_raw.title() if status_raw else "Failure"
 
-        # Helper: Ensure we return "Optimal" for tests if it was "Optimal (Relaxed)" or "Optimal_Inaccurate"
+        # Accept the established downstream fallback marker. It is retained for
+        # compatibility by both the continuous-LP and scalar-profile branches.
         if result_problem.value is None or result_problem.status not in [
             cp.OPTIMAL,
             cp.OPTIMAL_INACCURATE,
