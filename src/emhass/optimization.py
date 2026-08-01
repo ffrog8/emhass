@@ -6630,7 +6630,7 @@ class Optimization:
                     self.vars["SC"] <= self.param_load_forecast + self.vars["p_def_sum"]
                 )
 
-            # Re-call deferrable load constraints (Skipping binary logic due to config change)
+            # Scalar fallback preserves deferrable binary logic; continuous-LP fallback disables it.
             self.predicted_temps, self.heating_demands, penalty_terms_total, self.q_inputs = (
                 self._add_deferrable_load_constraints(
                     fallback_constraints,
