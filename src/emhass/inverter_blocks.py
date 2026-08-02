@@ -377,6 +377,30 @@ def _extract_block_indexes(
     return indexes
 
 
+def ordered_public_battery_block_indexes(
+    input_conf: Mapping[str, object],
+    plant_conf: Mapping[str, object],
+) -> tuple[int, ...]:
+    """Return battery-enabled public inverter indexes in physical order.
+
+    Configuration and runtime profile normalization run before parsed inverter
+    blocks exist. This raw-config interface keeps their positional profile
+    contract aligned with the parser's canonical, contiguous public indexes.
+    """
+    if resolve_multi_inverter_mode(plant_conf) != MULTI_INVERTER_MODE_MULTI:
+        return ()
+
+    battery_indexes = []
+    for index in _extract_block_indexes(input_conf, warn_on_zero=False):
+        block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
+        raw_block = input_conf[block_key]
+        if not isinstance(raw_block, Mapping):
+            raise ValueError(f"{block_key} must be a dictionary")
+        if bool(raw_block.get("set_use_battery", False)):
+            battery_indexes.append(index)
+    return tuple(battery_indexes)
+
+
 def _extract_runtime_block_indexes(runtimeparams: Mapping[str, object]) -> list[int]:
     indexes: list[int] = []
     for key in runtimeparams:
@@ -815,7 +839,7 @@ def _active_indexed_inverter_blocks(
         return ()
     return tuple(
         block
-        for index, block in parsed_blocks.items()
+        for index, block in sorted(parsed_blocks.items())
         if isinstance(index, int)
         and not isinstance(index, bool)
         and index >= 1

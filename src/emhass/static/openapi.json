@@ -979,7 +979,7 @@
               }
             },
             "title": "Battery SOC power profiles",
-            "description": "Optional JSON list with exactly one object per configured battery. Use {} for no profile. Charge and discharge profiles independently contain soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative value in watts. Charge power must be non-increasing and discharge power must be non-decreasing as SOC rises."
+            "description": "Optional positional JSON list with exactly one object per battery owner. In the flat model, owners follow number_of_batteries. In public multi_inverter_mode=multi, owners are battery-enabled hybrid_inverter_config_N blocks in ascending N order and number_of_batteries remains 1; battery-disabled blocks consume no entry. Use {} for no profile. Charge and discharge profiles independently contain soc_breakpoints as strictly increasing SOC fractions from 0 to 1 and power_max as one more non-negative value in watts. Charge power must be non-increasing and discharge power must be non-decreasing as SOC rises. A profile can only lower its owner's scalar hardware power ceiling."
           },
           "set_nocharge_from_grid": {
             "type": "boolean",

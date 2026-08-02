@@ -418,14 +418,13 @@ class Optimization:
 
     def _init_battery_soc_power_profile_params(self) -> None:
         """Create fixed-shape charge/discharge profile coefficient parameters."""
-        profiles = self.plant_conf.get("battery_soc_power_profiles") or [
-            {} for _ in range(self.n_batt)
-        ]
+        profiles_by_block = self._soc_power_profile_entries_by_block()
         self.param_battery_charge_profile_breakpoints = []
         self.param_battery_charge_profile_power_max = []
         self.param_battery_discharge_profile_breakpoints = []
         self.param_battery_discharge_profile_power_max = []
-        for k, entry in enumerate(profiles):
+        for k in range(self.n_batt):
+            entry = profiles_by_block[k]
             for direction in ("charge", "discharge"):
                 profile = entry.get(direction)
                 breakpoint_params = getattr(self, f"param_battery_{direction}_profile_breakpoints")
@@ -600,6 +599,36 @@ class Optimization:
             if index == 0 or (self._is_public_multi_inverter_mode() and index == 1):
                 continue
             self.inverter_block_config[index] = block
+
+    def _soc_power_profile_block_indexes(self) -> tuple[int, ...]:
+        """Return internal battery indexes in external profile-list order."""
+        if not self._is_public_multi_inverter_mode():
+            return tuple(range(self.n_batt))
+        return tuple(
+            internal_index
+            for internal_index, block in sorted(
+                self.inverter_block_config.items(),
+                key=lambda item: item[1].index,
+            )
+            if block.set_use_battery
+        )
+
+    def _soc_power_profile_entries_by_block(
+        self,
+        profiles: list[dict] | None = None,
+    ) -> dict[int, dict]:
+        """Bind ordered profile entries to optimizer-private battery indexes."""
+        block_indexes = self._soc_power_profile_block_indexes()
+        if profiles is None:
+            profiles = self.plant_conf.get("battery_soc_power_profiles")
+        if profiles is None:
+            profiles = [{} for _ in block_indexes]
+        if len(profiles) != len(block_indexes):
+            raise ValueError(
+                "battery_soc_power_profiles does not match the optimizer battery topology: "
+                f"expected {len(block_indexes)} entries, got {len(profiles)}"
+            )
+        return dict(zip(block_indexes, profiles, strict=True))
 
     def _refresh_inverter_block_variables(self, vars_dict: dict | None = None) -> None:
         """Rebuild inverter block variable aliases after CVXPY variable recreation."""
@@ -787,6 +816,7 @@ class Optimization:
         self.param_extra_block_battery = {}
         if not self._multi_block_battery_model_enabled:
             return
+        profiles_by_block = self._soc_power_profile_entries_by_block()
         for index, block in self._extra_battery_block_configs():
             params = {
                 "soc_init": cp.Parameter(nonneg=True, name=f"soc_init_{index}"),
@@ -815,6 +845,34 @@ class Optimization:
                     name=f"battery_discharge_power_max_{index}",
                 ),
             }
+            profile_entry = (
+                profiles_by_block.get(index, {}) if self._is_public_multi_inverter_mode() else {}
+            )
+            for direction in ("charge", "discharge"):
+                profile = profile_entry.get(direction)
+                breakpoint_key = f"{direction}_profile_breakpoints"
+                power_key = f"{direction}_profile_power_max"
+                if profile is None:
+                    params[breakpoint_key] = None
+                    params[power_key] = None
+                    continue
+                breakpoints = profile["soc_breakpoints"]
+                params[breakpoint_key] = (
+                    cp.Parameter(
+                        len(breakpoints),
+                        name=f"battery_{direction}_profile_breakpoints_{index}",
+                    )
+                    if breakpoints
+                    else None
+                )
+                if params[breakpoint_key] is not None:
+                    params[breakpoint_key].value = breakpoints
+                params[power_key] = cp.Parameter(
+                    len(profile["power_max"]),
+                    nonneg=True,
+                    name=f"battery_{direction}_profile_power_max_{index}",
+                )
+                params[power_key].value = profile["power_max"]
             if block.set_use_pv:
                 params["pv_forecast"] = cp.Parameter(
                     self.num_timesteps,
@@ -1850,19 +1908,42 @@ class Optimization:
 
     def update_battery_soc_power_profiles(self, profiles: list[dict]) -> None:
         """Refresh profile coefficients for the compiled charge/discharge shape."""
-        for k, entry in enumerate(profiles):
+        for block_index, entry in self._soc_power_profile_entries_by_block(profiles).items():
             for direction in ("charge", "discharge"):
                 profile = entry.get(direction)
                 if profile is None:
                     continue
-                breakpoint_param = getattr(self, f"param_battery_{direction}_profile_breakpoints")[
-                    k
-                ]
+                if block_index < self.n_batt and not (
+                    self._is_public_multi_inverter_mode() and block_index != 0
+                ):
+                    breakpoint_param = getattr(
+                        self,
+                        f"param_battery_{direction}_profile_breakpoints",
+                    )[block_index]
+                    power_param = getattr(
+                        self,
+                        f"param_battery_{direction}_profile_power_max",
+                    )[block_index]
+                else:
+                    profile_params = self.param_extra_block_battery[block_index]
+                    breakpoint_param = profile_params[f"{direction}_profile_breakpoints"]
+                    power_param = profile_params[f"{direction}_profile_power_max"]
                 if breakpoint_param is not None:
                     breakpoint_param.value = profile["soc_breakpoints"]
-                getattr(self, f"param_battery_{direction}_profile_power_max")[k].value = profile[
-                    "power_max"
-                ]
+                power_param.value = profile["power_max"]
+
+    def _has_soc_power_profiles(self) -> bool:
+        root_params = (
+            self.param_battery_charge_profile_power_max,
+            self.param_battery_discharge_profile_power_max,
+        )
+        if any(profile is not None for profiles in root_params for profile in profiles):
+            return True
+        return any(
+            params[f"{direction}_profile_power_max"] is not None
+            for params in self.param_extra_block_battery.values()
+            for direction in ("charge", "discharge")
+        )
 
     def update_thermal_start_temps(self, optim_conf: dict) -> None:
         """
@@ -2483,6 +2564,18 @@ class Optimization:
                 boolean=True,
                 name=f"soc_high_recovered_{index}",
             )
+            for direction in ("charge", "discharge"):
+                breakpoint_param = params[f"{direction}_profile_breakpoints"]
+                selector_key = f"battery_{direction}_profile_selectors_{index}"
+                vars_dict[selector_key] = (
+                    cp.Variable(
+                        (n, breakpoint_param.size),
+                        boolean=True,
+                        name=selector_key,
+                    )
+                    if breakpoint_param is not None
+                    else None
+                )
             if _block.plant_conf.get("inverter_is_hybrid", False):
                 vars_dict[f"p_hybrid_inverter_{index}"] = cp.Variable(
                     n,
@@ -3056,6 +3149,45 @@ class Optimization:
                 seg_params,
             )
 
+    def _add_soc_power_profile_constraints(
+        self,
+        constraints,
+        *,
+        p_sto_pos,
+        p_sto_neg,
+        end_soc,
+        profile_params,
+        profile_selectors,
+    ) -> None:
+        """Apply both SOC-dependent directions for one physical battery."""
+        for direction in ("charge", "discharge"):
+            power_param = profile_params[f"{direction}_profile_power_max"]
+            if power_param is None:
+                continue
+            selected_cap = power_param[0]
+            breakpoint_param = profile_params[f"{direction}_profile_breakpoints"]
+            selectors = profile_selectors[direction]
+            if breakpoint_param is not None:
+                for breakpoint_index in range(breakpoint_param.size):
+                    selector = selectors[:, breakpoint_index]
+                    breakpoint = breakpoint_param[breakpoint_index]
+                    if direction == "charge":
+                        guarded_breakpoint = breakpoint - SOC_POWER_PROFILE_GUARD
+                    else:
+                        guarded_breakpoint = breakpoint + SOC_POWER_PROFILE_GUARD
+                    constraints.append(
+                        end_soc <= guarded_breakpoint + (1 - guarded_breakpoint) * selector
+                    )
+                    constraints.append(end_soc >= guarded_breakpoint * selector)
+                    selected_cap = selected_cap + cp.multiply(
+                        power_param[breakpoint_index + 1] - power_param[breakpoint_index],
+                        selector,
+                    )
+            if direction == "charge":
+                constraints.append(p_sto_neg >= -selected_cap)
+            else:
+                constraints.append(p_sto_pos <= selected_cap)
+
     def _add_battery_constraints(
         self, constraints, batt_stress_conf, *, include_soc_power_profiles=True
     ):
@@ -3201,55 +3333,29 @@ class Optimization:
                 }
             end_soc = current_stored_energy / cap
 
-            charge_profile_power = (
-                self.param_battery_charge_profile_power_max[k]
-                if include_soc_power_profiles
-                else None
-            )
-            if charge_profile_power is not None:
-                selected_charge_cap = charge_profile_power[0]
-                charge_profile_breakpoints = self.param_battery_charge_profile_breakpoints[k]
-                charge_profile_selectors = self.vars["battery_charge_profile_selectors"][k]
-                if charge_profile_breakpoints is not None:
-                    for breakpoint_index in range(charge_profile_breakpoints.size):
-                        selector = charge_profile_selectors[:, breakpoint_index]
-                        breakpoint = charge_profile_breakpoints[breakpoint_index]
-                        guarded_breakpoint = breakpoint - SOC_POWER_PROFILE_GUARD
-                        constraints.append(
-                            end_soc <= guarded_breakpoint + (1 - guarded_breakpoint) * selector
-                        )
-                        constraints.append(end_soc >= guarded_breakpoint * selector)
-                        selected_charge_cap = selected_charge_cap + cp.multiply(
-                            charge_profile_power[breakpoint_index + 1]
-                            - charge_profile_power[breakpoint_index],
-                            selector,
-                        )
-                constraints.append(p_sto_neg[k] >= -selected_charge_cap)
-
-            discharge_profile_power = (
-                self.param_battery_discharge_profile_power_max[k]
-                if include_soc_power_profiles
-                else None
-            )
-            if discharge_profile_power is not None:
-                selected_discharge_cap = discharge_profile_power[0]
-                discharge_profile_breakpoints = self.param_battery_discharge_profile_breakpoints[k]
-                discharge_profile_selectors = self.vars["battery_discharge_profile_selectors"][k]
-                if discharge_profile_breakpoints is not None:
-                    for breakpoint_index in range(discharge_profile_breakpoints.size):
-                        selector = discharge_profile_selectors[:, breakpoint_index]
-                        breakpoint = discharge_profile_breakpoints[breakpoint_index]
-                        guarded_breakpoint = breakpoint + SOC_POWER_PROFILE_GUARD
-                        constraints.append(
-                            end_soc <= guarded_breakpoint + (1 - guarded_breakpoint) * selector
-                        )
-                        constraints.append(end_soc >= guarded_breakpoint * selector)
-                        selected_discharge_cap = selected_discharge_cap + cp.multiply(
-                            discharge_profile_power[breakpoint_index + 1]
-                            - discharge_profile_power[breakpoint_index],
-                            selector,
-                        )
-                constraints.append(p_sto_pos[k] <= selected_discharge_cap)
+            if include_soc_power_profiles:
+                self._add_soc_power_profile_constraints(
+                    constraints,
+                    p_sto_pos=p_sto_pos[k],
+                    p_sto_neg=p_sto_neg[k],
+                    end_soc=end_soc,
+                    profile_params={
+                        "charge_profile_breakpoints": self.param_battery_charge_profile_breakpoints[
+                            k
+                        ],
+                        "charge_profile_power_max": self.param_battery_charge_profile_power_max[k],
+                        "discharge_profile_breakpoints": self.param_battery_discharge_profile_breakpoints[
+                            k
+                        ],
+                        "discharge_profile_power_max": self.param_battery_discharge_profile_power_max[
+                            k
+                        ],
+                    },
+                    profile_selectors={
+                        "charge": self.vars["battery_charge_profile_selectors"][k],
+                        "discharge": self.vars["battery_discharge_profile_selectors"][k],
+                    },
+                )
 
             # Min/Max SOC bounds with a single recovery transition.
             # Before recovery the trajectory stays on the initial out-of-band side.
@@ -3364,7 +3470,10 @@ class Optimization:
                     * self.time_step
                 )
 
-        self._add_extra_inverter_battery_constraints(constraints)
+        self._add_extra_inverter_battery_constraints(
+            constraints,
+            include_soc_power_profiles=include_soc_power_profiles,
+        )
 
         # Battery-first priority (issue #834): on a flat (non time-of-use)
         # tariff, "drain the battery before importing" and "interleave grid
@@ -3443,7 +3552,12 @@ class Optimization:
                 battery_first_penalty >= p_grid_pos - cp.multiply(max_from_grid, import_gate)
             )
 
-    def _add_extra_inverter_battery_constraints(self, constraints) -> None:
+    def _add_extra_inverter_battery_constraints(
+        self,
+        constraints,
+        *,
+        include_soc_power_profiles: bool,
+    ) -> None:
         """Add battery constraints owned by indexed inverter blocks."""
         for index, block_config in self._extra_battery_block_configs():
             extra_runtime = self.inverter_block_runtime[index]
@@ -3478,6 +3592,19 @@ class Optimization:
                 * extra_runtime.battery_charge_power_max
                 * (1 - extra_vars.battery_mode)
             )
+            if include_soc_power_profiles:
+                extra_params = self.param_extra_block_battery[index]
+                self._add_soc_power_profile_constraints(
+                    constraints,
+                    p_sto_pos=extra_vars.p_sto_pos,
+                    p_sto_neg=extra_vars.p_sto_neg,
+                    end_soc=soc,
+                    profile_params=extra_params,
+                    profile_selectors={
+                        direction: self.vars[f"battery_{direction}_profile_selectors_{index}"]
+                        for direction in ("charge", "discharge")
+                    },
+                )
             constraints.append(
                 stored_energy
                 >= extra_min_energy - extra_runtime.soc_low_gap * (1 - extra_vars.soc_low_recovered)
@@ -6391,14 +6518,7 @@ class Optimization:
         # Retrieve Constraints (Time & Threads)
         threads = self.optim_conf.get("num_threads", 0)
         timeout = float(self.optim_conf.get("lp_solver_timeout", 180))
-        has_soc_power_profiles = any(
-            profile is not None
-            for profiles in (
-                self.param_battery_charge_profile_power_max,
-                self.param_battery_discharge_profile_power_max,
-            )
-            for profile in profiles
-        )
+        has_soc_power_profiles = self._has_soc_power_profiles()
         primary_timeout = timeout
         if has_soc_power_profiles:
             primary_timeout = min(

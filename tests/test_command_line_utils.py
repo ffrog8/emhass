@@ -5397,6 +5397,95 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(float((-first_result["P_batt"]).max()), 500.0)
         self.assertLessEqual(float((-second_result["P_batt"]).max()), 500.0 + 1e-5)
 
+    async def test_public_multi_cache_hit_refreshes_extra_block_profile_coefficients(self):
+        self.params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(self.params)
+        self.params["hybrid_inverter_config_2"] = (
+            TestCommandLineAsyncUtils._battery_only_extra_block()
+        )
+        self.params["hybrid_inverter_config_3"] = (
+            TestCommandLineAsyncUtils._battery_only_extra_block()
+        )
+        self.params["plant_conf"]["number_of_batteries"] = 1
+        self.params["plant_conf"]["battery_soc_power_profiles"] = [{}, {}, {}]
+        common_runtime = {
+            "multi_inverter_mode": "multi",
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [0.0] * 9 + [5000.0],
+            "load_cost_forecast": [0.01] * 9 + [1.0],
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            **{
+                f"hybrid_inverter_config_{index}": {
+                    "soc_init": 0.5,
+                    "soc_final": 0.5,
+                }
+                for index in (1, 2, 3)
+            },
+        }
+
+        def profiles(config_2_cap):
+            return [
+                {"charge": {"soc_breakpoints": [], "power_max": [200.0]}},
+                {"charge": {"soc_breakpoints": [], "power_max": [config_2_cap]}},
+                {"charge": {"soc_breakpoints": [], "power_max": [400.0]}},
+            ]
+
+        first_input = await self._run_set_input(
+            {**common_runtime, "battery_soc_power_profiles": profiles(300.0)}
+        )
+        first_opt = first_input["opt"]
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+        first_problem = first_opt.prob
+
+        second_input = await self._run_set_input(
+            {**common_runtime, "battery_soc_power_profiles": profiles(100.0)}
+        )
+        second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_opt)
+        self.assertIs(second_input["opt"].prob, first_problem)
+        self.assertAlmostEqual(
+            float(
+                second_input["opt"]
+                .param_extra_block_battery[2]["charge_profile_power_max"]
+                .value[0]
+            ),
+            100.0,
+        )
+        self.assertGreater(float((-first_result["P_batt_2"]).max()), 100.0)
+        self.assertLessEqual(float((-second_result["P_batt_2"]).max()), 100.0 + 1e-5)
+
+    async def test_public_multi_model_size_counts_three_profile_owners(self):
+        self.params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(self.params)
+        for index in (2, 3):
+            self.params[f"hybrid_inverter_config_{index}"] = (
+                TestCommandLineAsyncUtils._battery_only_extra_block()
+            )
+        self.params["plant_conf"]["number_of_batteries"] = 1
+        self.params["plant_conf"]["battery_soc_power_profiles"] = [{}, {}, {}]
+        runtime = {
+            "multi_inverter_mode": "multi",
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [0.0] * 10,
+            "load_cost_forecast": [0.1] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "battery_soc_power_profiles": [{}, {}, {}],
+            **{
+                f"hybrid_inverter_config_{index}": {
+                    "soc_init": 0.5,
+                    "soc_final": 0.5,
+                }
+                for index in (1, 2, 3)
+            },
+        }
+
+        with patch("emhass.command_line.log_model_size_increase") as model_size_log:
+            await self._run_set_input(runtime)
+
+        self.assertEqual(model_size_log.call_args.kwargs["battery_count"], 3)
+        self.assertEqual(len(model_size_log.call_args.args[1]), 3)
+
     async def test_mpc_explicit_scalar_only_replacement_logs_zero_model_increase(self):
         runtime = {
             "set_use_battery": True,

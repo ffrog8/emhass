@@ -1664,15 +1664,20 @@ async def set_input_data_dict(
         else:
             # Try to get cached Optimization object for warm-starting
             _num_ts = len(fcst.forecast_dates)
+            soc_power_profiles = (
+                plant_conf.get("battery_soc_power_profiles")
+                if optim_conf.get("set_use_battery", False)
+                else None
+            )
             log_model_size_increase(
                 logger,
-                (
-                    plant_conf.get("battery_soc_power_profiles")
-                    if optim_conf.get("set_use_battery", False)
-                    else None
-                ),
+                soc_power_profiles,
                 _num_ts,
-                battery_count=int(plant_conf.get("number_of_batteries", 1)),
+                battery_count=(
+                    len(soc_power_profiles)
+                    if soc_power_profiles is not None
+                    else int(plant_conf.get("number_of_batteries", 1))
+                ),
             )
             opt = OptimizationCache.get(
                 optim_conf, plant_conf, costfun, retrieve_hass_conf, logger, _num_ts

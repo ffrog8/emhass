@@ -28,6 +28,7 @@ from emhass.inverter_blocks import (
     INVERTER_BLOCK_CONFIGS_KEY,
     MULTI_INVERTER_MODE_MULTI,
     merge_inverter_block_runtime_overrides,
+    ordered_public_battery_block_indexes,
     parse_inverter_block_configs,
     resolve_multi_inverter_mode,
 )
@@ -1562,9 +1563,6 @@ async def treat_runtimeparams(
         # N=1 is a no-op (see check_batt_params); this only does real work once
         # number_of_batteries > 1.
         num_batteries = validate_num_batteries(params["plant_conf"])
-        params["plant_conf"]["battery_soc_power_profiles"] = normalize_battery_soc_power_profiles(
-            params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
-        )
         for batt_param_name, batt_default in BATT_ARRAY_PARAMS_PLANT_CONF.items():
             _warn_if_runtime_scalar_masks_batt_list(
                 num_batteries,
@@ -2406,6 +2404,13 @@ async def treat_runtimeparams(
     # Export still parses indexed blocks, but split-PV runtime data is optimizer-only.
     if set_type != "export-influxdb-to-csv":
         _validate_inverter_block_pv_mode(params, block_runtime_conf)
+    if runtimeparams is not None:
+        public_battery_indexes = _public_soc_power_profile_owner_indexes(params)
+        params["plant_conf"]["battery_soc_power_profiles"] = normalize_battery_soc_power_profiles(
+            params["plant_conf"].get("battery_soc_power_profiles"),
+            num_batteries,
+            public_battery_indexes=public_battery_indexes,
+        )
     parse_inverter_block_configs(params, optim_conf, plant_conf, block_runtime_conf)
     if block_runtime_conf:
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
@@ -3355,6 +3360,13 @@ async def build_params(
         elif config.get(association[2]) is not None:
             params[association[0]][association[2]] = config[association[2]]
 
+    # Indexed inverter blocks are top-level structured configuration rather
+    # than association-backed scalar fields. Preserve them for the shared
+    # topology parser and early SOC-profile owner resolution.
+    for key, value in config.items():
+        if key.startswith(HYBRID_INVERTER_CONFIG_PREFIX):
+            params[key] = copy.deepcopy(value)
+
     # Check if we need to create `list_hp_periods` from config (ie. legacy options.json format)
     if (
         params.get("optim_conf") is not None
@@ -3528,8 +3540,11 @@ async def build_params(
         )
     for batt_param_name in BATT_WEIGHT_PARAMS:
         check_batt_weight_params(num_batteries, params["optim_conf"], batt_param_name, logger)
+    public_battery_indexes = _public_soc_power_profile_owner_indexes(params)
     params["plant_conf"]["battery_soc_power_profiles"] = normalize_battery_soc_power_profiles(
-        params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
+        params["plant_conf"].get("battery_soc_power_profiles"),
+        num_batteries,
+        public_battery_indexes=public_battery_indexes,
     )
 
     # historic_days_to_retrieve should be no less then 2
@@ -3699,17 +3714,45 @@ BATT_ARRAY_PARAMS_OPTIM_CONF: dict[str, bool | int | float] = {
 BATT_WEIGHT_PARAMS: tuple[str, ...] = ("weight_battery_charge", "weight_battery_discharge")
 
 
-def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict]:
+def _public_soc_power_profile_owner_indexes(
+    input_conf: Mapping[str, object],
+) -> tuple[int, ...] | None:
+    plant_conf = input_conf.get("plant_conf", {})
+    if not isinstance(plant_conf, Mapping):
+        return None
+    if resolve_multi_inverter_mode(plant_conf) != MULTI_INVERTER_MODE_MULTI:
+        return None
+    return ordered_public_battery_block_indexes(input_conf, plant_conf)
+
+
+def normalize_battery_soc_power_profiles(
+    value,
+    num_batteries: int,
+    *,
+    public_battery_indexes: tuple[int, ...] | None = None,
+) -> list[dict]:
     """Validate and normalize charge/discharge SOC power profiles to battery order.
 
     The list is positional and replaces as a whole at runtime. An empty object
     disables profiling for that battery.
     """
+    expected_count = (
+        len(public_battery_indexes) if public_battery_indexes is not None else num_batteries
+    )
     if value is None:
-        return [{} for _ in range(num_batteries)]
+        return [{} for _ in range(expected_count)]
     if not isinstance(value, list):
         raise ValueError("battery_soc_power_profiles must be a list")
-    if len(value) != num_batteries:
+    if len(value) != expected_count:
+        if public_battery_indexes is not None:
+            public_blocks = ", ".join(
+                f"hybrid_inverter_config_{index}" for index in public_battery_indexes
+            )
+            raise ValueError(
+                f"battery_soc_power_profiles has {len(value)} entries but "
+                f"multi_inverter_mode=multi has {expected_count} battery blocks: "
+                f"{public_blocks}; provide exactly one object per battery block"
+            )
         raise ValueError(
             f"battery_soc_power_profiles has {len(value)} entries but "
             f"number_of_batteries={num_batteries}; provide exactly one object per battery"

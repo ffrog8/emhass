@@ -61,6 +61,29 @@ def build_params(overrides: dict | None = None) -> dict:
     return asyncio.run(_build_params(overrides))
 
 
+def _public_battery_block(*, set_use_battery: bool = True) -> dict:
+    block = {
+        "set_use_pv": False,
+        "set_use_battery": set_use_battery,
+        "inverter_is_hybrid": False,
+        "compute_curtailment": False,
+    }
+    if set_use_battery:
+        block.update(
+            {
+                "battery_discharge_power_max": 5000,
+                "battery_charge_power_max": 4600,
+                "battery_discharge_efficiency": 0.95,
+                "battery_charge_efficiency": 0.95,
+                "battery_nominal_energy_capacity": 13300,
+                "battery_minimum_state_of_charge": 0.10,
+                "battery_maximum_state_of_charge": 0.95,
+                "battery_target_state_of_charge": 0.90,
+            }
+        )
+    return block
+
+
 async def _treat_runtime(runtimeparams: dict, base_params: dict, set_type="dayahead-optim"):
     params_json = orjson.dumps(base_params).decode("utf-8")
     rh_conf, optim_conf, plant_conf = utils.get_yaml_parse(params_json, logger)
@@ -151,6 +174,124 @@ def test_battery_soc_power_profiles_accept_independent_charge_and_discharge_prof
     params = build_params({"number_of_batteries": 2, "battery_soc_power_profiles": profiles})
 
     assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
+
+
+def test_public_multi_inverter_profiles_follow_battery_enabled_config_order():
+    profiles = [
+        {"charge": {"soc_breakpoints": [0.80], "power_max": [3000, 1000]}},
+        {"discharge": {"soc_breakpoints": [0.30], "power_max": [500, 3000]}},
+        {},
+    ]
+
+    params = build_params(
+        {
+            "number_of_batteries": 1,
+            "multi_inverter_mode": "multi",
+            "battery_soc_power_profiles": profiles,
+            "hybrid_inverter_config_1": _public_battery_block(),
+            "hybrid_inverter_config_2": _public_battery_block(),
+            "hybrid_inverter_config_3": _public_battery_block(),
+        }
+    )
+
+    assert params["plant_conf"]["number_of_batteries"] == 1
+    assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
+
+
+def test_public_multi_runtime_profiles_inherit_and_replace_as_complete_list():
+    configured = [
+        {"charge": {"soc_breakpoints": [0.80], "power_max": [3000, 1000]}},
+        {},
+        {"discharge": {"soc_breakpoints": [0.30], "power_max": [500, 3000]}},
+    ]
+    replacement = [
+        {},
+        {"charge": {"soc_breakpoints": [], "power_max": [1200]}},
+        {},
+    ]
+    base = build_params(
+        {
+            "number_of_batteries": 1,
+            "multi_inverter_mode": "multi",
+            "battery_soc_power_profiles": configured,
+            "hybrid_inverter_config_1": _public_battery_block(),
+            "hybrid_inverter_config_2": _public_battery_block(),
+            "hybrid_inverter_config_3": _public_battery_block(),
+        }
+    )
+
+    _, _, omitted = treat_runtime({}, base)
+    _, _, explicit_null = treat_runtime({"battery_soc_power_profiles": None}, base)
+    _, _, replaced = treat_runtime({"battery_soc_power_profiles": replacement}, base)
+
+    assert omitted["battery_soc_power_profiles"] == configured
+    assert explicit_null["battery_soc_power_profiles"] == configured
+    assert replaced["battery_soc_power_profiles"] == replacement
+
+
+def test_public_multi_profile_count_error_names_physical_inverter_blocks():
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"has 2 entries.*multi_inverter_mode=multi has 3 battery blocks: "
+            r"hybrid_inverter_config_1, hybrid_inverter_config_2, "
+            r"hybrid_inverter_config_3"
+        ),
+    ):
+        build_params(
+            {
+                "number_of_batteries": 1,
+                "multi_inverter_mode": "multi",
+                "battery_soc_power_profiles": [{}, {}],
+                "hybrid_inverter_config_1": _public_battery_block(),
+                "hybrid_inverter_config_2": _public_battery_block(),
+                "hybrid_inverter_config_3": _public_battery_block(),
+            }
+        )
+
+
+def test_public_multi_battery_disabled_block_does_not_consume_profile_entry():
+    params = build_params(
+        {
+            "number_of_batteries": 1,
+            "multi_inverter_mode": "multi",
+            "battery_soc_power_profiles": [{}, {}],
+            "hybrid_inverter_config_1": _public_battery_block(),
+            "hybrid_inverter_config_2": _public_battery_block(set_use_battery=False),
+            "hybrid_inverter_config_3": _public_battery_block(),
+        }
+    )
+
+    assert params["plant_conf"]["battery_soc_power_profiles"] == [{}, {}]
+
+
+def test_inherited_public_profiles_are_rejected_after_runtime_switch_to_single_mode():
+    base = build_params(
+        {
+            "number_of_batteries": 1,
+            "multi_inverter_mode": "multi",
+            "battery_soc_power_profiles": [{}, {}, {}],
+            "hybrid_inverter_config_1": _public_battery_block(),
+            "hybrid_inverter_config_2": _public_battery_block(),
+            "hybrid_inverter_config_3": _public_battery_block(),
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"has 3 entries but number_of_batteries=1"):
+        treat_runtime({"multi_inverter_mode": "single"}, base)
+
+
+def test_public_profile_owner_resolution_preserves_contiguous_index_error():
+    with pytest.raises(ValueError, match=r"indexes must be contiguous from 1"):
+        build_params(
+            {
+                "number_of_batteries": 1,
+                "multi_inverter_mode": "multi",
+                "battery_soc_power_profiles": [{}, {}],
+                "hybrid_inverter_config_1": _public_battery_block(),
+                "hybrid_inverter_config_3": _public_battery_block(),
+            }
+        )
 
 
 @pytest.mark.parametrize(
