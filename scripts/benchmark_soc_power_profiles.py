@@ -72,17 +72,14 @@ def verified_emhass_module_manifest(project_root: pathlib.Path) -> dict[str, Any
             continue
         module_file = getattr(module, "__file__", None)
         if module_file is None:
-            raise RuntimeError(
-                f"loaded production module {name!r} has no verifiable source path"
-            )
+            raise RuntimeError(f"loaded production module {name!r} has no verifiable source path")
         resolved_path = pathlib.Path(module_file).resolve()
         if not resolved_path.is_relative_to(source_root):
             raise RuntimeError(
-                f"loaded production module {name!r} is outside tested project root "
-                f"{project_root}"
+                f"loaded production module {name!r} is outside tested project root {project_root}"
             )
         modules[name] = {
-            "path": str(resolved_path.relative_to(project_root)),
+            "path": resolved_path.relative_to(project_root).as_posix(),
             "sha256": _sha256(resolved_path),
         }
     return {
@@ -154,11 +151,7 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         timing_names = state_runs[0]["timings_s"]
         timing_summary[cache_state] = {
             f"{name}_s": summarize_timings(
-                [
-                    run["timings_s"][name]
-                    for run in state_runs
-                    if run["timings_s"][name] is not None
-                ]
+                [run["timings_s"][name] for run in state_runs if run["timings_s"][name] is not None]
             )
             for name in timing_names
             if any(run["timings_s"][name] is not None for run in state_runs)
@@ -166,9 +159,7 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     primary_status_counts = collections.Counter(
         str(run["primary_solver_status"]).lower() for run in runs
     )
-    final_status_counts = collections.Counter(
-        str(run["solver_status"]).lower() for run in runs
-    )
+    final_status_counts = collections.Counter(str(run["solver_status"]).lower() for run in runs)
     return {
         "timing_summary": timing_summary,
         "absent_profile_objective": runs[0]["objective"],
@@ -183,11 +174,11 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
             count for status, count in primary_status_counts.items() if "infeasible" in status
         ),
         "final_unsuccessful_count": sum(
-            count for status, count in final_status_counts.items() if not status.startswith("optimal")
+            count
+            for status, count in final_status_counts.items()
+            if not status.startswith("optimal")
         ),
-        "relaxed_fallback_count": sum(
-            bool(run["relaxed_fallback_used"]) for run in runs
-        ),
+        "relaxed_fallback_count": sum(bool(run["relaxed_fallback_used"]) for run in runs),
     }
 
 
@@ -218,17 +209,13 @@ def _git_required(repository: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def verify_repository_provenance(
-    repository: pathlib.Path, base_commit: str
-) -> dict[str, Any]:
+def verify_repository_provenance(repository: pathlib.Path, base_commit: str) -> dict[str, Any]:
     """Require a clean worktree whose HEAD descends from the recorded base."""
     if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
         raise RuntimeError("recorded base commit must be a full 40-character SHA")
 
     tested_commit = _git_required(repository, "rev-parse", "HEAD")
-    dirty_paths = _git_required(
-        repository, "status", "--porcelain", "--untracked-files=all"
-    )
+    dirty_paths = _git_required(repository, "status", "--porcelain", "--untracked-files=all")
     if dirty_paths:
         raise RuntimeError(
             "benchmark provenance requires a clean worktree; commit or remove changes first"
@@ -241,13 +228,9 @@ def verify_repository_provenance(
             "recorded base commit has no merge-base with the tested commit"
         ) from error
     if merge_base != base_commit:
-        raise RuntimeError(
-            f"recorded base commit is not the merge-base of {tested_commit}"
-        )
+        raise RuntimeError(f"recorded base commit is not the merge-base of {tested_commit}")
 
-    commits = _git_required(
-        repository, "rev-list", "--reverse", f"{base_commit}..{tested_commit}"
-    )
+    commits = _git_required(repository, "rev-list", "--reverse", f"{base_commit}..{tested_commit}")
     return {
         "base_commit": base_commit,
         "tested_commit": tested_commit,
@@ -429,9 +412,7 @@ def _schedule(result: Any, prefix: str) -> dict[str, list[float]]:
 def _problem_size(problem: Any) -> dict[str, int]:
     metrics = problem.size_metrics
     boolean_variables = sum(
-        int(variable.size)
-        for variable in problem.variables()
-        if variable.attributes.get("boolean")
+        int(variable.size) for variable in problem.variables() if variable.attributes.get("boolean")
     )
     equality_rows = int(metrics.num_scalar_eq_constr)
     inequality_rows = int(metrics.num_scalar_leq_constr)
@@ -512,9 +493,7 @@ def verify_cache_transition(
     return "warm", True, cold_optimization
 
 
-def primary_solve_outcome(
-    messages: list[str], final_status: str
-) -> tuple[str, bool]:
+def primary_solve_outcome(messages: list[str], final_status: str) -> tuple[str, bool]:
     """Recover the primary status logged immediately before relaxed fallback."""
     pattern = re.compile(r"Optimization failed with status: '([^']*)'")
     for message in messages:
@@ -554,9 +533,7 @@ async def _run_payload(
 
     emhass_runtime.optimization_cache.clear()
     for repetition in range(repetitions):
-        had_cached_instance = emhass_runtime.optimization_cache.get_stats()[
-            "has_instance"
-        ]
+        had_cached_instance = emhass_runtime.optimization_cache.get_stats()["has_instance"]
         end_to_end_start = time.perf_counter()
         setup_start = time.perf_counter()
         input_data = await emhass_runtime.set_input_data_dict(
@@ -570,9 +547,7 @@ async def _run_payload(
         )
         setup_seconds = time.perf_counter() - setup_start
         if not isinstance(input_data, dict):
-            raise RuntimeError(
-                f"input preparation failed for payload {payload['name']!r}"
-            )
+            raise RuntimeError(f"input preparation failed for payload {payload['name']!r}")
 
         warning_start = len(warning_capture.messages)
         result = await emhass_runtime.naive_mpc_optim(input_data, logger, debug=True)
@@ -656,39 +631,26 @@ def _validate_report_module_provenance(
         return
     manifest = report.get("reproduction", {}).get("tested_modules")
     provenance = report.get("reproduction", {}).get("tested_source_provenance")
-    tested_commit = (
-        provenance.get("tested_commit") if isinstance(provenance, dict) else None
-    )
-    if (
-        not isinstance(tested_commit, str)
-        or re.fullmatch(r"[0-9a-f]{40}", tested_commit) is None
-    ):
-        raise RuntimeError(
-            f"{report_name} tested module provenance has no valid tested commit"
-        )
+    tested_commit = provenance.get("tested_commit") if isinstance(provenance, dict) else None
+    if not isinstance(tested_commit, str) or re.fullmatch(r"[0-9a-f]{40}", tested_commit) is None:
+        raise RuntimeError(f"{report_name} tested module provenance has no valid tested commit")
     modules = manifest.get("modules") if isinstance(manifest, dict) else None
     required = {"emhass.command_line", "emhass.optimization"}
     if not isinstance(modules, dict) or not required <= modules.keys():
-        raise RuntimeError(
-            f"{report_name} tested module provenance is missing required modules"
-        )
+        raise RuntimeError(f"{report_name} tested module provenance is missing required modules")
     for module_name, module in modules.items():
         path = module.get("path") if isinstance(module, dict) else None
         sha256 = module.get("sha256") if isinstance(module, dict) else None
         if not isinstance(path, str) or not path.startswith("src/emhass/"):
             raise RuntimeError(
-                f"{report_name} tested module provenance has invalid path for "
-                f"{module_name!r}"
+                f"{report_name} tested module provenance has invalid path for {module_name!r}"
             )
         relative_path = pathlib.PurePosixPath(path)
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RuntimeError(
-                f"{report_name} tested module provenance escapes its tested root"
-            )
+            raise RuntimeError(f"{report_name} tested module provenance escapes its tested root")
         if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
             raise RuntimeError(
-                f"{report_name} tested module provenance has invalid hash for "
-                f"{module_name!r}"
+                f"{report_name} tested module provenance has invalid hash for {module_name!r}"
             )
         result = subprocess.run(
             [
@@ -704,13 +666,11 @@ def _validate_report_module_provenance(
         )
         if result.returncode != 0:
             raise RuntimeError(
-                f"{report_name} tested module provenance cannot resolve "
-                f"{tested_commit}:{path}"
+                f"{report_name} tested module provenance cannot resolve {tested_commit}:{path}"
             )
         if hashlib.sha256(result.stdout).hexdigest() != sha256:
             raise RuntimeError(
-                f"{report_name} tested module provenance hash does not match "
-                f"{tested_commit}:{path}"
+                f"{report_name} tested module provenance hash does not match {tested_commit}:{path}"
             )
 
 
@@ -764,15 +724,10 @@ def compare_paired_reports(
     }
     mismatches = [name for name, values in parity_fields.items() if values[0] != values[1]]
     if mismatches:
-        raise RuntimeError(
-            "paired benchmark environment mismatch: " + ", ".join(mismatches)
-        )
+        raise RuntimeError("paired benchmark environment mismatch: " + ", ".join(mismatches))
     baseline_execution = baseline["execution"]
     candidate_execution = candidate["execution"]
-    if (
-        baseline_execution["order"] != "baseline"
-        or candidate_execution["order"] != "candidate"
-    ):
+    if baseline_execution["order"] != "baseline" or candidate_execution["order"] != "candidate":
         raise RuntimeError("paired benchmark execution order labels are invalid")
     baseline_completed = datetime.fromisoformat(baseline_execution["completed_at_utc"])
     candidate_started = datetime.fromisoformat(candidate_execution["started_at_utc"])
@@ -867,24 +822,16 @@ async def run_benchmarks(
     if corpus["mode"] != "naive-mpc-optim":
         raise ValueError("this runner currently supports the naive-mpc-optim corpus")
     if corpus["solver"]["name"] not in cp.installed_solvers():
-        raise RuntimeError(
-            f"configured solver {corpus['solver']['name']!r} is not installed"
-        )
+        raise RuntimeError(f"configured solver {corpus['solver']['name']!r} is not installed")
     emhass_runtime = load_tested_emhass(project_root)
-    harness_provenance = verify_repository_provenance(
-        PROJECT_ROOT, corpus["base_commit"]
-    )
-    tested_source_provenance = verify_repository_provenance(
-        project_root, corpus["base_commit"]
-    )
+    harness_provenance = verify_repository_provenance(PROJECT_ROOT, corpus["base_commit"])
+    tested_source_provenance = verify_repository_provenance(project_root, corpus["base_commit"])
 
     warning_capture = _WarningCapture()
     logger = _logger(warning_capture)
     payload_reports = []
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="emhass-soc-profile-benchmark-"
-        ) as data_dir:
+        with tempfile.TemporaryDirectory(prefix="emhass-soc-profile-benchmark-") as data_dir:
             benchmark_data_path = pathlib.Path(data_dir)
             shutil.copyfile(
                 project_root / "data" / "test_df_final.pkl",
@@ -913,11 +860,7 @@ async def run_benchmarks(
     lock_path = project_root / "uv.lock"
     tracked_lock = _git_required(project_root, "ls-files", "uv.lock") == "uv.lock"
     actual_solver_names = sorted(
-        {
-            run["solver_name"]
-            for payload_report in payload_reports
-            for run in payload_report["runs"]
-        }
+        {run["solver_name"] for payload_report in payload_reports for run in payload_report["runs"]}
     )
     return {
         "schema_version": corpus["schema_version"],

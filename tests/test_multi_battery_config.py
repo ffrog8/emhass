@@ -106,9 +106,7 @@ def test_battery_soc_power_profiles_omission_normalizes_to_one_empty_entry_per_b
 def test_battery_soc_power_profiles_static_schema_is_optional_json():
     defaults = _default_config()
     definitions = json.loads(
-        (root / "src/emhass/static/data/param_definitions.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "src/emhass/static/data/param_definitions.json").read_text(encoding="utf-8")
     )
 
     assert "battery_soc_power_profiles" in defaults
@@ -130,9 +128,7 @@ def test_battery_soc_power_profiles_accept_charge_profile_per_battery():
         {},
     ]
 
-    params = build_params(
-        {"number_of_batteries": 2, "battery_soc_power_profiles": profiles}
-    )
+    params = build_params({"number_of_batteries": 2, "battery_soc_power_profiles": profiles})
 
     assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
 
@@ -152,9 +148,7 @@ def test_battery_soc_power_profiles_accept_independent_charge_and_discharge_prof
         {"discharge": {"soc_breakpoints": [], "power_max": [1200]}},
     ]
 
-    params = build_params(
-        {"number_of_batteries": 2, "battery_soc_power_profiles": profiles}
-    )
+    params = build_params({"number_of_batteries": 2, "battery_soc_power_profiles": profiles})
 
     assert params["plant_conf"]["battery_soc_power_profiles"] == profiles
 
@@ -694,9 +688,7 @@ def test_runtime_battery_soc_power_profiles_omission_and_null_inherit_static_con
         {"charge": {"soc_breakpoints": [0.8], "power_max": [3000, 1000]}},
         {},
     ]
-    base = build_params(
-        {"number_of_batteries": 2, "battery_soc_power_profiles": configured}
-    )
+    base = build_params({"number_of_batteries": 2, "battery_soc_power_profiles": configured})
 
     _, _, omitted = treat_runtime({}, base)
     _, _, explicit_null = treat_runtime({"battery_soc_power_profiles": None}, base)
@@ -729,9 +721,7 @@ def test_runtime_battery_soc_power_profiles_non_null_list_replaces_without_neste
         {"charge": {"soc_breakpoints": [0.7], "power_max": [2500, 1200]}},
     ]
 
-    _, _, plant_conf = treat_runtime(
-        {"battery_soc_power_profiles": replacement}, base
-    )
+    _, _, plant_conf = treat_runtime({"battery_soc_power_profiles": replacement}, base)
 
     assert plant_conf["battery_soc_power_profiles"] == replacement
 
@@ -747,9 +737,7 @@ def test_runtime_battery_soc_power_profiles_all_empty_objects_restore_scalar_onl
         }
     )
 
-    _, _, plant_conf = treat_runtime(
-        {"battery_soc_power_profiles": [{}, {}]}, base
-    )
+    _, _, plant_conf = treat_runtime({"battery_soc_power_profiles": [{}, {}]}, base)
 
     assert plant_conf["battery_soc_power_profiles"] == [{}, {}]
 

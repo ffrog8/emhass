@@ -137,8 +137,8 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         params["plant_conf"]["inverter_ac_input_max"] = 5000
         params["plant_conf"]["inverter_efficiency_dc_ac"] = 1.0
         params["plant_conf"]["inverter_efficiency_ac_dc"] = 1.0
-        params["hybrid_inverter_config_1"] = (
-            TestCommandLineAsyncUtils._hybrid_extra_block(set_use_pv=True)
+        params["hybrid_inverter_config_1"] = TestCommandLineAsyncUtils._hybrid_extra_block(
+            set_use_pv=True
         )
         return params
 
@@ -179,9 +179,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         params["optim_conf"]["set_nodischarge_to_grid"] = False
         params["plant_conf"]["inverter_is_hybrid"] = False
         params["plant_conf"]["compute_curtailment"] = False
-        params["hybrid_inverter_config_1"] = (
-            TestCommandLineAsyncUtils._battery_only_extra_block()
-        )
+        params["hybrid_inverter_config_1"] = TestCommandLineAsyncUtils._battery_only_extra_block()
         return params
 
     async def asyncSetUp(self):
@@ -226,9 +224,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             "p_load_forecast": None,
         }
 
-        with patch(
-            "emhass.command_line.Forecast", return_value=forecast_instance
-        ) as forecast:
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance) as forecast:
             with patch("emhass.command_line.OptimizationCache.get", return_value=None):
                 with patch("emhass.command_line.OptimizationCache.put") as cache_put:
                     with patch(
@@ -264,8 +260,12 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         self.assertIs(optimization.call_args.args[2], input_data_dict["plant_conf"])
         self.assertIs(cache_put.call_args.args[1], input_data_dict["optim_conf"])
         self.assertIs(cache_put.call_args.args[2], input_data_dict["plant_conf"])
-        self.assertIs(prepare_naive_mpc.await_args.args[0].optim_conf, input_data_dict["optim_conf"])
-        self.assertIs(prepare_naive_mpc.await_args.args[0].plant_conf, input_data_dict["plant_conf"])
+        self.assertIs(
+            prepare_naive_mpc.await_args.args[0].optim_conf, input_data_dict["optim_conf"]
+        )
+        self.assertIs(
+            prepare_naive_mpc.await_args.args[0].plant_conf, input_data_dict["plant_conf"]
+        )
         self.assertNotIn(INVERTER_BLOCK_CONFIGS_KEY, input_data_dict["params"]["plant_conf"])
         self.assertNotIn(INVERTER_BLOCK_CONFIGS_KEY, input_data_dict["rh"].params["plant_conf"])
         self.assertEqual(input_data_dict["plant_conf"]["battery_charge_power_max"], 4321)
@@ -348,9 +348,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         runtimeparams = TestCommandLineAsyncUtils._battery_only_runtimeparams()
         params["passed_data"] = runtimeparams
         forecast_instance = MagicMock()
-        forecast_instance.forecast_dates = pd.date_range(
-            "2024-01-01", periods=10, freq="30min"
-        )
+        forecast_instance.forecast_dates = pd.date_range("2024-01-01", periods=10, freq="30min")
         forecast_instance.var_load_cost = "unit_load_cost"
         forecast_instance.var_prod_price = "unit_prod_price"
         prepared_data = {
@@ -400,9 +398,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         runtimeparams = TestCommandLineAsyncUtils._split_pv_hybrid_runtimeparams()
         params["passed_data"] = runtimeparams
         forecast_instance = MagicMock()
-        forecast_instance.forecast_dates = pd.date_range(
-            "2024-01-01", periods=10, freq="30min"
-        )
+        forecast_instance.forecast_dates = pd.date_range("2024-01-01", periods=10, freq="30min")
         forecast_instance.var_load_cost = "unit_load_cost"
         forecast_instance.var_prod_price = "unit_prod_price"
         prepared_data = {
@@ -441,9 +437,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         runtimeparams["multi_inverter_mode"] = "single"
         params["passed_data"] = runtimeparams
         forecast_instance = MagicMock()
-        forecast_instance.forecast_dates = pd.date_range(
-            "2024-01-01", periods=10, freq="30min"
-        )
+        forecast_instance.forecast_dates = pd.date_range("2024-01-01", periods=10, freq="30min")
         forecast_instance.var_load_cost = "unit_load_cost"
         forecast_instance.var_prod_price = "unit_prod_price"
         prepared_data = {
@@ -485,9 +479,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         forecast_instance = MagicMock()
         forecast_instance.get_weather_forecast = AsyncMock(return_value=pd.DataFrame())
 
-        with patch(
-            "emhass.command_line.Forecast", return_value=forecast_instance
-        ) as forecast:
+        with patch("emhass.command_line.Forecast", return_value=forecast_instance) as forecast:
             result = await weather_forecast_cache(
                 emhass_conf,
                 orjson.dumps(params).decode("utf-8"),
@@ -895,7 +887,9 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         forecast_instance.var_load_cost = "unit_load_cost"
         forecast_instance.var_prod_price = "unit_prod_price"
         cached_extra_pv = MagicMock()
-        cached_extra_pv.value = np.asarray(first_runtime["hybrid_inverter_config_1"]["pv_power_forecast"])
+        cached_extra_pv.value = np.asarray(
+            first_runtime["hybrid_inverter_config_1"]["pv_power_forecast"]
+        )
         cached_runtime = MagicMock()
         cached_runtime.pv_forecast = cached_extra_pv
         cached_optimization = MagicMock()
@@ -1370,9 +1364,7 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _forecast_without_pv_acquisition():
         forecast_instance = MagicMock()
-        forecast_instance.forecast_dates = pd.date_range(
-            "2024-01-01", periods=10, freq="30min"
-        )
+        forecast_instance.forecast_dates = pd.date_range("2024-01-01", periods=10, freq="30min")
         forecast_instance.var_load_cost = "unit_load_cost"
         forecast_instance.var_prod_price = "unit_prod_price"
         forecast_instance.get_weather_forecast = AsyncMock(
@@ -1427,18 +1419,14 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         return input_data_dict, forecast_instance
 
     async def test_dayahead_preparation_uses_public_inverter_one_before_pv_acquisition(self):
-        _, forecast_instance = await self._set_conflicting_public_inverter_input(
-            "dayahead-optim"
-        )
+        _, forecast_instance = await self._set_conflicting_public_inverter_input("dayahead-optim")
 
         forecast_instance.get_weather_forecast.assert_not_awaited()
         forecast_instance.get_power_from_weather.assert_not_called()
         forecast_instance.get_load_forecast.assert_awaited_once()
 
     async def test_naive_mpc_preparation_uses_public_inverter_one_before_pv_acquisition(self):
-        _, forecast_instance = await self._set_conflicting_public_inverter_input(
-            "naive-mpc-optim"
-        )
+        _, forecast_instance = await self._set_conflicting_public_inverter_input("naive-mpc-optim")
 
         forecast_instance.get_weather_forecast.assert_not_awaited()
         forecast_instance.get_power_from_weather.assert_not_called()
@@ -3147,12 +3135,8 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
             ("sensor.unit_prod_price", "unit_prod_price"): opt_res_latest["unit_prod_price"],
             ("sensor.p_deferrable0", "deferrable"): opt_res_latest["P_deferrable0"],
             ("sensor.p_deferrable1", "deferrable"): opt_res_latest["P_deferrable1"],
-            ("sensor.p_deferrable0_state", "categorical"): pd.Series(
-                ["on", "off"], index=idx
-            ),
-            ("sensor.p_deferrable1_state", "categorical"): pd.Series(
-                ["variable", "on"], index=idx
-            ),
+            ("sensor.p_deferrable0_state", "categorical"): pd.Series(["on", "off"], index=idx),
+            ("sensor.p_deferrable1_state", "categorical"): pd.Series(["variable", "on"], index=idx),
         }
         expected_posted_data.update(
             {
@@ -3271,8 +3255,8 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
                 "compute_curtailment": False,
             }
         )
-        params["hybrid_inverter_config_1"] = (
-            TestCommandLineAsyncUtils._hybrid_extra_block(set_use_pv=True)
+        params["hybrid_inverter_config_1"] = TestCommandLineAsyncUtils._hybrid_extra_block(
+            set_use_pv=True
         )
         input_data_dict = await set_input_data_dict(
             emhass_conf,
@@ -5394,26 +5378,20 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIs(second_input["opt"], first_opt)
         self.assertEqual(
             sum(
-                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows"
-                in message
+                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows" in message
                 for message in first_logs.output
             ),
             1,
         )
         self.assertEqual(
             sum(
-                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows"
-                in message
+                "Battery SOC power profiles add 0 Boolean selectors and 10 linear rows" in message
                 for message in second_logs.output
             ),
             1,
         )
         self.assertAlmostEqual(
-            float(
-                second_input["opt"]
-                .param_battery_charge_profile_power_max[0]
-                .value[0]
-            ),
+            float(second_input["opt"].param_battery_charge_profile_power_max[0].value[0]),
             500.0,
         )
         self.assertGreater(float((-first_result["P_batt"]).max()), 500.0)
@@ -5439,8 +5417,7 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(input_data["opt"])
         self.assertEqual(
             sum(
-                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows"
-                in message
+                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows" in message
                 for message in captured.output
             ),
             1,
@@ -5449,12 +5426,8 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_mpc_disabled_battery_logs_no_profile_model_increase_or_warning(self):
         oversized_profile = {
             "charge": {
-                "soc_breakpoints": [
-                    float(value) for value in np.linspace(0.01, 0.99, 49)
-                ],
-                "power_max": [
-                    float(value) for value in np.linspace(5000, 100, 50)
-                ],
+                "soc_breakpoints": [float(value) for value in np.linspace(0.01, 0.99, 49)],
+                "power_max": [float(value) for value in np.linspace(5000, 100, 50)],
             }
         }
         runtime = {
@@ -5481,17 +5454,13 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             sum(
-                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows"
-                in message
+                "Battery SOC power profiles add 0 Boolean selectors and 0 linear rows" in message
                 for message in captured.output
             ),
             1,
         )
         self.assertFalse(
-            any(
-                "Battery SOC power-profile model size" in message
-                for message in captured.output
-            )
+            any("Battery SOC power-profile model size" in message for message in captured.output)
         )
 
     async def test_mpc_cache_hit_refreshes_same_shape_discharge_profile_coefficients(self):
@@ -5527,11 +5496,7 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(second_input["opt"], first_opt)
         self.assertAlmostEqual(
-            float(
-                second_input["opt"]
-                .param_battery_discharge_profile_power_max[0]
-                .value[0]
-            ),
+            float(second_input["opt"].param_battery_discharge_profile_power_max[0].value[0]),
             500.0,
         )
         self.assertGreater(float(first_result["P_batt"].max()), 500.0)
@@ -6472,7 +6437,9 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opt_2.plant_conf["battery_discharge_power_max"], 9999)
         self.assertIs(opt_2.inverter_block_config[0].optim_conf, opt_2.optim_conf)
         self.assertIs(opt_2.inverter_block_config[0].plant_conf, opt_2.plant_conf)
-        self.assertEqual(opt_2.inverter_block_config[0].plant_conf["battery_charge_power_max"], 8888)
+        self.assertEqual(
+            opt_2.inverter_block_config[0].plant_conf["battery_charge_power_max"], 8888
+        )
         self.assertAlmostEqual(float(opt_2.param_battery_charge_power_max[0].value), 8888.0)
         self.assertAlmostEqual(float(opt_2.param_battery_discharge_power_max[0].value), 9999.0)
 

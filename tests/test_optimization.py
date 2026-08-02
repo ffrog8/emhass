@@ -516,9 +516,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         for block in diagnostics["blocks"].values():
             aggregate_discharge += block["p_sto_pos"]
             aggregate_charge += -block["p_sto_neg"]
-        self.assertTrue(
-            np.all((aggregate_discharge <= 1e-6) | (aggregate_charge <= 1e-6))
-        )
+        self.assertTrue(np.all((aggregate_discharge <= 1e-6) | (aggregate_charge <= 1e-6)))
 
     def _assert_no_block_zero_columns(self, opt_res):
         for column in (
@@ -533,9 +531,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
     def _expected_soc_total(self, opt, opt_res):
         total_energy = pd.Series(0.0, index=opt_res.index)
         total_capacity = 0.0
-        for block_index, diagnostics in sorted(
-            opt._battery_block_diagnostics["blocks"].items()
-        ):
+        for block_index, diagnostics in sorted(opt._battery_block_diagnostics["blocks"].items()):
             block_config = opt.inverter_block_config[block_index]
             capacity = block_config.plant_conf["battery_nominal_energy_capacity"]
             total_energy += pd.Series(diagnostics["stored_energy"], index=opt_res.index)
@@ -547,39 +543,39 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         """Calculate the fleet imbalance independently of optimizer internals."""
         block_diagnostics = opt._battery_block_diagnostics["blocks"]
         capacities = {
-            index: opt.inverter_block_config[index].plant_conf[
-                "battery_nominal_energy_capacity"
-            ]
+            index: opt.inverter_block_config[index].plant_conf["battery_nominal_energy_capacity"]
             for index in block_diagnostics
         }
         total_capacity = sum(capacities.values())
-        fleet_energy = sum(
-            block_diagnostics[index]["stored_energy"] for index in capacities
-        )
+        fleet_energy = sum(block_diagnostics[index]["stored_energy"] for index in capacities)
         fleet_soc = fleet_energy / total_capacity
         return 0.5 * sum(
-            np.abs(
-                block_diagnostics[index]["stored_energy"]
-                - capacity * fleet_soc
-            ).sum()
-            / 1000.0
+            np.abs(block_diagnostics[index]["stored_energy"] - capacity * fleet_soc).sum() / 1000.0
             for index, capacity in capacities.items()
         )
 
     @staticmethod
     def _real_grid_cost(opt, opt_res, df):
         """Calculate grid economics without the SOC-balance objective term."""
-        return 0.001 * opt.time_step * np.sum(
-            df[opt.var_load_cost].values * opt_res["P_grid_pos"].values
-            + df[opt.var_prod_price].values * opt_res["P_grid_neg"].values
+        return (
+            0.001
+            * opt.time_step
+            * np.sum(
+                df[opt.var_load_cost].values * opt_res["P_grid_pos"].values
+                + df[opt.var_prod_price].values * opt_res["P_grid_neg"].values
+            )
         )
 
     @staticmethod
     def _result_real_grid_cost(opt, opt_res):
         """Calculate grid economics from published result columns."""
-        return 0.001 * opt.time_step * np.sum(
-            opt_res["unit_load_cost"].values * opt_res["P_grid_pos"].values
-            + opt_res["unit_prod_price"].values * opt_res["P_grid_neg"].values
+        return (
+            0.001
+            * opt.time_step
+            * np.sum(
+                opt_res["unit_load_cost"].values * opt_res["P_grid_pos"].values
+                + opt_res["unit_prod_price"].values * opt_res["P_grid_neg"].values
+            )
         )
 
     def _run_public_runtime_soc_target_case(
@@ -717,9 +713,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             runtime_confs=runtime_confs,
         )
 
-        patch_value = (
-            opt_module.CURTAILMENT_TIEBREAK_EPS if epsilon is None else epsilon
-        )
+        patch_value = opt_module.CURTAILMENT_TIEBREAK_EPS if epsilon is None else epsilon
         with mock.patch.object(
             opt_module,
             "CURTAILMENT_TIEBREAK_EPS",
@@ -752,8 +746,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         for block_config in opt.inverter_block_config.values():
             block_capacity = block_config.plant_conf["battery_nominal_energy_capacity"]
             minimum_energy += (
-                block_config.plant_conf["battery_minimum_state_of_charge"]
-                * block_capacity
+                block_config.plant_conf["battery_minimum_state_of_charge"] * block_capacity
             )
             capacity += block_capacity
         return minimum_energy, 0.01 * capacity
@@ -882,9 +875,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
     def assert_battery_energy_matches_soc_delta(self, opt, opt_res, soc_init, soc_final):
         timestep_hours = self.retrieve_hass_conf["optimization_time_step"].total_seconds() / 3600
-        expected_energy = (
-            (soc_init - soc_final) * opt.plant_conf["battery_nominal_energy_capacity"]
-        )
+        expected_energy = (soc_init - soc_final) * opt.plant_conf["battery_nominal_energy_capacity"]
         actual_energy = opt_res["P_batt"].sum() * timestep_hours
         self.assertAlmostEqual(actual_energy, expected_energy, delta=1e-3)
         self.assertAlmostEqual(opt_res["SOC_opt"].iloc[-1], soc_final, delta=1e-6)
@@ -1019,14 +1010,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             set_nodischarge_to_grid=False,
             inverter_is_hybrid=True,
         )
-        hybrid_nocharge_opt, hybrid_nocharge_res = (
-            self._run_legacy_deterministic_battery_case(
-                soc_init=0.0,
-                soc_final=0.5,
-                set_nocharge_from_grid=True,
-                set_nodischarge_to_grid=False,
-                inverter_is_hybrid=True,
-            )
+        hybrid_nocharge_opt, hybrid_nocharge_res = self._run_legacy_deterministic_battery_case(
+            soc_init=0.0,
+            soc_final=0.5,
+            set_nocharge_from_grid=True,
+            set_nodischarge_to_grid=False,
+            inverter_is_hybrid=True,
         )
         hybrid_discharge_allowed_opt, _ = self._run_legacy_deterministic_battery_case(
             soc_init=0.5,
@@ -2186,8 +2175,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         for public_index, capacity in capacities.items():
             expected_deviation = np.abs(
-                diagnostics_by_public_index[public_index]["stored_energy"]
-                - capacity * fleet_soc
+                diagnostics_by_public_index[public_index]["stored_energy"] - capacity * fleet_soc
             )
             actual_deviation = opt._solver_value_array(deviation_vars[public_index])
             np.testing.assert_allclose(actual_deviation, expected_deviation, atol=1e-6)
@@ -2325,12 +2313,10 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                     self.assertGreater(zero_energy, 1e-6)
                     self.assertAlmostEqual(late_energy, zero_energy, delta=1e-4)
                     late_center = (
-                        np.dot(timestep_indexes, late_curtailment)
-                        / late_curtailment.sum()
+                        np.dot(timestep_indexes, late_curtailment) / late_curtailment.sum()
                     )
                     early_center = (
-                        np.dot(timestep_indexes, early_curtailment)
-                        / early_curtailment.sum()
+                        np.dot(timestep_indexes, early_curtailment) / early_curtailment.sum()
                     )
                     self.assertGreater(late_center, early_center + 1e-3)
 
@@ -2850,9 +2836,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.0,
         )
 
-        baseline_stored_after = self._aggregate_stored_energy_after_each_step(
-            baseline_opt
-        )
+        baseline_stored_after = self._aggregate_stored_energy_after_each_step(baseline_opt)
         baseline_minimum, baseline_tolerance = self._aggregate_minimum_energy_and_tolerance(
             baseline_opt
         )
@@ -2939,9 +2923,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             soc_final=0.0,
         )
 
-        baseline_stored_after = self._aggregate_stored_energy_after_each_step(
-            baseline_opt
-        )
+        baseline_stored_after = self._aggregate_stored_energy_after_each_step(baseline_opt)
         baseline_minimum, baseline_tolerance = self._aggregate_minimum_energy_and_tolerance(
             baseline_opt
         )

@@ -267,6 +267,7 @@ class TestBuildSpec(unittest.TestCase):
                 "battery_maximum_state_of_charge",
             }
         )
+
     def test_battery_soc_power_profiles_schema_is_nullable_and_direction_independent(self):
         schema = gen.build_spec()["components"]["schemas"]["Config"]["properties"][
             "battery_soc_power_profiles"
@@ -282,9 +283,7 @@ class TestBuildSpec(unittest.TestCase):
             profile = item["properties"][direction]
             self.assertEqual(profile["type"], "object")
             self.assertFalse(profile["additionalProperties"])
-            self.assertEqual(
-                set(profile["required"]), {"soc_breakpoints", "power_max"}
-            )
+            self.assertEqual(set(profile["required"]), {"soc_breakpoints", "power_max"})
             self.assertEqual(
                 profile["properties"]["soc_breakpoints"]["items"],
                 {"type": "number", "minimum": 0, "maximum": 1},
@@ -301,9 +300,7 @@ class TestBuildSpec(unittest.TestCase):
 
         self.assertEqual(schema["minItems"], 1)
         for direction in ("charge", "discharge"):
-            power_max = schema["items"]["properties"][direction]["properties"][
-                "power_max"
-            ]
+            power_max = schema["items"]["properties"][direction]["properties"]["power_max"]
             self.assertEqual(power_max["minItems"], 1)
 
 

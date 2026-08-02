@@ -599,6 +599,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(prod_price[idx], 0.0)
         for idx in range(8, 12):
             self.assertAlmostEqual(prod_price[idx], 0.1)
+
     async def test_treat_runtimeparams_rejects_nested_hybrid_inverter_config_0(self):
         params = orjson.loads(self.params_json)
         params["hybrid_inverter_config_1"] = _configured_extra_block()
@@ -624,7 +625,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
             "multi_inverter_mode": "multi",
             "hybrid_inverter_config_1": {
                 "soc_init": 0.4,
-            }
+            },
         }
 
         with self.assertRaisesRegex(ValueError, "without matching configured block"):

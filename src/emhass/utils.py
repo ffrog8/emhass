@@ -42,9 +42,7 @@ W_TO_KW = 1000  # Watts to kilowatts conversion factor
 
 
 def _public_plant_conf_items(plant_conf: Mapping[str, object]) -> dict[str, object]:
-    return {
-        key: value for key, value in plant_conf.items() if key != INVERTER_BLOCK_CONFIGS_KEY
-    }
+    return {key: value for key, value in plant_conf.items() if key != INVERTER_BLOCK_CONFIGS_KEY}
 
 
 def get_root(file: str, num_parent: int = 3) -> str:
@@ -1564,10 +1562,8 @@ async def treat_runtimeparams(
         # N=1 is a no-op (see check_batt_params); this only does real work once
         # number_of_batteries > 1.
         num_batteries = validate_num_batteries(params["plant_conf"])
-        params["plant_conf"]["battery_soc_power_profiles"] = (
-            normalize_battery_soc_power_profiles(
-                params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
-            )
+        params["plant_conf"]["battery_soc_power_profiles"] = normalize_battery_soc_power_profiles(
+            params["plant_conf"].get("battery_soc_power_profiles"), num_batteries
         )
         for batt_param_name, batt_default in BATT_ARRAY_PARAMS_PLANT_CONF.items():
             _warn_if_runtime_scalar_masks_batt_list(
@@ -2415,11 +2411,7 @@ async def treat_runtimeparams(
         blocks = plant_conf[INVERTER_BLOCK_CONFIGS_KEY]
         for index in sorted(block_runtime_conf):
             block = next(
-                (
-                    candidate
-                    for candidate in blocks.values()
-                    if candidate.index == index
-                ),
+                (candidate for candidate in blocks.values() if candidate.index == index),
                 None,
             )
             if block is None:
@@ -3730,9 +3722,7 @@ def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict
             raise ValueError(f"{context} must be an object")
         unsupported_entry_members = sorted(set(entry) - {"charge", "discharge"})
         if unsupported_entry_members:
-            raise ValueError(
-                f"{context} has unsupported member {unsupported_entry_members[0]!r}"
-            )
+            raise ValueError(f"{context} has unsupported member {unsupported_entry_members[0]!r}")
         normalized_entry = {}
         for direction in ("charge", "discharge"):
             if direction not in entry:
@@ -3740,9 +3730,7 @@ def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict
             profile = entry[direction]
             if not isinstance(profile, dict):
                 raise ValueError(f"{context} {direction} must be an object, not null")
-            unsupported_profile_members = sorted(
-                set(profile) - {"soc_breakpoints", "power_max"}
-            )
+            unsupported_profile_members = sorted(set(profile) - {"soc_breakpoints", "power_max"})
             if unsupported_profile_members:
                 raise ValueError(
                     f"{context} {direction} has unsupported member "
@@ -3777,24 +3765,17 @@ def normalize_battery_soc_power_profiles(value, num_batteries: int) -> list[dict
                     or not np.isfinite(item)
                     for item in values
                 ):
-                    raise ValueError(
-                        f"{context} {direction} {name} values must be finite numbers"
-                    )
+                    raise ValueError(f"{context} {direction} {name} values must be finite numbers")
             if any(item < 0 or item > 1 for item in soc_breakpoints):
                 raise ValueError(
-                    f"{context} {direction} soc_breakpoints must be in the "
-                    "closed interval [0, 1]"
+                    f"{context} {direction} soc_breakpoints must be in the closed interval [0, 1]"
                 )
-            if any(
-                left >= right for left, right in zip(soc_breakpoints, soc_breakpoints[1:])
-            ):
+            if any(left >= right for left, right in zip(soc_breakpoints, soc_breakpoints[1:])):
                 raise ValueError(
                     f"{context} {direction} soc_breakpoints must be strictly increasing"
                 )
             if any(item < 0 for item in power_max):
-                raise ValueError(
-                    f"{context} {direction} power_max values must be non-negative"
-                )
+                raise ValueError(f"{context} {direction} power_max values must be non-negative")
             if direction == "charge" and any(
                 left < right for left, right in zip(power_max, power_max[1:])
             ):

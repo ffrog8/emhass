@@ -144,8 +144,7 @@ class TestSocPowerProfileModelSizeVisibility(unittest.TestCase):
 
         self.assertTrue(
             any(
-                "96 Boolean selectors and 288 linear rows" in message
-                for message in captured.output
+                "96 Boolean selectors and 288 linear rows" in message for message in captured.output
             )
         )
 
@@ -223,9 +222,7 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
         self.assertTrue(
             any("battery_charge_profile_selectors" in name for name in solve_calls[0]["variables"])
         )
-        self.assertFalse(
-            any("profile_selectors" in name for name in solve_calls[1]["variables"])
-        )
+        self.assertFalse(any("profile_selectors" in name for name in solve_calls[1]["variables"]))
         self.assertIs(opt.prob, solve_calls[0]["problem"])
         self.assertEqual(opt.optim_status, "Optimal")
         self.assertEqual(fallback_result["optim_status"].unique().tolist(), ["Optimal"])
@@ -304,21 +301,15 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             return original_solve(problem, *args, **kwargs)
 
         with patch.object(cp.Problem, "solve", new=simulate_primary_timeout):
-            opt.perform_dayahead_forecast_optim(
-                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
-            )
+            opt.perform_dayahead_forecast_optim(df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8)
 
         self.assertEqual(solve_timeouts, [45.0, 45.0])
         self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
-        self.assertEqual(
-            opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"], None
-        )
+        self.assertEqual(opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"], None)
 
     def test_cached_profile_timeout_removes_only_profile_constraints(self):
         opt, df_input, p_pv, p_load = self._case(45, with_stress=True)
-        opt.perform_dayahead_forecast_optim(
-            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41
-        )
+        opt.perform_dayahead_forecast_optim(df_input, p_pv, p_load, soc_init=0.4, soc_final=0.41)
         cached_profile_problem = opt.prob
         solve_calls = []
         original_solve = cp.Problem.solve
@@ -332,19 +323,13 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             return original_solve(problem, *args, **kwargs)
 
         with patch.object(cp.Problem, "solve", new=simulate_cached_profile_timeout):
-            opt.perform_dayahead_forecast_optim(
-                df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8
-            )
+            opt.perform_dayahead_forecast_optim(df_input, p_pv, p_load, soc_init=0.4, soc_final=0.8)
 
         self.assertEqual(len(solve_calls), 2)
         self.assertIs(solve_calls[0], cached_profile_problem)
         profile_problem, scalar_problem = solve_calls
-        profile_variable_names = sorted(
-            variable.name() for variable in profile_problem.variables()
-        )
-        scalar_variable_names = sorted(
-            variable.name() for variable in scalar_problem.variables()
-        )
+        profile_variable_names = sorted(variable.name() for variable in profile_problem.variables())
+        scalar_variable_names = sorted(variable.name() for variable in scalar_problem.variables())
         self.assertIn("battery_stress_cost_0", scalar_variable_names)
         self.assertIn("inv_stress_cost", scalar_variable_names)
         self.assertEqual(
@@ -388,13 +373,9 @@ class TestSocPowerProfileFallbackBudget(unittest.TestCase):
             )
 
         self.assertEqual([call[0] for call in solve_calls], [30.0, 45.0])
-        self.assertTrue(
-            any("profile_selectors" in name for name in solve_calls[1][1])
-        )
+        self.assertTrue(any("profile_selectors" in name for name in solve_calls[1][1]))
         self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
-        self.assertIsNone(
-            opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"]
-        )
+        self.assertIsNone(opt.soc_profile_fallback_diagnostics["scalar_fallback_reason"])
 
 
 def build_optimization(
@@ -1626,9 +1607,7 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
         )
         index, p_pv, p_load, df_input = make_pin_scenario()
 
-        opt.perform_dayahead_forecast_optim(
-            df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5
-        )
+        opt.perform_dayahead_forecast_optim(df_input, p_pv, p_load, soc_init=0.4, soc_final=0.5)
 
         self.assertTrue(opt.prob.is_dcp(dpp=True))
 
@@ -1783,8 +1762,7 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
         )
         self.assertEqual(
             empty_metrics.num_scalar_eq_constr + empty_metrics.num_scalar_leq_constr,
-            without_metrics.num_scalar_eq_constr
-            + without_metrics.num_scalar_leq_constr,
+            without_metrics.num_scalar_eq_constr + without_metrics.num_scalar_leq_constr,
         )
         self.assertFalse(
             any(
@@ -1904,19 +1882,12 @@ class TestBatterySocChargeProfiles(unittest.TestCase):
             expected_selectors,
         )
         self.assertEqual(
-            with_metrics.num_scalar_variables
-            - without_metrics.num_scalar_variables,
+            with_metrics.num_scalar_variables - without_metrics.num_scalar_variables,
             expected_selectors,
         )
         self.assertEqual(
-            (
-                with_metrics.num_scalar_eq_constr
-                + with_metrics.num_scalar_leq_constr
-            )
-            - (
-                without_metrics.num_scalar_eq_constr
-                + without_metrics.num_scalar_leq_constr
-            ),
+            (with_metrics.num_scalar_eq_constr + with_metrics.num_scalar_leq_constr)
+            - (without_metrics.num_scalar_eq_constr + without_metrics.num_scalar_leq_constr),
             expected_rows,
         )
 

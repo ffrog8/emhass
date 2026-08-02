@@ -74,8 +74,7 @@ def log_model_size_increase(
     )
 
     logger.info(
-        "Battery SOC power profiles add %d Boolean selectors and %d linear rows "
-        "for %d intervals.",
+        "Battery SOC power profiles add %d Boolean selectors and %d linear rows for %d intervals.",
         model_size["boolean_selectors"],
         model_size["added_linear_rows"],
         horizon,

@@ -242,9 +242,7 @@ def _make_opt(rh_conf, opt_conf, pl_conf):
 
 
 def test_battery_soc_balance_cost_runtime_override_flows_to_optim_conf():
-    params_json, _rh_conf, optim_conf, _plant_conf = _treat(
-        {"battery_soc_balance_cost": 1.25}
-    )
+    params_json, _rh_conf, optim_conf, _plant_conf = _treat({"battery_soc_balance_cost": 1.25})
     params = orjson.loads(params_json)
 
     assert optim_conf["battery_soc_balance_cost"] == 1.25

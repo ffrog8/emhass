@@ -97,9 +97,7 @@ def _publish_data_input_prep_params(
         runtimeparams_dict = dict(runtimeparams)
 
     publish_runtimeparams = {
-        key: value
-        for key, value in runtimeparams_dict.items()
-        if key in PUBLISH_DATA_RUNTIME_KEYS
+        key: value for key, value in runtimeparams_dict.items() if key in PUBLISH_DATA_RUNTIME_KEYS
     }
     ignored_keys = sorted(set(runtimeparams_dict) - set(publish_runtimeparams))
     if ignored_keys:
@@ -1714,9 +1712,7 @@ async def set_input_data_dict(
                 # propagated even on a cache hit.
                 opt.update_battery_power_limits(plant_conf)
                 _update_cached_inverter_block_runtime(opt, plant_conf)
-                opt.update_battery_soc_power_profiles(
-                    plant_conf["battery_soc_power_profiles"]
-                )
+                opt.update_battery_soc_power_profiles(plant_conf["battery_soc_power_profiles"])
             # Update runtime-configurable solver options from optim_conf
             # These don't affect problem structure, so they're safe to update on cached object
             runtime_solver_opts = [

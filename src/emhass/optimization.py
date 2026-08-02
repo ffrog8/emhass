@@ -196,9 +196,7 @@ class Optimization:
         self.retrieve_hass_conf = retrieve_hass_conf
         self.optim_conf = optim_conf
         self.plant_conf = plant_conf
-        self._allow_internal_multi_block_battery_model = (
-            _allow_internal_multi_block_battery_model
-        )
+        self._allow_internal_multi_block_battery_model = _allow_internal_multi_block_battery_model
         self._apply_public_multi_inverter_root_config()
         self._has_extra_inverter_blocks = has_extra_inverter_blocks(self.plant_conf)
         self._battery_mode_lock = self.optim_conf.get("battery_mode_lock", "site")
@@ -217,8 +215,7 @@ class Optimization:
             )
         )
         self._site_battery_mode_lock_active = (
-            self._public_multi_block_battery_model_enabled
-            or self._multi_block_hybrid_model_enabled
+            self._public_multi_block_battery_model_enabled or self._multi_block_hybrid_model_enabled
         )
         self._multi_block_battery_model_enabled = (
             self._allow_internal_multi_block_battery_model
@@ -431,9 +428,7 @@ class Optimization:
         for k, entry in enumerate(profiles):
             for direction in ("charge", "discharge"):
                 profile = entry.get(direction)
-                breakpoint_params = getattr(
-                    self, f"param_battery_{direction}_profile_breakpoints"
-                )
+                breakpoint_params = getattr(self, f"param_battery_{direction}_profile_breakpoints")
                 power_params = getattr(self, f"param_battery_{direction}_profile_power_max")
                 if profile is None:
                     breakpoint_params.append(None)
@@ -538,6 +533,7 @@ class Optimization:
 
     def _refresh_inverter_block_runtime(self) -> None:
         """Rebuild block 0 runtime aliases after CVXPY parameter recreation."""
+
         def root_value(value):
             if self._multi_block_battery_model_enabled and isinstance(value, list):
                 return value[0]
@@ -553,12 +549,8 @@ class Optimization:
             soc_low_required=root_value(self.param_soc_low_required),
             soc_high_required=root_value(self.param_soc_high_required),
             soc_target_floor=root_value(self.param_soc_target_floor),
-            battery_charge_power_max=root_value(
-                self.param_battery_charge_power_max
-            ),
-            battery_discharge_power_max=root_value(
-                self.param_battery_discharge_power_max
-            ),
+            battery_charge_power_max=root_value(self.param_battery_charge_power_max),
+            battery_discharge_power_max=root_value(self.param_battery_discharge_power_max),
             pv_forecast=self.param_pv_forecast,
         )
         if not self._multi_block_battery_model_enabled:
@@ -678,10 +670,7 @@ class Optimization:
 
     def _validate_multi_block_battery_model_scope(self) -> None:
         """Limit public multi-block solving to admitted Step 6/7 shapes."""
-        if (
-            not self._multi_block_battery_model_enabled
-            or not self._has_extra_inverter_blocks
-        ):
+        if not self._multi_block_battery_model_enabled or not self._has_extra_inverter_blocks:
             return
 
         if not self._multi_block_hybrid_model_enabled:
@@ -746,7 +735,9 @@ class Optimization:
                         "compute_curtailment=true",
                     )
             if block.optim_conf.get("set_battery_dynamic", False):
-                self._unsupported_multi_block_battery_feature(block.index, "set_battery_dynamic=true")
+                self._unsupported_multi_block_battery_feature(
+                    block.index, "set_battery_dynamic=true"
+                )
             for key, default in dynamic_defaults.items():
                 if key in block.optim_conf and not self._is_default_scalar_or_vector(
                     block.optim_conf[key],
@@ -1864,9 +1855,9 @@ class Optimization:
                 profile = entry.get(direction)
                 if profile is None:
                     continue
-                breakpoint_param = getattr(
-                    self, f"param_battery_{direction}_profile_breakpoints"
-                )[k]
+                breakpoint_param = getattr(self, f"param_battery_{direction}_profile_breakpoints")[
+                    k
+                ]
                 if breakpoint_param is not None:
                     breakpoint_param.value = profile["soc_breakpoints"]
                 getattr(self, f"param_battery_{direction}_profile_power_max")[k].value = profile[
@@ -2219,14 +2210,10 @@ class Optimization:
         """Return the site-level multi-inverter SOC balance cost after validation."""
         raw = self.optim_conf.get(BATTERY_SOC_BALANCE_COST_KEY, 0.0)
         if isinstance(raw, bool) or not isinstance(raw, int | float | np.integer | np.floating):
-            raise ValueError(
-                f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0"
-            )
+            raise ValueError(f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0")
         value = float(raw)
         if not isfinite(value) or value < 0:
-            raise ValueError(
-                f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0"
-            )
+            raise ValueError(f"{BATTERY_SOC_BALANCE_COST_KEY} must be a finite number >= 0")
         return value
 
     def _battery_soc_balance_block_items(self):
@@ -2475,8 +2462,7 @@ class Optimization:
                 name=f"p_sto_pos_{index}",
             )
             constraints.append(
-                vars_dict[f"p_sto_pos_{index}"]
-                <= params["battery_discharge_power_max"]
+                vars_dict[f"p_sto_pos_{index}"] <= params["battery_discharge_power_max"]
             )
             vars_dict[f"p_sto_neg_{index}"] = cp.Variable(
                 n,
@@ -2484,8 +2470,7 @@ class Optimization:
                 name=f"p_sto_neg_{index}",
             )
             constraints.append(
-                vars_dict[f"p_sto_neg_{index}"]
-                >= -params["battery_charge_power_max"]
+                vars_dict[f"p_sto_neg_{index}"] >= -params["battery_charge_power_max"]
             )
             vars_dict[f"E_{index}"] = cp.Variable(n, boolean=True, name=f"E_{index}")
             vars_dict[f"soc_low_recovered_{index}"] = cp.Variable(
@@ -2852,12 +2837,12 @@ class Optimization:
         if self._multi_block_battery_model_enabled:
             battery_power = self._private_battery_total_power_expression()
         else:
-        # p_sto_pos/p_sto_neg are lists (#610), one entry per battery when
-        # set_use_battery is on, a single always-zero dummy entry when off.
-        # This choke point folds every battery's power into the shared
-        # balance by summing over the ACTUAL list length (never self.n_batt
-        # directly), so it stays branch-free regardless of whether the
-        # battery feature is on.
+            # p_sto_pos/p_sto_neg are lists (#610), one entry per battery when
+            # set_use_battery is on, a single always-zero dummy entry when off.
+            # This choke point folds every battery's power into the shared
+            # balance by summing over the ACTUAL list length (never self.n_batt
+            # directly), so it stays branch-free regardless of whether the
+            # battery feature is on.
             p_sto_pos_list = self.vars["p_sto_pos"]
             p_sto_neg_list = self.vars["p_sto_neg"]
             battery_power = sum(p_sto_pos_list) + sum(p_sto_neg_list)
@@ -2995,9 +2980,7 @@ class Optimization:
                             ]
                             p_nom_inverter_output += inverter.Paco
                         else:
-                            p_nom_inverter_output += block_config.plant_conf[
-                                "pv_inverter_model"
-                            ][i]
+                            p_nom_inverter_output += block_config.plant_conf["pv_inverter_model"][i]
                 else:
                     if isinstance(block_config.plant_conf["pv_inverter_model"], str):
                         with bz2.BZ2File(
@@ -3046,9 +3029,7 @@ class Optimization:
 
         if block_config.plant_conf.get("compute_curtailment", False):
             p_pv_curtailment = block_vars.p_pv_curtailment
-            e_dc_balance = (p_pv - p_pv_curtailment + p_sto_pos + p_sto_neg) - (
-                p_dc_ac - p_ac_dc
-            )
+            e_dc_balance = (p_pv - p_pv_curtailment + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
         else:
             e_dc_balance = (p_pv + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
         constraints.append(e_dc_balance == 0)
@@ -3110,9 +3091,7 @@ class Optimization:
         if self.optim_conf["set_nocharge_from_grid"]:
             if self._multi_block_battery_model_enabled:
                 constraints.append(
-                    self._site_battery_charge_expression()
-                    + self._site_raw_pv_expression()
-                    >= 0
+                    self._site_battery_charge_expression() + self._site_raw_pv_expression() >= 0
                 )
             else:
                 constraints.append(sum(p_sto_neg) + p_pv >= 0)
@@ -3229,25 +3208,17 @@ class Optimization:
             )
             if charge_profile_power is not None:
                 selected_charge_cap = charge_profile_power[0]
-                charge_profile_breakpoints = (
-                    self.param_battery_charge_profile_breakpoints[k]
-                )
-                charge_profile_selectors = self.vars[
-                    "battery_charge_profile_selectors"
-                ][k]
+                charge_profile_breakpoints = self.param_battery_charge_profile_breakpoints[k]
+                charge_profile_selectors = self.vars["battery_charge_profile_selectors"][k]
                 if charge_profile_breakpoints is not None:
                     for breakpoint_index in range(charge_profile_breakpoints.size):
                         selector = charge_profile_selectors[:, breakpoint_index]
                         breakpoint = charge_profile_breakpoints[breakpoint_index]
                         guarded_breakpoint = breakpoint - SOC_POWER_PROFILE_GUARD
                         constraints.append(
-                            end_soc
-                            <= guarded_breakpoint
-                            + (1 - guarded_breakpoint) * selector
+                            end_soc <= guarded_breakpoint + (1 - guarded_breakpoint) * selector
                         )
-                        constraints.append(
-                            end_soc >= guarded_breakpoint * selector
-                        )
+                        constraints.append(end_soc >= guarded_breakpoint * selector)
                         selected_charge_cap = selected_charge_cap + cp.multiply(
                             charge_profile_power[breakpoint_index + 1]
                             - charge_profile_power[breakpoint_index],
@@ -3262,21 +3233,15 @@ class Optimization:
             )
             if discharge_profile_power is not None:
                 selected_discharge_cap = discharge_profile_power[0]
-                discharge_profile_breakpoints = (
-                    self.param_battery_discharge_profile_breakpoints[k]
-                )
-                discharge_profile_selectors = self.vars[
-                    "battery_discharge_profile_selectors"
-                ][k]
+                discharge_profile_breakpoints = self.param_battery_discharge_profile_breakpoints[k]
+                discharge_profile_selectors = self.vars["battery_discharge_profile_selectors"][k]
                 if discharge_profile_breakpoints is not None:
                     for breakpoint_index in range(discharge_profile_breakpoints.size):
                         selector = discharge_profile_selectors[:, breakpoint_index]
                         breakpoint = discharge_profile_breakpoints[breakpoint_index]
                         guarded_breakpoint = breakpoint + SOC_POWER_PROFILE_GUARD
                         constraints.append(
-                            end_soc
-                            <= guarded_breakpoint
-                            + (1 - guarded_breakpoint) * selector
+                            end_soc <= guarded_breakpoint + (1 - guarded_breakpoint) * selector
                         )
                         constraints.append(end_soc >= guarded_breakpoint * selector)
                         selected_discharge_cap = selected_discharge_cap + cp.multiply(
@@ -3298,12 +3263,8 @@ class Optimization:
                 <= max_energy + self.param_soc_high_gap[k] * (1 - soc_high_recovered_k)
             )
             if self.num_timesteps > 1:
-                constraints.append(
-                    soc_low_recovered_k[1:] >= soc_low_recovered_k[:-1]
-                )
-                constraints.append(
-                    soc_high_recovered_k[1:] >= soc_high_recovered_k[:-1]
-                )
+                constraints.append(soc_low_recovered_k[1:] >= soc_low_recovered_k[:-1])
+                constraints.append(soc_high_recovered_k[1:] >= soc_high_recovered_k[:-1])
             constraints.append(soc_low_recovered_k <= self.param_soc_low_required[k])
             constraints.append(soc_high_recovered_k <= self.param_soc_high_required[k])
             constraints.append(soc_low_recovered_k[-1] == self.param_soc_low_required[k])
@@ -3313,19 +3274,13 @@ class Optimization:
                     current_stored_energy[1:]
                     >= current_stored_energy[:-1]
                     - recovery_big_m_low
-                    * (
-                        soc_low_recovered_k[:-1]
-                        + (1 - self.param_soc_low_required[k])
-                    )
+                    * (soc_low_recovered_k[:-1] + (1 - self.param_soc_low_required[k]))
                 )
                 constraints.append(
                     current_stored_energy[1:]
                     <= current_stored_energy[:-1]
                     + recovery_big_m_high
-                    * (
-                        soc_high_recovered_k[:-1]
-                        + (1 - self.param_soc_high_required[k])
-                    )
+                    * (soc_high_recovered_k[:-1] + (1 - self.param_soc_high_required[k]))
                 )
             constraints.append(
                 current_stored_energy
@@ -3465,11 +3420,7 @@ class Optimization:
                     min_swing = min(usable_swings)
                     max_swing = max(usable_swings)
                     if max_swing > 10 * min_swing:
-                        ratio_txt = (
-                            f"{max_swing / min_swing:.0f}x"
-                            if min_swing > 0
-                            else "inf"
-                        )
+                        ratio_txt = f"{max_swing / min_swing:.0f}x" if min_swing > 0 else "inf"
                         self.logger.warning(
                             "Batteries are very different in size (%s usable SoC swing); "
                             "the battery-first import gate tracks the fleet's aggregate "
@@ -3529,8 +3480,7 @@ class Optimization:
             )
             constraints.append(
                 stored_energy
-                >= extra_min_energy
-                - extra_runtime.soc_low_gap * (1 - extra_vars.soc_low_recovered)
+                >= extra_min_energy - extra_runtime.soc_low_gap * (1 - extra_vars.soc_low_recovered)
             )
             constraints.append(
                 stored_energy
@@ -3539,43 +3489,27 @@ class Optimization:
             )
             if self.num_timesteps > 1:
                 constraints.append(
-                    extra_vars.soc_low_recovered[1:]
-                    >= extra_vars.soc_low_recovered[:-1]
+                    extra_vars.soc_low_recovered[1:] >= extra_vars.soc_low_recovered[:-1]
                 )
                 constraints.append(
-                    extra_vars.soc_high_recovered[1:]
-                    >= extra_vars.soc_high_recovered[:-1]
+                    extra_vars.soc_high_recovered[1:] >= extra_vars.soc_high_recovered[:-1]
                 )
-            constraints.append(
-                extra_vars.soc_low_recovered <= extra_runtime.soc_low_required
-            )
-            constraints.append(
-                extra_vars.soc_high_recovered <= extra_runtime.soc_high_required
-            )
-            constraints.append(
-                extra_vars.soc_low_recovered[-1] == extra_runtime.soc_low_required
-            )
-            constraints.append(
-                extra_vars.soc_high_recovered[-1] == extra_runtime.soc_high_required
-            )
+            constraints.append(extra_vars.soc_low_recovered <= extra_runtime.soc_low_required)
+            constraints.append(extra_vars.soc_high_recovered <= extra_runtime.soc_high_required)
+            constraints.append(extra_vars.soc_low_recovered[-1] == extra_runtime.soc_low_required)
+            constraints.append(extra_vars.soc_high_recovered[-1] == extra_runtime.soc_high_required)
             if self.num_timesteps > 1:
                 constraints.append(
                     stored_energy[1:]
                     >= stored_energy[:-1]
                     - recovery_big_m_low
-                    * (
-                        extra_vars.soc_low_recovered[:-1]
-                        + (1 - extra_runtime.soc_low_required)
-                    )
+                    * (extra_vars.soc_low_recovered[:-1] + (1 - extra_runtime.soc_low_required))
                 )
                 constraints.append(
                     stored_energy[1:]
                     <= stored_energy[:-1]
                     + recovery_big_m_high
-                    * (
-                        extra_vars.soc_high_recovered[:-1]
-                        + (1 - extra_runtime.soc_high_required)
-                    )
+                    * (extra_vars.soc_high_recovered[:-1] + (1 - extra_runtime.soc_high_required))
                 )
             constraints.append(
                 stored_energy
@@ -5343,8 +5277,7 @@ class Optimization:
 
     def _public_multi_block_result_columns_enabled(self) -> bool:
         return (
-            self._public_multi_block_battery_model_enabled
-            or self._multi_block_hybrid_model_enabled
+            self._public_multi_block_battery_model_enabled or self._multi_block_hybrid_model_enabled
         )
 
     @staticmethod
@@ -5376,9 +5309,7 @@ class Optimization:
         raw_pv = self._block_raw_pv_values(index, root_pv)
         curtailment = self._block_pv_curtailment_values(index)
         post_curtailment_pv = raw_pv - curtailment
-        post_curtailment_pv[
-            np.isclose(post_curtailment_pv, 0.0, atol=1e-9, rtol=0.0)
-        ] = 0.0
+        post_curtailment_pv[np.isclose(post_curtailment_pv, 0.0, atol=1e-9, rtol=0.0)] = 0.0
 
         block_config = self.inverter_block_config[index]
         if not block_config.plant_conf.get("inverter_is_hybrid", False):
@@ -5398,9 +5329,7 @@ class Optimization:
             post_curtailment_pv / eff_ac_dc,
             post_curtailment_pv * eff_dc_ac,
         )
-        ac_availability[
-            np.isclose(ac_availability, 0.0, atol=1e-9, rtol=0.0)
-        ] = 0.0
+        ac_availability[np.isclose(ac_availability, 0.0, atol=1e-9, rtol=0.0)] = 0.0
         return ac_availability
 
     def _add_public_multi_block_result_columns(self, opt_tp, root_pv) -> None:
@@ -5460,9 +5389,7 @@ class Optimization:
                 if not block_config.plant_conf.get("inverter_is_hybrid", False):
                     continue
                 block_variables = self.inverter_block_variables[index]
-                p_hybrid_inverter = self._solver_value_array(
-                    block_variables.p_hybrid_inverter
-                )
+                p_hybrid_inverter = self._solver_value_array(block_variables.p_hybrid_inverter)
                 hybrid_inverter_total += p_hybrid_inverter
                 suffix = self._block_result_suffix(block_config.index)
                 opt_tp[f"P_hybrid_inverter{suffix}"] = p_hybrid_inverter
@@ -5589,11 +5516,7 @@ class Optimization:
             self.prob = None
 
         # Data Validation & Defaults (#610: per-battery lists).
-        batt_conf = (
-            self._battery_conf_as_lists()
-            if self.optim_conf["set_use_battery"]
-            else None
-        )
+        batt_conf = self._battery_conf_as_lists() if self.optim_conf["set_use_battery"] else None
         if self._is_public_multi_inverter_mode() and self.optim_conf["set_use_battery"]:
             root_runtime_conf = self._root_inverter_runtime_conf()
             root_block = self.inverter_block_config[0]
@@ -6577,9 +6500,7 @@ class Optimization:
                 has_soc_power_profiles and self.prob.status == "user_limit"
             )
             fallback_label = (
-                "Scalar battery fallback"
-                if use_scalar_profile_fallback
-                else "Relaxed optimization"
+                "Scalar battery fallback" if use_scalar_profile_fallback else "Relaxed optimization"
             )
             fallback_description = (
                 "scalar battery limits"
@@ -6613,9 +6534,7 @@ class Optimization:
             # Re-apply main constraints
             self._add_main_power_balance_constraints(fallback_constraints)
             if self.plant_conf.get("inverter_is_hybrid", False):
-                self._add_hybrid_inverter_constraints(
-                    fallback_constraints, inv_stress_conf
-                )
+                self._add_hybrid_inverter_constraints(fallback_constraints, inv_stress_conf)
             if self.optim_conf.get("set_use_battery", False):
                 self._add_battery_constraints(
                     fallback_constraints,
@@ -6677,9 +6596,7 @@ class Optimization:
                 _set_solver_timeout(selected_solver, solver_opts, fallback_timeout)
                 fallback_problem.solve(solver=selected_solver, **solver_opts)
                 if use_scalar_profile_fallback:
-                    self.soc_profile_fallback_diagnostics["scalar_status"] = (
-                        fallback_problem.status
-                    )
+                    self.soc_profile_fallback_diagnostics["scalar_status"] = fallback_problem.status
 
                 if fallback_problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
                     self.logger.info(f"{fallback_label} successful!")
@@ -6692,8 +6609,7 @@ class Optimization:
                         self.prob = fallback_problem
                 else:
                     self.logger.error(
-                        f"{fallback_label} failed with status: "
-                        f"{fallback_problem.status}"
+                        f"{fallback_label} failed with status: {fallback_problem.status}"
                     )
                     result_problem = fallback_problem
                     if not use_scalar_profile_fallback:
@@ -6749,9 +6665,7 @@ class Optimization:
             soc_init_list[0] if soc_init_list is not None and self.n_batt == 1 else soc_init_list
         )
         p_pv_for_results = (
-            self.param_pv_forecast.value
-            if self._is_public_multi_inverter_mode()
-            else p_pv
+            self.param_pv_forecast.value if self._is_public_multi_inverter_mode() else p_pv
         )
         results_df = self._build_results_dataframe(
             data_opt,

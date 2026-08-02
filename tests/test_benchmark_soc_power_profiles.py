@@ -29,15 +29,9 @@ from scripts.benchmark_soc_power_profiles import (
 
 from emhass.soc_power_profiles import model_size_increase
 
-CORPUS_PATH = (
-    Path(__file__).parents[1] / "benchmarks" / "soc_power_profiles" / "payloads.json"
-)
+CORPUS_PATH = Path(__file__).parents[1] / "benchmarks" / "soc_power_profiles" / "payloads.json"
 RETAINED_RESULT_PATH = (
-    Path(__file__).parents[1]
-    / "benchmarks"
-    / "soc_power_profiles"
-    / "results"
-    / "2026-07-30"
+    Path(__file__).parents[1] / "benchmarks" / "soc_power_profiles" / "results" / "2026-07-30"
 )
 PROJECT_DATA_PATH = Path(__file__).parents[1] / "data"
 RESULT_PATHS = [
@@ -95,9 +89,9 @@ def _git_blob_sha256(repository: Path, commit: str, path: str) -> str:
 
 
 def test_benchmark_runner_uses_python_310_compatible_utc_import():
-    source = (
-        Path(__file__).parents[1] / "scripts/benchmark_soc_power_profiles.py"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "scripts/benchmark_soc_power_profiles.py").read_text(
+        encoding="utf-8"
+    )
     tree = ast.parse(source, feature_version=(3, 10))
     datetime_imports = {
         alias.name
@@ -300,12 +294,9 @@ def test_run_record_separates_cvxpy_compilation_solver_and_wrapper_overhead():
     assert timings["solve_wrapper_overhead"] == pytest.approx(0.3)
     assert "canonicalization_and_wrapper" not in timings
     assert all(value >= 0 for value in timings.values() if value is not None)
-    assert (
-        timings["cvxpy_compilation"]
-        + timings["final_solver"]
-        + timings["solve_wrapper_overhead"]
-        == pytest.approx(timings["solve_call_including_fallback"])
-    )
+    assert timings["cvxpy_compilation"] + timings["final_solver"] + timings[
+        "solve_wrapper_overhead"
+    ] == pytest.approx(timings["solve_call_including_fallback"])
     assert timings["end_to_end"] >= timings["optimization_mode"]
 
 
@@ -354,9 +345,7 @@ def test_provenance_requires_clean_descendant_of_recorded_base(tmp_path):
 def test_runner_rejects_ambient_emhass_import_outside_tested_project(tmp_path):
     tested_project = tmp_path / "tested-project"
     (tested_project / "src" / "emhass").mkdir(parents=True)
-    (tested_project / "src" / "emhass" / "__init__.py").write_text(
-        "", encoding="utf-8"
-    )
+    (tested_project / "src" / "emhass" / "__init__.py").write_text("", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="outside tested project root"):
         load_tested_emhass(tested_project)
@@ -377,9 +366,7 @@ def test_benchmark_params_ignore_ambient_credentials_and_location(monkeypatch):
     payload = corpus["payloads"][0]
 
     params = asyncio.run(
-        build_benchmark_params(
-            payload["configuration"], corpus["solver"], payload["runtime"]
-        )
+        build_benchmark_params(payload["configuration"], corpus["solver"], payload["runtime"])
     )
 
     retrieve = params["retrieve_hass_conf"]
@@ -413,9 +400,7 @@ def test_payload_corpus_contains_no_control_or_credential_fields():
         for section in ("configuration", "runtime")
         for key in payload[section]
     }
-    assert serialized_keys.isdisjoint(
-        {"hass_url", "long_lived_token", "mqtt", "control_endpoint"}
-    )
+    assert serialized_keys.isdisjoint({"hass_url", "long_lived_token", "mqtt", "control_endpoint"})
 
 
 def test_runner_rejects_dependency_lock_metadata_lookup_failure(monkeypatch):
@@ -451,9 +436,7 @@ def test_runner_rejects_dependency_lock_metadata_lookup_failure(monkeypatch):
         asyncio.run(run_benchmarks(CORPUS_PATH, repetitions=1))
 
 
-def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
-    monkeypatch, tmp_path
-):
+def test_runner_records_public_mode_results_for_one_and_multiple_batteries(monkeypatch, tmp_path):
     before_result_files = {
         path: path.read_bytes() if path.exists() else None for path in RESULT_PATHS
     }
@@ -490,9 +473,7 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     assert os.environ["LP_SOLVER"] == "GUROBI"
     tested_source = report["reproduction"]["tested_source_provenance"]
     harness = report["reproduction"]["harness_provenance"]
-    assert tested_source["base_commit"] == (
-        "aef76a4ba9286d5a12f1ca476e56076c70a74951"
-    )
+    assert tested_source["base_commit"] == ("aef76a4ba9286d5a12f1ca476e56076c70a74951")
     assert tested_source["merge_base"] == tested_source["base_commit"]
     assert tested_source["tested_commit"]
     assert harness["tested_commit"] == tested_source["tested_commit"]
@@ -564,19 +545,13 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
             assert run["timings_s"]["solve_wrapper_overhead"] >= 0
             assert run["timings_s"]["final_solver"] >= 0
             assert run["timings_s"]["end_to_end"] >= 0
-            assert (
-                run["timings_s"]["cvxpy_compilation"]
-                + run["timings_s"]["final_solver"]
-                + run["timings_s"]["solve_wrapper_overhead"]
-                == pytest.approx(
-                    run["timings_s"]["solve_call_including_fallback"],
-                    abs=1e-9,
-                )
+            assert run["timings_s"]["cvxpy_compilation"] + run["timings_s"]["final_solver"] + run[
+                "timings_s"
+            ]["solve_wrapper_overhead"] == pytest.approx(
+                run["timings_s"]["solve_call_including_fallback"],
+                abs=1e-9,
             )
-            assert (
-                run["timings_s"]["end_to_end"]
-                >= run["timings_s"]["optimization_mode"]
-            )
+            assert run["timings_s"]["end_to_end"] >= run["timings_s"]["optimization_mode"]
 
     one = by_name["one_battery"]["runs"][0]
     assert len(one["soc_schedule_fraction"]["SOC_opt"]) == 8
@@ -600,9 +575,7 @@ def test_runner_records_public_mode_results_for_one_and_multiple_batteries(
     assert configured["profile_model_size"]["direction_presence"] == [
         {"charge": True, "discharge": True}
     ]
-    assert configured["profile_model_size"]["band_counts"] == [
-        {"charge": 2, "discharge": 2}
-    ]
+    assert configured["profile_model_size"]["band_counts"] == [{"charge": 2, "discharge": 2}]
     assert configured["profile_model_size"]["boolean_selectors"] == 16
     assert configured["profile_model_size"]["added_linear_rows"] == 48
 
@@ -614,20 +587,14 @@ def test_corpus_covers_required_profile_shapes_and_warning_envelope():
     assert {"one_battery", "two_batteries"} <= payloads.keys()
     assert payloads["one_battery"].get("candidate_profiles") is None
     assert payloads["two_batteries"].get("candidate_profiles") is None
-    assert len(
-        payloads["one_battery_two_band"]["candidate_profiles"][0]["charge"][
-            "power_max"
-        ]
-    ) == 2
-    assert len(
-        payloads["one_battery_three_band"]["candidate_profiles"][0]["charge"][
-            "power_max"
-        ]
-    ) == 3
-
-    full_size = model_size_increase(
-        payloads["three_battery_mixed_48"]["candidate_profiles"], 48
+    assert (
+        len(payloads["one_battery_two_band"]["candidate_profiles"][0]["charge"]["power_max"]) == 2
     )
+    assert (
+        len(payloads["one_battery_three_band"]["candidate_profiles"][0]["charge"]["power_max"]) == 3
+    )
+
+    full_size = model_size_increase(payloads["three_battery_mixed_48"]["candidate_profiles"], 48)
     assert full_size["boolean_selectors"] == 288
     assert full_size["added_linear_rows"] == 816
 
@@ -679,15 +646,11 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
             "modules": {
                 "emhass.command_line": {
                     "path": command_line_path,
-                    "sha256": _git_blob_sha256(
-                        repository, tested_commit, command_line_path
-                    ),
+                    "sha256": _git_blob_sha256(repository, tested_commit, command_line_path),
                 },
                 "emhass.optimization": {
                     "path": optimization_path,
-                    "sha256": _git_blob_sha256(
-                        repository, tested_commit, optimization_path
-                    ),
+                    "sha256": _git_blob_sha256(repository, tested_commit, optimization_path),
                 },
             },
         },
@@ -735,17 +698,17 @@ def test_paired_report_comparison_requires_absent_profile_equivalence():
         compare_paired_reports(baseline, candidate)
     candidate["reproduction"]["tested_source_provenance"]["tested_commit"] = tested_commit
 
-    original_hash = candidate["reproduction"]["tested_modules"]["modules"][
-        "emhass.optimization"
-    ]["sha256"]
-    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
+    original_hash = candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
         "sha256"
-    ] = "f" * 64
+    ]
+    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"]["sha256"] = (
+        "f" * 64
+    )
     with pytest.raises(RuntimeError, match="tested module provenance"):
         compare_paired_reports(baseline, candidate)
-    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"][
-        "sha256"
-    ] = original_hash
+    candidate["reproduction"]["tested_modules"]["modules"]["emhass.optimization"]["sha256"] = (
+        original_hash
+    )
 
     candidate["payloads"][0]["runs"][0]["power_schedule_w"] = {"P_batt": [2.0]}
     with pytest.raises(RuntimeError, match="absent-profile result differs"):
@@ -811,9 +774,7 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     baseline = json.loads(
         (RETAINED_RESULT_PATH / "unchanged-base.json").read_text(encoding="utf-8")
     )
-    candidate = json.loads(
-        (RETAINED_RESULT_PATH / "candidate.json").read_text(encoding="utf-8")
-    )
+    candidate = json.loads((RETAINED_RESULT_PATH / "candidate.json").read_text(encoding="utf-8"))
 
     current_corpus_hash = hashlib.sha256(CORPUS_PATH.read_bytes()).hexdigest()
     assert baseline["corpus_sha256"] == current_corpus_hash
@@ -825,12 +786,10 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     )
     expected_harness_commit = "1ac3b38001c6c3e14979604d31d96aa4ac6fe978"
     assert (
-        baseline["reproduction"]["harness_provenance"]["tested_commit"]
-        == expected_harness_commit
+        baseline["reproduction"]["harness_provenance"]["tested_commit"] == expected_harness_commit
     )
     assert (
-        candidate["reproduction"]["harness_provenance"]["tested_commit"]
-        == expected_harness_commit
+        candidate["reproduction"]["harness_provenance"]["tested_commit"] == expected_harness_commit
     )
     assert (
         candidate["reproduction"]["tested_source_provenance"]["tested_commit"]
@@ -840,9 +799,7 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
     assert independent_comparison["environment_parity"] is True
     assert independent_comparison["separate_containers"] is True
     assert independent_comparison["baseline_completed_before_candidate_started"] is True
-    assert baseline["reproduction"]["tested_modules"]["modules"][
-        "emhass.optimization"
-    ] == {
+    assert baseline["reproduction"]["tested_modules"]["modules"]["emhass.optimization"] == {
         "path": "src/emhass/optimization.py",
         "sha256": "1668ff6afc73df486336637021d9f016bbb83d38cf46b22647bf9246586d05fb",
     }
@@ -856,13 +813,12 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
         "show",
         f"{expected_harness_commit}:{candidate_optimization['path']}",
     )
-    assert candidate_optimization["sha256"] == hashlib.sha256(
-        retained_source
-    ).hexdigest()
+    assert candidate_optimization["sha256"] == hashlib.sha256(retained_source).hexdigest()
     assert _git(repository, "rev-parse", "HEAD") != expected_harness_commit
-    assert candidate_optimization["sha256"] != hashlib.sha256(
-        (repository / candidate_optimization["path"]).read_bytes()
-    ).hexdigest()
+    assert (
+        candidate_optimization["sha256"]
+        != hashlib.sha256((repository / candidate_optimization["path"]).read_bytes()).hexdigest()
+    )
 
     required_shape_fields = {
         "horizon",
@@ -882,48 +838,35 @@ def test_retained_paired_result_has_provenance_and_exact_model_deltas():
                 assert timings["cvxpy_compilation"] >= 0
                 assert timings["final_solver"] >= 0
                 assert timings["solve_wrapper_overhead"] >= 0
-                assert (
-                    timings["cvxpy_compilation"]
-                    + timings["final_solver"]
-                    + timings["solve_wrapper_overhead"]
-                    == pytest.approx(
-                        timings["solve_call_including_fallback"],
-                        abs=1e-9,
-                    )
+                assert timings["cvxpy_compilation"] + timings["final_solver"] + timings[
+                    "solve_wrapper_overhead"
+                ] == pytest.approx(
+                    timings["solve_call_including_fallback"],
+                    abs=1e-9,
                 )
                 assert timings["end_to_end"] >= timings["optimization_mode"]
 
         absent_payloads = {payload["name"]: payload for payload in report["payloads"]}
-        assert absent_payloads["one_battery"]["profile_model_size"][
-            "battery_count"
-        ] == 1
-        assert absent_payloads["one_battery"]["profile_model_size"][
-            "direction_presence"
-        ] == [{"charge": False, "discharge": False}]
+        assert absent_payloads["one_battery"]["profile_model_size"]["battery_count"] == 1
+        assert absent_payloads["one_battery"]["profile_model_size"]["direction_presence"] == [
+            {"charge": False, "discharge": False}
+        ]
         assert absent_payloads["one_battery"]["profile_model_size"]["band_counts"] == [
             {"charge": 0, "discharge": 0}
         ]
-        assert absent_payloads["two_batteries"]["profile_model_size"][
-            "battery_count"
-        ] == 2
-        assert absent_payloads["two_batteries"]["profile_model_size"][
-            "direction_presence"
-        ] == [
+        assert absent_payloads["two_batteries"]["profile_model_size"]["battery_count"] == 2
+        assert absent_payloads["two_batteries"]["profile_model_size"]["direction_presence"] == [
             {"charge": False, "discharge": False},
             {"charge": False, "discharge": False},
         ]
-        assert absent_payloads["two_batteries"]["profile_model_size"][
-            "band_counts"
-        ] == [
+        assert absent_payloads["two_batteries"]["profile_model_size"]["band_counts"] == [
             {"charge": 0, "discharge": 0},
             {"charge": 0, "discharge": 0},
         ]
 
     baseline_payloads = {payload["name"]: payload for payload in baseline["payloads"]}
     for payload in candidate["payloads"]:
-        assert payload["scenario_profile_shape"]["horizon"] == payload[
-            "prediction_horizon"
-        ]
+        assert payload["scenario_profile_shape"]["horizon"] == payload["prediction_horizon"]
         assert payload["scenario_profile_shape"]["battery_count"] == len(
             payload["scenario_profile_shape"]["band_counts"]
         )

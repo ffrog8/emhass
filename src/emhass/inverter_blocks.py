@@ -103,9 +103,8 @@ def project_public_inverter_config(
     projected_optim_conf = dict(optim_conf)
     projected_plant_conf = dict(plant_conf)
     parsed_blocks = plant_conf.get(INVERTER_BLOCK_CONFIGS_KEY)
-    if (
-        resolve_multi_inverter_mode(plant_conf) != MULTI_INVERTER_MODE_MULTI
-        or not isinstance(parsed_blocks, Mapping)
+    if resolve_multi_inverter_mode(plant_conf) != MULTI_INVERTER_MODE_MULTI or not isinstance(
+        parsed_blocks, Mapping
     ):
         return projected_optim_conf, projected_plant_conf
 
@@ -192,7 +191,9 @@ _RUNTIME_SOC_SCALAR_CONFIG_BLOCK_KEYS = frozenset(
         "battery_target_state_of_charge",
     }
 )
-_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY = "_hybrid_inverter_runtime_target_bounds_relaxed_indexes"
+_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY = (
+    "_hybrid_inverter_runtime_target_bounds_relaxed_indexes"
+)
 
 _DEFERRED_RUNTIME_BLOCK_KEYS = frozenset(
     {
@@ -351,7 +352,9 @@ def _warn_if_static_config_zero_present(input_conf: Mapping[str, object]) -> Non
         _warn_ignored_config_zero()
 
 
-def _extract_block_indexes(input_conf: Mapping[str, object], *, warn_on_zero: bool = False) -> list[int]:
+def _extract_block_indexes(
+    input_conf: Mapping[str, object], *, warn_on_zero: bool = False
+) -> list[int]:
     indexes: list[int] = []
     for key in input_conf:
         if not key.startswith(HYBRID_INVERTER_CONFIG_PREFIX):
@@ -391,7 +394,9 @@ def _extract_runtime_block_indexes(runtimeparams: Mapping[str, object]) -> list[
     return sorted(indexes)
 
 
-def _validate_block_values(index: int, raw_block: Mapping[str, object], plant_conf: dict[str, object]) -> None:
+def _validate_block_values(
+    index: int, raw_block: Mapping[str, object], plant_conf: dict[str, object]
+) -> None:
     for key in _POSITIVE_PLANT_KEYS & raw_block.keys():
         _validate_positive(plant_conf[key], index, key)
     for key in _EFFICIENCY_PLANT_KEYS & raw_block.keys():
@@ -425,7 +430,9 @@ def _validate_battery_block(
         "battery_target_state_of_charge",
     )
     if soc_min >= soc_max:
-        raise ValueError(f"hybrid_inverter_config_{index} battery minimum SOC must be less than maximum SOC")
+        raise ValueError(
+            f"hybrid_inverter_config_{index} battery minimum SOC must be less than maximum SOC"
+        )
     if validate_target_bounds and (soc_target < soc_min or soc_target > soc_max):
         raise ValueError(
             f"hybrid_inverter_config_{index}.battery_target_state_of_charge must be within min/max SOC"
@@ -435,7 +442,9 @@ def _validate_battery_block(
 def _validate_hybrid_block(index: int, raw_block: Mapping[str, object]) -> None:
     missing = sorted(_REQUIRED_HYBRID_INVERTER_KEYS - raw_block.keys())
     if missing:
-        raise ValueError(f"hybrid_inverter_config_{index} missing required hybrid inverter keys: {missing}")
+        raise ValueError(
+            f"hybrid_inverter_config_{index} missing required hybrid inverter keys: {missing}"
+        )
 
 
 def _validate_runtime_soc_init(
@@ -479,8 +488,7 @@ def _validate_runtime_soc_final(
     soc_max = float(plant_conf["battery_maximum_state_of_charge"])
     if numeric < soc_min:
         _LOGGER.warning(
-            "Passed hybrid_inverter_config_%s.%s=%s is lower than soc_min=%s, "
-            "setting %s=soc_min",
+            "Passed hybrid_inverter_config_%s.%s=%s is lower than soc_min=%s, setting %s=soc_min",
             block_index,
             key,
             numeric,
@@ -490,8 +498,7 @@ def _validate_runtime_soc_final(
         numeric = soc_min
     if numeric > soc_max:
         _LOGGER.warning(
-            "Passed hybrid_inverter_config_%s.%s=%s is greater than soc_max=%s, "
-            "setting %s=soc_max",
+            "Passed hybrid_inverter_config_%s.%s=%s is greater than soc_max=%s, setting %s=soc_max",
             block_index,
             key,
             numeric,
@@ -610,7 +617,9 @@ def _split_block_config(
     set_use_battery = bool(optim_conf.get("set_use_battery", False))
     present_battery_keys = _REQUIRED_BATTERY_KEYS & raw_block.keys()
     if not set_use_battery and present_battery_keys:
-        raise ValueError(f"hybrid_inverter_config_{index} contains battery keys but set_use_battery is not true")
+        raise ValueError(
+            f"hybrid_inverter_config_{index} contains battery keys but set_use_battery is not true"
+        )
     if set_use_battery:
         _validate_battery_block(
             index,
@@ -649,12 +658,8 @@ def merge_inverter_block_runtime_overrides(
     if not isinstance(plant_conf, Mapping):
         plant_conf = {}
     multi_inverter_mode = resolve_multi_inverter_mode(plant_conf, runtimeparams)
-    if (
-        isinstance(input_conf.get("plant_conf"), dict)
-        and (
-            MULTI_INVERTER_MODE_KEY in runtimeparams
-            or MULTI_INVERTER_MODE_KEY in plant_conf
-        )
+    if isinstance(input_conf.get("plant_conf"), dict) and (
+        MULTI_INVERTER_MODE_KEY in runtimeparams or MULTI_INVERTER_MODE_KEY in plant_conf
     ):
         input_conf["plant_conf"][MULTI_INVERTER_MODE_KEY] = multi_inverter_mode
 
@@ -662,8 +667,7 @@ def merge_inverter_block_runtime_overrides(
     if multi_inverter_mode == MULTI_INVERTER_MODE_SINGLE:
         if runtime_indexes:
             raise ValueError(
-                "nested hybrid_inverter_config_N runtime blocks require "
-                "multi_inverter_mode=multi"
+                "nested hybrid_inverter_config_N runtime blocks require multi_inverter_mode=multi"
             )
         return block_runtime_conf
 
@@ -763,8 +767,7 @@ def parse_inverter_block_configs(
         if runtime_conf_by_index:
             index = sorted(runtime_conf_by_index)[0]
             raise ValueError(
-                f"hybrid_inverter_config_{index} runtime block requires "
-                "multi_inverter_mode=multi"
+                f"hybrid_inverter_config_{index} runtime block requires multi_inverter_mode=multi"
             )
         plant_conf[INVERTER_BLOCK_CONFIGS_KEY] = blocks
         return blocks
