@@ -741,6 +741,41 @@ class TestCommandLineAsyncUtils(unittest.IsolatedAsyncioTestCase):
         forecast.assert_not_called()
         optimization.assert_not_called()
 
+    async def test_publish_data_input_prep_ignores_saved_multi_battery_soc_profiles(self):
+        params = await TestCommandLineAsyncUtils.get_test_params()
+        params = TestCommandLineAsyncUtils._make_battery_only_multi_block_params(params)
+        params["hybrid_inverter_config_2"] = (
+            TestCommandLineAsyncUtils._battery_only_extra_block()
+        )
+        params["hybrid_inverter_config_3"] = (
+            TestCommandLineAsyncUtils._battery_only_extra_block()
+        )
+        saved_profiles = [
+            {"charge": {"soc_breakpoints": [], "power_max": [1000.0]}},
+            {"charge": {"soc_breakpoints": [], "power_max": [1100.0]}},
+            {"charge": {"soc_breakpoints": [], "power_max": [1200.0]}},
+        ]
+        params["plant_conf"]["battery_soc_power_profiles"] = saved_profiles
+
+        with patch("emhass.command_line.Forecast") as forecast:
+            with patch("emhass.command_line.Optimization") as optimization:
+                input_data_dict = await set_input_data_dict(
+                    emhass_conf,
+                    "profit",
+                    orjson.dumps(params).decode("utf-8"),
+                    orjson.dumps({"publish_prefix": "multi_"}).decode("utf-8"),
+                    "publish-data",
+                    logger,
+                    get_data_from_file=True,
+                )
+
+        self.assertIsInstance(input_data_dict, dict)
+        self.assertEqual(input_data_dict["params"]["passed_data"]["publish_prefix"], "multi_")
+        self.assertEqual(input_data_dict["plant_conf"]["battery_soc_power_profiles"], [{}])
+        self.assertEqual(params["plant_conf"]["battery_soc_power_profiles"], saved_profiles)
+        forecast.assert_not_called()
+        optimization.assert_not_called()
+
     async def test_publish_data_input_prep_ignores_nested_multi_inverter_runtime(self):
         params = await TestCommandLineAsyncUtils.get_test_params()
         params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(params)

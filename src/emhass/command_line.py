@@ -85,6 +85,7 @@ def _publish_data_input_prep_params(
     publish_params = copy.deepcopy(params)
     if isinstance(publish_params.get("plant_conf"), dict):
         publish_params["plant_conf"]["multi_inverter_mode"] = "single"
+        publish_params["plant_conf"].pop("battery_soc_power_profiles", None)
 
     if runtimeparams is None:
         return publish_params, None
