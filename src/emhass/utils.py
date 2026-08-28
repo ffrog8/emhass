@@ -2484,6 +2484,9 @@ async def treat_runtimeparams(
             heat_topology,
         )
 
+    _normalise_runtime_deferrable_arrays(runtimeparams, optim_conf, logger)
+    params["optim_conf"] = optim_conf
+
     # Serialize the final params without the private parsed block state.
     params_for_serialization = dict(params)
     params_for_serialization["plant_conf"] = _public_plant_conf_items(plant_conf)
@@ -3629,6 +3632,75 @@ async def build_params(
     params.update(_indexed_inverter_config_items(config))
 
     return params
+
+
+DEFERRABLE_ARRAY_DEFAULTS: dict[str, bool | int | float] = {
+    "start_timesteps_of_each_deferrable_load": 0,
+    "end_timesteps_of_each_deferrable_load": 0,
+    "set_deferrable_load_single_constant": False,
+    "treat_deferrable_load_as_semi_cont": True,
+    "set_deferrable_startup_penalty": 0.0,
+    "deferrable_load_max_cost": 0.0,
+    "set_deferrable_max_startups": 0,
+    "operating_hours_of_each_deferrable_load": 0,
+    "nominal_power_of_deferrable_loads": 0,
+}
+
+DEFERRABLE_ARRAY_LEGACY_NAMES: dict[str, str] = {
+    "start_timesteps_of_each_deferrable_load": "def_start_timestep",
+    "end_timesteps_of_each_deferrable_load": "def_end_timestep",
+    "set_deferrable_load_single_constant": "set_def_constant",
+    "treat_deferrable_load_as_semi_cont": "treat_def_as_semi_cont",
+    "set_deferrable_startup_penalty": "def_start_penalty",
+    "deferrable_load_max_cost": "deferrable_load_max_cost",
+    "set_deferrable_max_startups": "set_deferrable_max_startups",
+    "operating_hours_of_each_deferrable_load": "def_total_hours",
+    "nominal_power_of_deferrable_loads": "P_deferrable_nom",
+}
+
+
+def _normalise_runtime_deferrable_arrays(
+    runtimeparams: dict | None,
+    optim_conf: dict,
+    logger: logging.Logger,
+) -> None:
+    """Size per-load arrays against the final runtime load count."""
+    raw_count = optim_conf.get("number_of_deferrable_loads")
+    if raw_count is None:
+        return
+    try:
+        final_count = int(raw_count)
+    except (TypeError, ValueError):
+        logger.warning(
+            "number_of_deferrable_loads is not a valid integer (%r); "
+            "skipping deferrable array normalization",
+            raw_count,
+        )
+        return
+
+    optim_conf["number_of_deferrable_loads"] = final_count
+    runtime_source = runtimeparams if isinstance(runtimeparams, dict) else {}
+    for name, default in DEFERRABLE_ARRAY_DEFAULTS.items():
+        runtime_value = runtime_source.get(name)
+        if runtime_value is None:
+            runtime_value = runtime_source.get(DEFERRABLE_ARRAY_LEGACY_NAMES[name])
+
+        if runtime_value is not None and not isinstance(runtime_value, list):
+            optim_conf[name] = [runtime_value] * final_count
+            continue
+
+        current = optim_conf.get(name)
+        before = list(current) if isinstance(current, list) else current
+        if isinstance(current, list):
+            optim_conf[name] = list(current)
+        optim_conf[name] = check_def_loads(final_count, optim_conf, default, name, logger)
+        if runtime_value is not None and before != optim_conf[name]:
+            logger.warning(
+                "%s was normalized to %d entries to match "
+                "number_of_deferrable_loads; pass a full-length runtime array",
+                name,
+                final_count,
+            )
 
 
 def check_def_loads(

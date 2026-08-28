@@ -6510,6 +6510,13 @@ class Optimization:
 
             self.prob = cp.Problem(objective_expr, constraints)
 
+        # Extraction artifacts stay paired with the cached problem. A fallback
+        # may rebuild alternatives for this run, but must not replace these
+        # instance-held references for later cache hits.
+        predicted_temps = self.predicted_temps
+        heating_demands = self.heating_demands
+        q_inputs = self.q_inputs
+
         # Solver Configuration
         solver_opts = {"verbose": False}
         if debug:
@@ -6639,6 +6646,17 @@ class Optimization:
             original_single_const = copy.deepcopy(
                 self.optim_conf.get("set_deferrable_load_single_constant", [])
             )
+            original_hybrid_vars = {
+                name: value
+                for name, value in self.vars.items()
+                if name in {"p_dc_ac", "p_ac_dc", "is_dc_sourcing"}
+                or name.startswith(("p_dc_ac_", "p_ac_dc_", "is_dc_sourcing_"))
+            }
+            original_q_input_vars = {
+                k: params["q_input_var"]
+                for k, params in self.param_thermal.items()
+                if "q_input_var" in params
+            }
 
             # Preserve the scalar model exactly when only the SOC profile is
             # being removed. Other failures keep the established relaxed-LP
@@ -6670,7 +6688,7 @@ class Optimization:
                 )
 
             # Scalar fallback preserves deferrable binary logic; continuous-LP fallback disables it.
-            self.predicted_temps, self.heating_demands, penalty_terms_total, self.q_inputs = (
+            predicted_temps, heating_demands, penalty_terms_total, q_inputs = (
                 self._add_deferrable_load_constraints(
                     fallback_constraints,
                     data_opt,
@@ -6725,21 +6743,24 @@ class Optimization:
                     if not use_scalar_profile_fallback:
                         fallback_problem._status = "Optimal (Relaxed)"
                     result_problem = fallback_problem
-                    if not use_scalar_profile_fallback:
-                        self.prob = fallback_problem
                 else:
                     self.logger.error(
                         f"{fallback_label} failed with status: {fallback_problem.status}"
                     )
                     result_problem = fallback_problem
-                    if not use_scalar_profile_fallback:
-                        self.prob = fallback_problem
             except Exception as e:
                 self.logger.error(f"{fallback_label} crashed: {e}")
 
             # 5. Restore Configuration
             self.optim_conf["treat_deferrable_load_as_semi_cont"] = original_semi_cont
             self.optim_conf["set_deferrable_load_single_constant"] = original_single_const
+            self.vars.update(original_hybrid_vars)
+            self._refresh_inverter_block_variables()
+            for k, params in self.param_thermal.items():
+                if k in original_q_input_vars:
+                    params["q_input_var"] = original_q_input_vars[k]
+                else:
+                    params.pop("q_input_var", None)
 
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
@@ -6794,10 +6815,10 @@ class Optimization:
             p_load,
             p_pv_for_results,
             soc_init_for_results,
-            self.predicted_temps,
-            self.heating_demands,
+            predicted_temps,
+            heating_demands,
             debug,
-            q_inputs=self.q_inputs,
+            q_inputs=q_inputs,
         )
         if stage_times is not None:
             stage_times["optim_solve.extract"] = time.perf_counter() - _extract_start_perf

@@ -2709,6 +2709,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         )
         opt = self.create_optimization(optim_conf=optim_conf, plant_conf=plant_conf)
         solve_calls = []
+        cached_hybrid_vars = {}
         original_solve = cp.Problem.solve
 
         def simulate_profile_timeout(problem, *args, **kwargs):
@@ -2720,6 +2721,14 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 }
             )
             if len(solve_calls) == 1:
+                cached_hybrid_vars.update(
+                    {
+                        name: value
+                        for name, value in opt.vars.items()
+                        if name in {"p_dc_ac", "p_ac_dc", "is_dc_sourcing"}
+                        or name.startswith(("p_dc_ac_", "p_ac_dc_", "is_dc_sourcing_"))
+                    }
+                )
                 problem._status = cp.USER_LIMIT
                 problem._value = None
                 return None
@@ -2740,6 +2749,9 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("battery_charge_profile_selectors_2", solve_calls[0]["variables"])
         self.assertFalse(any("profile_selectors" in name for name in solve_calls[1]["variables"]))
         self.assertIs(opt.prob, solve_calls[0]["problem"])
+        self.assertTrue(cached_hybrid_vars)
+        for name, variable in cached_hybrid_vars.items():
+            self.assertIs(opt.vars[name], variable)
         self.assertTrue(opt.prob.is_dcp(dpp=True))
         self.assertEqual(result["optim_status"].unique().tolist(), ["Optimal"])
         self.assertEqual(
@@ -2752,6 +2764,88 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 "scalar_status": "optimal",
             },
         )
+
+        cached_profile_problem = opt.prob
+        followup = opt.perform_optimization(
+            df,
+            df["p_pv_forecast"].values,
+            df["p_load_forecast"].values,
+            df[opt.var_load_cost].values,
+            df[opt.var_prod_price].values,
+        )
+        self.assertIs(opt.prob, cached_profile_problem)
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertEqual(followup["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertTrue(
+            any("profile_selectors" in variable.name() for variable in opt.prob.variables())
+        )
+        for name, variable in cached_hybrid_vars.items():
+            self.assertIs(opt.vars[name], variable)
+
+    def test_relaxed_lp_rescue_is_one_shot_for_soc_aware_optimizer(self):
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.optim_conf.update(
+            {
+                "set_use_battery": True,
+                "treat_deferrable_load_as_semi_cont": [True, True],
+                "set_deferrable_load_single_constant": [True, True],
+            }
+        )
+        self.opt = self.create_optimization()
+        prediction_horizon = 10
+        kwargs = {
+            "soc_init": 0.5,
+            "soc_final": 0.5,
+            "def_total_hours": None,
+            "def_total_timestep": [4, 3],
+            "def_start_timestep": [0, 0],
+            "def_end_timestep": [0, 0],
+        }
+
+        self.opt.perform_naive_mpc_optim(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast,
+            self.p_load_forecast,
+            prediction_horizon,
+            **kwargs,
+        )
+        cached_problem = self.opt.prob
+        real_solve = cp.Problem.solve
+        calls = {"count": 0}
+
+        def fail_first_solve(problem, *args, **solve_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return real_solve(problem, *args, **solve_kwargs)
+
+        with mock.patch.object(cp.Problem, "solve", new=fail_first_solve):
+            self.opt.perform_naive_mpc_optim(
+                self.df_input_data_dayahead,
+                self.p_pv_forecast,
+                self.p_load_forecast,
+                prediction_horizon,
+                **kwargs,
+            )
+
+        self.assertEqual(self.opt.optim_status, "Optimal (Relaxed)")
+        self.assertIs(
+            self.opt.prob,
+            cached_problem,
+            "The one-run relaxed rescue must not replace the cached optimization model",
+        )
+
+        self.opt.perform_naive_mpc_optim(
+            self.df_input_data_dayahead,
+            self.p_pv_forecast,
+            self.p_load_forecast,
+            prediction_horizon,
+            **kwargs,
+        )
+        self.assertEqual(self.opt.optim_status, "Optimal")
+        self.assertIs(self.opt.prob, cached_problem)
 
     def test_multi_block_extra_profile_rebuilds_selector_shape_after_horizon_resize(self):
         optim_conf, plant_conf = self._hybrid_confs()
@@ -7861,6 +7955,67 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # q_input_start should have been updated from q_input_var.value[1]
         expected = float(opt.param_thermal[0]["q_input_var"].value[1])
         self.assertAlmostEqual(new_start, expected, places=4)
+
+    def test_relaxed_lp_rescue_does_not_replace_cached_thermal_artifacts(self):
+        self.df_input_data_dayahead = self.prepare_forecast_data()
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = 10.0
+        config = {
+            "start_temperature": 20.0,
+            "supply_temperature": 35.0,
+            "volume": 50.0,
+            "specific_heating_demand": 100.0,
+            "area": 100.0,
+            "min_temperatures": [18.0] * 48,
+            "max_temperatures": [22.0] * 48,
+            "thermal_inertia_time_constant": 2.0,
+        }
+        self.optim_conf["def_load_config"] = [{"thermal_battery": config}]
+        opt = self.create_optimization()
+        solve_args = (
+            self.df_input_data_dayahead,
+            self.p_pv_forecast.values.ravel(),
+            self.p_load_forecast.values.ravel(),
+            self.df_input_data_dayahead[opt.var_load_cost].values,
+            self.df_input_data_dayahead[opt.var_prod_price].values,
+        )
+
+        opt.perform_optimization(*solve_args)
+        cached_problem = opt.prob
+        cached_q_input_var = opt.param_thermal[0]["q_input_var"]
+        cached_predicted_temps = opt.predicted_temps
+        cached_heating_demands = opt.heating_demands
+        cached_q_inputs = opt.q_inputs
+        cached_outdoor_temp = opt.param_thermal[0]["outdoor_temp"]
+        real_solve = cp.Problem.solve
+        calls = {"count": 0}
+
+        def fail_first_solve(problem, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                problem._status = cp.USER_LIMIT
+                problem._value = None
+                return None
+            return real_solve(problem, *args, **kwargs)
+
+        with mock.patch.object(cp.Problem, "solve", new=fail_first_solve):
+            opt.perform_optimization(*solve_args)
+
+        self.assertEqual(opt.optim_status, "Optimal (Relaxed)")
+        self.assertIs(opt.prob, cached_problem)
+        self.assertIs(opt.param_thermal[0]["q_input_var"], cached_q_input_var)
+        self.assertIs(opt.predicted_temps, cached_predicted_temps)
+        self.assertIs(opt.heating_demands, cached_heating_demands)
+        self.assertIs(opt.q_inputs, cached_q_inputs)
+
+        self.df_input_data_dayahead["outdoor_temperature_forecast"] = 5.0
+        followup = opt.perform_optimization(*solve_args)
+        self.assertEqual(opt.optim_status, "Optimal")
+        self.assertIs(opt.prob, cached_problem)
+        self.assertIs(opt.param_thermal[0]["q_input_var"], cached_q_input_var)
+        self.assertIsNotNone(cached_q_input_var.value)
+        self.assertIs(opt.param_thermal[0]["outdoor_temp"], cached_outdoor_temp)
+        np.testing.assert_allclose(cached_outdoor_temp.value, 5.0)
+        self.assertEqual(followup["optim_status"].unique().tolist(), ["Optimal"])
 
     def test_thermal_battery_inertia_persist_clears_stale(self):
         """Test _persist_q_input clears q_input_var when tau changed to 0."""

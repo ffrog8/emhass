@@ -2916,6 +2916,77 @@ class TestGetMixForecast(unittest.TestCase):
         self.assertEqual(int(out.iloc[2]), 800)
 
 
+class TestSocAwareForecastDateAlignment(unittest.IsolatedAsyncioTestCase):
+    """Regression coverage for the list forecasts used by the SOC-aware runner."""
+
+    async def asyncSetUp(self):
+        import pytz
+
+        self.params = await TestForecast.get_test_params()
+        params_json = orjson.dumps(self.params).decode("utf-8")
+        retrieve_hass_conf, self.optim_conf, self.plant_conf = utils.get_yaml_parse(
+            params_json, logger
+        )
+        retrieve_hass_conf["time_zone"] = pytz.timezone("Australia/Adelaide")
+        retrieve_hass_conf["optimization_time_step"] = pd.Timedelta("30min")
+        retrieve_hass_conf["method_ts_round"] = "nearest"
+        self.retrieve_hass_conf = retrieve_hass_conf
+        self.params_json = params_json
+
+    @staticmethod
+    def _pinned_now(now_utc):
+        real_timestamp = pd.Timestamp
+        fixed_utc = real_timestamp(now_utc, tz="UTC")
+
+        def _now(tz=None):
+            return fixed_utc.tz_convert(tz) if tz is not None else fixed_utc.tz_localize(None)
+
+        return unittest.mock.patch.object(pd.Timestamp, "now", staticmethod(_now))
+
+    def _build(self, now_utc):
+        with self._pinned_now(now_utc):
+            return Forecast(
+                copy.deepcopy(self.retrieve_hass_conf),
+                self.optim_conf,
+                self.plant_conf,
+                self.params_json,
+                emhass_conf,
+                logger,
+                get_data_from_file=True,
+            )
+
+    def test_adelaide_half_interval_start_keeps_48_unique_forecast_dates(self):
+        fcst = self._build("2026-08-05 03:45:00")
+
+        self.assertEqual(len(fcst.forecast_dates), 48)
+        self.assertTrue(fcst.forecast_dates.is_unique)
+        self.assertTrue((fcst.forecast_dates[1:] - fcst.forecast_dates[:-1] == fcst.freq).all())
+
+    def test_adelaide_dst_days_keep_unique_half_hour_forecast_dates(self):
+        cases = (
+            ("spring forward", "2026-10-03 14:30:00", 46),
+            ("fall back", "2026-04-04 13:30:00", 50),
+        )
+
+        for name, now_utc, expected_slots in cases:
+            with self.subTest(name=name):
+                dates = self._build(now_utc).forecast_dates
+
+                self.assertEqual(len(dates), expected_slots)
+                self.assertTrue(dates.is_unique)
+                self.assertTrue((dates[1:] - dates[:-1] == pd.Timedelta("30min")).all())
+
+    def test_list_forecast_grid_reuses_the_start_frozen_at_construction(self):
+        self.retrieve_hass_conf["optimization_time_step"] = pd.Timedelta("15min")
+        self.retrieve_hass_conf["method_ts_round"] = "first"
+        fcst = self._build("2026-08-05 03:44:55")
+
+        with self._pinned_now("2026-08-05 03:45:09"):
+            dates = fcst.get_forecast_days_csv(timedelta_days=0)
+
+        self.assertEqual(dates[0], fcst.start_forecast)
+
+
 if __name__ == "__main__":
     unittest.main()
     ch.close()

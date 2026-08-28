@@ -215,7 +215,15 @@ class Forecast:
             self.params = orjson.loads(params)
 
         if self.method_ts_round == "nearest":
-            self.start_forecast = pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0)
+            # Align the start once in UTC. Rounding every generated stamp can
+            # collapse adjacent half-interval ties into duplicate timestamps.
+            self.start_forecast = (
+                pd.Timestamp.now(tz=self.time_zone)
+                .replace(microsecond=0)
+                .tz_convert("utc")
+                .round(self.freq)
+                .tz_convert(self.time_zone)
+            )
         elif self.method_ts_round == "first":
             self.start_forecast = (
                 pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0).floor(freq=self.freq)
@@ -242,16 +250,11 @@ class Forecast:
             self.end_forecast = (self.start_forecast + pd.DateOffset(days=_delta_days)).replace(
                 microsecond=0
             )
-        self.forecast_dates = (
-            pd.date_range(
-                start=self.start_forecast,
-                end=self.end_forecast - self.freq,
-                freq=self.freq,
-                tz=self.time_zone,
-            )
-            .tz_convert("utc")
-            .round(self.freq, ambiguous="infer", nonexistent="shift_forward")
-            .tz_convert(self.time_zone)
+        self.forecast_dates = pd.date_range(
+            start=self.start_forecast,
+            end=self.end_forecast - self.freq,
+            freq=self.freq,
+            tz=self.time_zone,
         )
         if (
             params is not None
@@ -1525,32 +1528,17 @@ class Forecast:
         :rtype: pd.date_range
 
         """
-        start_forecast_csv = pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0)
-        if self.method_ts_round == "nearest":
-            start_forecast_csv = pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0)
-        elif self.method_ts_round == "first":
-            start_forecast_csv = (
-                pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0).floor(freq=self.freq)
-            )
-        elif self.method_ts_round == "last":
-            start_forecast_csv = (
-                pd.Timestamp.now(tz=self.time_zone).replace(microsecond=0).ceil(freq=self.freq)
-            )
-        else:
-            self.logger.error("Wrong method_ts_round passed parameter")
+        # Reuse the timestamp frozen during construction. A second clock read
+        # can cross a rounding boundary and shift list/CSV forecasts one slot.
+        start_forecast_csv = self.start_forecast
         end_forecast_csv = (
             start_forecast_csv + pd.DateOffset(days=self.optim_conf["delta_forecast_daily"].days)
         ).replace(microsecond=0)
-        forecast_dates_csv = (
-            pd.date_range(
-                start=start_forecast_csv,
-                end=end_forecast_csv + timedelta(days=timedelta_days) - self.freq,
-                freq=self.freq,
-                tz=self.time_zone,
-            )
-            .tz_convert("utc")
-            .round(self.freq, ambiguous="infer", nonexistent="shift_forward")
-            .tz_convert(self.time_zone)
+        forecast_dates_csv = pd.date_range(
+            start=start_forecast_csv,
+            end=end_forecast_csv + timedelta(days=timedelta_days) - self.freq,
+            freq=self.freq,
+            tz=self.time_zone,
         )
         if (
             self.params is not None
@@ -2400,16 +2388,11 @@ class Forecast:
         end_forecast = (
             self.start_forecast + pd.DateOffset(days=self.optim_conf["delta_forecast_daily"].days)
         ).replace(microsecond=0)
-        forecast_dates = (
-            pd.date_range(
-                start=self.start_forecast,
-                end=end_forecast - self.freq,
-                freq=self.freq,
-                tz=self.time_zone,
-            )
-            .tz_convert("utc")
-            .round(self.freq, ambiguous="infer", nonexistent="shift_forward")
-            .tz_convert(self.time_zone)
+        forecast_dates = pd.date_range(
+            start=self.start_forecast,
+            end=end_forecast - self.freq,
+            freq=self.freq,
+            tz=self.time_zone,
         )
         data = data.loc[forecast_dates[0] : forecast_dates[-1]]
         return data
