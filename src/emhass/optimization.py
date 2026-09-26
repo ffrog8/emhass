@@ -338,8 +338,11 @@ class Optimization:
         self.param_soc_final_penalty = cp.Parameter(nonneg=True, name="soc_final_penalty")
         self.param_prod_price = cp.Parameter(self.num_timesteps, name="prod_price")
         self.grid_export_sell_price_threshold: float | None = None
-        self.param_grid_export_allowed = cp.Parameter(
-            self.num_timesteps, nonneg=True, name="grid_export_allowed"
+        self.param_battery_export_blocked = cp.Parameter(
+            self.num_timesteps, nonneg=True, name="battery_export_blocked"
+        )
+        self.param_battery_export_load = cp.Parameter(
+            self.num_timesteps, name="battery_export_load"
         )
 
         # Per-deferrable-load cost override parameters. When the user supplies a
@@ -2382,12 +2385,7 @@ class Optimization:
         # P_grid_neg <= 0
         vars_dict["p_grid_neg"] = cp.Variable(n, nonpos=True, name="p_grid_neg")
         # Apply vectorized lower bound constraint
-        # The site export bound is shared by all inverter blocks and retained in
-        # both fallback models. Only its per-period permission changes per solve.
-        constraints.append(
-            vars_dict["p_grid_neg"]
-            >= -cp.multiply(max_power_to_grid_arr, self.param_grid_export_allowed)
-        )
+        constraints.append(vars_dict["p_grid_neg"] >= -max_power_to_grid_arr)
 
         # P_grid_pos >= 0
         vars_dict["p_grid_pos"] = cp.Variable(n, nonneg=True, name="p_grid_pos")
@@ -3212,6 +3210,8 @@ class Optimization:
         if not self.optim_conf["set_use_battery"]:
             return
 
+        self._add_battery_export_threshold_constraint(constraints)
+
         p_sto_pos = self.vars["p_sto_pos"]
         p_sto_neg = self.vars["p_sto_neg"]
         E = self.vars["E"]  # Binary per battery: 1=Discharge, 0=Charge
@@ -3560,6 +3560,33 @@ class Optimization:
             constraints.append(
                 battery_first_penalty >= p_grid_pos - cp.multiply(max_from_grid, import_gate)
             )
+
+    def _add_battery_export_threshold_constraint(self, constraints) -> None:
+        """Allocate battery AC discharge to site demand before solar export.
+
+        Below/equal to the threshold, aggregate battery discharge may serve
+        fixed and scheduled electrical demand, even while solar exports. Count
+        each load only once across the fleet. Battery conversion losses are
+        already reflected in p_sto_pos; hybrid DC-to-AC losses still apply.
+        Charging another battery is not household demand and cannot enlarge
+        this allowance. Existing solar/export/curtailment bounds are unchanged.
+        This method is shared by the primary model and both fallback builds.
+        """
+        discharge_ac = sum(self.vars["p_sto_pos"])
+        if self.plant_conf["inverter_is_hybrid"]:
+            discharge_ac *= self.plant_conf.get("inverter_efficiency_dc_ac", 1.0)
+        for index, block in self._extra_battery_block_configs():
+            block_discharge = self.inverter_block_variables[index].p_sto_pos
+            if block.plant_conf.get("inverter_is_hybrid", False):
+                block_discharge *= block.plant_conf.get("inverter_efficiency_dc_ac", 1.0)
+            discharge_ac += block_discharge
+        constraints.append(
+            cp.multiply(
+                self.param_battery_export_blocked,
+                discharge_ac - self.vars["p_def_sum"],
+            )
+            <= self.param_battery_export_load
+        )
 
     def _add_extra_inverter_battery_constraints(
         self,
@@ -5623,9 +5650,10 @@ class Optimization:
             self.param_load_cost_pos = cp.Parameter(current_n, nonneg=True, name="load_cost_pos")
             self.param_export_ceiling = cp.Parameter(current_n, nonneg=True, name="export_ceiling")
             self.param_prod_price = cp.Parameter(current_n, name="prod_price")
-            self.param_grid_export_allowed = cp.Parameter(
-                current_n, nonneg=True, name="grid_export_allowed"
+            self.param_battery_export_blocked = cp.Parameter(
+                current_n, nonneg=True, name="battery_export_blocked"
             )
+            self.param_battery_export_load = cp.Parameter(current_n, name="battery_export_load")
             self.param_cost_per_load = [
                 cp.Parameter(current_n, name=f"cost_per_load_{k}")
                 for k in range(self.optim_conf.get("number_of_deferrable_loads", 0))
@@ -5842,11 +5870,17 @@ class Optimization:
             * max(float(np.max(np.maximum(np.asarray(unit_load_cost, dtype=float), 0.0))), 1e-3)
         )
         self.param_prod_price.value = unit_prod_price
-        self.param_grid_export_allowed.value = (
-            np.ones(self.num_timesteps)
+        export_blocked = (
+            np.zeros(self.num_timesteps)
             if self.grid_export_sell_price_threshold is None
-            else (np.asarray(unit_prod_price) > self.grid_export_sell_price_threshold).astype(float)
+            else (np.asarray(unit_prod_price) <= self.grid_export_sell_price_threshold).astype(
+                float
+            )
         )
+        self.param_battery_export_blocked.value = export_blocked
+        # Precompute the masked load so the constraint remains DPP-compatible;
+        # multiplying two CVXPY Parameters would disable cached compilation.
+        self.param_battery_export_load.value = export_blocked * np.asarray(p_load)
 
         # Per-load cost forecast overrides. Default each load's per-timestep cost
         # to the shared electricity tariff (no-op adjustment in the objective). If

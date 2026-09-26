@@ -533,7 +533,7 @@ With `number_of_batteries` greater than 1, when two or more batteries are otherw
 
 Making the optimum unique is not the same as guaranteeing the solver reports the same plan on every run: HiGHS is a MILP solver and stops once it is within `lp_solver_mip_rel_gap` of that optimum (default 0.01), which is several orders of magnitude larger than the tie-break's own contribution to the objective. Within that gap the solver is free to return any plan it likes, so strict run-to-run determinism needs a tight (or zero) `lp_solver_mip_rel_gap` - the same knob that governs general schedule repeatability, not something specific to multi-battery.
 
-### Request-only grid export sell-price threshold
+### Request-only battery export sell-price threshold
 
 Add `"grid_export_sell_price_threshold": 0.20` to the JSON body of a REST
 optimisation request, alongside your forecasts and SOC inputs. Its units are
@@ -542,21 +542,48 @@ not cents/kWh). The value must be a finite JSON number; zero and negative
 thresholds are valid. Strings, booleans, arrays, objects, `null`, and non-finite
 values are rejected with a validation error.
 
-For each forecast period, grid export is allowed only when the sell price is
-**strictly greater** than the threshold. Equality blocks export. A higher price
-permits export but does not force it: the existing economic objective, battery
-SOC limits, and physical constraints still determine the plan. There is no
-price-comparison epsilon. The export bound is zero in blocked periods, subject
-only to numerical solver feasibility tolerances; regression checks allow an
-absolute export residual of `1e-5 W`, not a usable export allowance.
+This parameter restricts **battery discharge for grid export**, not total site
+export. For each forecast period, battery export is allowed only when the sell
+price is **strictly greater** than the threshold. Equality blocks battery
+export. A higher price permits it but never forces discharge or export: the
+existing objective and physical constraints still decide the plan. There is
+no price-comparison epsilon. Numerical solver feasibility tolerances still
+apply; regression checks allow a residual of `1e-5 W` in the battery allowance.
 
-The threshold controls site grid export across all indexed inverter blocks,
-whether the energy comes from solar or batteries. It remains enforced during
-SOC-profile scalar fallback and relaxed-LP fallback. Surplus solar must supply
-consumption, enter available storage, or use configured curtailment. This
-parameter does not enable curtailment or enlarge storage or inverter limits.
-If no physically valid plan exists without export, optimisation reports
-infeasibility instead of ignoring the threshold.
+At or below the threshold, the optimiser uses this site-level accounting rule:
+
+```text
+sum(battery discharge delivered to the AC bus)
+    <= household demand + scheduled electrical-load demand
+```
+
+This is one shared allowance across all batteries and indexed inverter blocks.
+AC-coupled discharge is already in AC watts. Hybrid discharge is measured at
+the DC bus and multiplied by that inverter's `inverter_efficiency_dc_ac`.
+Battery discharge losses are already accounted for in the battery power/SOC
+model and are not applied a second time. Only actual scheduled electrical
+consumption counts; non-electrical loads and charging another battery do not
+increase the allowance.
+
+Battery discharge is allocated to site demand first for this restriction.
+Solar need not serve that demand first: batteries may supply the household
+while solar exports simultaneously. For example, with 500 W household demand
+and 3,000 W available solar, up to 500 W of AC battery discharge may serve the
+household while the solar is exported, even below the threshold. The optimiser
+still decides whether that is worthwhile. Existing stricter settings such as
+`set_nodischarge_to_grid` continue to apply.
+
+Solar export remains available at all prices under the existing rules. Full
+batteries and low household demand do not newly force curtailment or make a
+surplus-solar plan infeasible simply because its export price is too low.
+Existing grid/inverter limits and curtailment capabilities remain unchanged.
+Dispatch schedules may change as battery-export choices change; this does not
+introduce a new solar-curtailment policy.
+
+The restriction remains enforced in cached runs, SOC-profile scalar fallback
+and relaxed-LP fallback. It does not waive other constraints, including fixed
+terminal SOC requirements on indexed batteries. If those constraints leave no
+valid plan, the optimiser still reports genuine infeasibility.
 
 This parameter applies only to the current request. It is not a saved
 configuration or GUI setting. Omit it to retain the usual export behaviour,
