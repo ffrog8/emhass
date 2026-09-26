@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import pathlib
 import pickle
@@ -1520,7 +1521,7 @@ async def set_input_data_dict(
     set_type: str,
     logger: logging.Logger,
     get_data_from_file: bool | None = False,
-) -> dict:
+) -> dict | bool:
     """
     Set up some of the data needed for the different actions.
 
@@ -1560,6 +1561,21 @@ async def set_input_data_dict(
     actions_without_fcst_or_opt = ["publish-data", "export-influxdb-to-csv"]
     if set_type == "publish-data":
         params, runtimeparams = _publish_data_input_prep_params(params, runtimeparams, logger)
+    # This is a request control, not configuration: never recover it from saved
+    # params or a cached Optimization instance when the next request omits it.
+    request_params = (
+        orjson.loads(runtimeparams) if isinstance(runtimeparams, str) else runtimeparams
+    )
+    export_threshold = None
+    if request_params is not None and "grid_export_sell_price_threshold" in request_params:
+        value = request_params["grid_export_sell_price_threshold"]
+        try:
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError
+            export_threshold = float(value)
+        except (ValueError, OverflowError):
+            logger.error("grid_export_sell_price_threshold must be a finite number in currency/kWh")
+            return False
     retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params, logger)
     if type(retrieve_hass_conf) is bool:
         return False
@@ -1719,6 +1735,7 @@ async def set_input_data_dict(
                 opt.update_battery_power_limits(plant_conf)
                 _update_cached_inverter_block_runtime(opt, plant_conf)
                 opt.update_battery_soc_power_profiles(plant_conf["battery_soc_power_profiles"])
+            opt.grid_export_sell_price_threshold = export_threshold
             # Update runtime-configurable solver options from optim_conf
             # These don't affect problem structure, so they're safe to update on cached object
             runtime_solver_opts = [

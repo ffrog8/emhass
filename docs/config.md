@@ -532,3 +532,33 @@ The same shapes are accepted when overriding these parameters at runtime, and a 
 With `number_of_batteries` greater than 1, when two or more batteries are otherwise genuinely equivalent (identical cost/efficiency, so nothing real distinguishes them), a tiny internal tie-break decides which one the solver uses so the mathematical optimum is unique instead of an arbitrary LP/MILP choice. The tie-break penalizes total throughput (charge and discharge combined) scaled by battery index, so on a tie in EITHER direction the lowest-index battery is preferred, never the highest. It is always dominated by any genuine cost or efficiency difference between batteries - it only ever decides a truly degenerate choice, never overrides a real difference. This is an internal implementation detail (not a config parameter) documented here for completeness.
 
 Making the optimum unique is not the same as guaranteeing the solver reports the same plan on every run: HiGHS is a MILP solver and stops once it is within `lp_solver_mip_rel_gap` of that optimum (default 0.01), which is several orders of magnitude larger than the tie-break's own contribution to the objective. Within that gap the solver is free to return any plan it likes, so strict run-to-run determinism needs a tight (or zero) `lp_solver_mip_rel_gap` - the same knob that governs general schedule repeatability, not something specific to multi-battery.
+
+### Request-only grid export sell-price threshold
+
+Add `"grid_export_sell_price_threshold": 0.20` to the JSON body of a REST
+optimisation request, alongside your forecasts and SOC inputs. Its units are
+the same currency/kWh as `prod_price_forecast` (for example, dollars/kWh,
+not cents/kWh). The value must be a finite JSON number; zero and negative
+thresholds are valid. Strings, booleans, arrays, objects, `null`, and non-finite
+values are rejected with a validation error.
+
+For each forecast period, grid export is allowed only when the sell price is
+**strictly greater** than the threshold. Equality blocks export. A higher price
+permits export but does not force it: the existing economic objective, battery
+SOC limits, and physical constraints still determine the plan. There is no
+price-comparison epsilon. The export bound is zero in blocked periods, subject
+only to numerical solver feasibility tolerances; regression checks allow an
+absolute export residual of `1e-5 W`, not a usable export allowance.
+
+The threshold controls site grid export across all indexed inverter blocks,
+whether the energy comes from solar or batteries. It remains enforced during
+SOC-profile scalar fallback and relaxed-LP fallback. Surplus solar must supply
+consumption, enter available storage, or use configured curtailment. This
+parameter does not enable curtailment or enlarge storage or inverter limits.
+If no physically valid plan exists without export, optimisation reports
+infeasibility instead of ignoring the threshold.
+
+This parameter applies only to the current request. It is not a saved
+configuration or GUI setting. Omit it to retain the usual export behaviour,
+including after an earlier threshold request or a cached optimisation run.
+Every solve uses the current request's threshold and aligned sell-price forecast.

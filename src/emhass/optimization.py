@@ -337,6 +337,10 @@ class Optimization:
         # warm-started re-solves. See SOC_FINAL_DEVIATION_PENALTY_FACTOR.
         self.param_soc_final_penalty = cp.Parameter(nonneg=True, name="soc_final_penalty")
         self.param_prod_price = cp.Parameter(self.num_timesteps, name="prod_price")
+        self.grid_export_sell_price_threshold: float | None = None
+        self.param_grid_export_allowed = cp.Parameter(
+            self.num_timesteps, nonneg=True, name="grid_export_allowed"
+        )
 
         # Per-deferrable-load cost override parameters. When the user supplies a
         # `cost_forecast_per_deferrable_load[k]` array, that load is priced at its
@@ -2378,7 +2382,12 @@ class Optimization:
         # P_grid_neg <= 0
         vars_dict["p_grid_neg"] = cp.Variable(n, nonpos=True, name="p_grid_neg")
         # Apply vectorized lower bound constraint
-        constraints.append(vars_dict["p_grid_neg"] >= -max_power_to_grid_arr)
+        # The site export bound is shared by all inverter blocks and retained in
+        # both fallback models. Only its per-period permission changes per solve.
+        constraints.append(
+            vars_dict["p_grid_neg"]
+            >= -cp.multiply(max_power_to_grid_arr, self.param_grid_export_allowed)
+        )
 
         # P_grid_pos >= 0
         vars_dict["p_grid_pos"] = cp.Variable(n, nonneg=True, name="p_grid_pos")
@@ -5614,6 +5623,9 @@ class Optimization:
             self.param_load_cost_pos = cp.Parameter(current_n, nonneg=True, name="load_cost_pos")
             self.param_export_ceiling = cp.Parameter(current_n, nonneg=True, name="export_ceiling")
             self.param_prod_price = cp.Parameter(current_n, name="prod_price")
+            self.param_grid_export_allowed = cp.Parameter(
+                current_n, nonneg=True, name="grid_export_allowed"
+            )
             self.param_cost_per_load = [
                 cp.Parameter(current_n, name=f"cost_per_load_{k}")
                 for k in range(self.optim_conf.get("number_of_deferrable_loads", 0))
@@ -5830,6 +5842,11 @@ class Optimization:
             * max(float(np.max(np.maximum(np.asarray(unit_load_cost, dtype=float), 0.0))), 1e-3)
         )
         self.param_prod_price.value = unit_prod_price
+        self.param_grid_export_allowed.value = (
+            np.ones(self.num_timesteps)
+            if self.grid_export_sell_price_threshold is None
+            else (np.asarray(unit_prod_price) > self.grid_export_sell_price_threshold).astype(float)
+        )
 
         # Per-load cost forecast overrides. Default each load's per-timestep cost
         # to the shared electricity tariff (no-op adjustment in the objective). If
