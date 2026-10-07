@@ -25,6 +25,7 @@ from emhass.inverter_blocks import (
     is_public_safe_multi_block_hybrid_model,
     project_public_inverter_config,
 )
+from emhass.mpc_start import prepare_start
 
 # Keys the thermal model actually reads from a load's thermal_config (issue #943).
 # Any other key is silently ignored, so a typo such as the singular
@@ -5612,6 +5613,7 @@ class Optimization:
         min_power_of_deferrable_loads: list | None = None,
         debug: bool | None = False,
         stage_times: dict[str, float] | None = None,
+        mpc_start: bool = False,
     ) -> pd.DataFrame:
         r"""
         Perform the actual optimization using Convex Programming (CVXPY).
@@ -6658,24 +6660,58 @@ class Optimization:
         if stage_times is not None:
             stage_times["optim_solve.build"] = _solve_start_perf - _build_start_perf
 
-        # Solve Execution with Fallback
+        # Primary HiGHS MPC starts are suggestions, never fixed constraints.
+        # Register only named chronological mode variables owned by this model.
+        use_mpc_start = (
+            mpc_start and selected_solver == cp.HIGHS
+            and getattr(self, "_mpc_start_enabled", True)
+        )
+        self._mpc_start_diagnostics = {"reason": "inactive", "hint_count": 0}
+        if use_mpc_start:
+            previous_dates = (
+                getattr(self, "_mpc_start_dates", None)
+                if getattr(self, "_mpc_start_problem", None) is self.prob else None
+            )
+            time_axes = {}
+            time_names = ("E_", "p_def_bin", "p_def_start_", "p_def_stop_",
+                          "is_dc_sourcing", "soc_low_recovered_", "soc_high_recovered_",
+                          "battery_charge_profile_selectors_", "battery_discharge_profile_selectors_")
+            for variable in self.prob.variables():
+                name = variable.name()
+                if name in ("D", "E", "battery_first_import_gate") or name.startswith(time_names):
+                    time_axes[variable.id] = 0
+            self._mpc_start_diagnostics = prepare_start(
+                self.prob, previous_dates, data_opt.index, time_axes
+            )
+        # Never carry prior primary provenance through another mode or a failed solve.
+        self._mpc_start_problem = None
+        self._mpc_start_dates = None
+
+        # Only a solve that returns normally can supply this request's result.
+        # A cached CVXPY problem can retain its previous status and values when
+        # solve() raises; those must not be mistaken for a new successful plan.
+        result_problem = None
         try:
             self.prob.solve(solver=selected_solver, warm_start=True, **solver_opts)
+            result_problem = self.prob
         except Exception as e:
             self.logger.warning(
                 f"Solver {selected_solver} failed: {e}. Checking status for fallback..."
             )
 
-        result_problem = self.prob
+        primary_status = result_problem.status if result_problem is not None else None
+        if use_mpc_start and result_problem is not None and primary_status == cp.OPTIMAL:
+            self._mpc_start_problem = self.prob
+            self._mpc_start_dates = data_opt.index.copy()
         if has_soc_power_profiles:
-            self.soc_profile_fallback_diagnostics["profile_status"] = self.prob.status
+            self.soc_profile_fallback_diagnostics["profile_status"] = primary_status
 
         # Check for failure or "bad" status
         # Note: "user_limit" often means timeout. "infeasible" means configuration conflict.
         fail_statuses = ["infeasible", "unbounded", "user_limit", None]
-        if self.prob.status in fail_statuses or self.prob.value is None:
+        if primary_status in fail_statuses or self.prob.value is None:
             use_scalar_profile_fallback = (
-                has_soc_power_profiles and self.prob.status == "user_limit"
+                has_soc_power_profiles and primary_status == "user_limit"
             )
             fallback_label = (
                 "Scalar battery fallback" if use_scalar_profile_fallback else "Relaxed optimization"
@@ -6686,7 +6722,7 @@ class Optimization:
                 else "relaxed constraints (Continuous LP)"
             )
             self.logger.warning(
-                f"Optimization failed with status: '{self.prob.status}'. "
+                f"Optimization failed with status: '{primary_status}'. "
                 f"Retrying with {fallback_description}..."
             )
 
@@ -6765,6 +6801,7 @@ class Optimization:
                 objective_expr.args[0] += penalty_terms_total
 
             fallback_problem = cp.Problem(objective_expr, fallback_constraints)
+            result_problem = None
             try:
                 if use_scalar_profile_fallback:
                     fallback_timeout = min(
@@ -6819,16 +6856,16 @@ class Optimization:
             stage_times["optim_solve.solve"] = _extract_start_perf - _solve_start_perf
 
         # Fix for Status Case: Map "optimal" -> "Optimal"
-        status_raw = result_problem.status
+        status_raw = result_problem.status if result_problem is not None else None
         self.optim_status = status_raw.title() if status_raw else "Failure"
 
         # Accept the established downstream fallback marker retained for the
         # continuous-LP relaxation path.
-        if result_problem.value is None or result_problem.status not in [
-            cp.OPTIMAL,
-            cp.OPTIMAL_INACCURATE,
-            "Optimal (Relaxed)",
-        ]:
+        if (
+            result_problem is None
+            or result_problem.value is None
+            or result_problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE, "Optimal (Relaxed)"]
+        ):
             self.logger.warning("Cost function cannot be evaluated or Infeasible/Unbounded")
 
             # Create a DataFrame with the correct index (timestamps)
@@ -7140,6 +7177,7 @@ class Optimization:
             def_start_timestep=def_start_timestep,
             def_end_timestep=def_end_timestep,
             stage_times=stage_times,
+            mpc_start=True,
         )
         return self.opt_res
 
