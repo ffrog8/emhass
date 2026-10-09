@@ -1341,6 +1341,28 @@ single-inverter path, makes multi-inverter behaviour explicit, keeps aggregate
 dashboard values intuitive, and gives each inverter/battery its own SOC,
 capacity, and charge/discharge limits inside one site optimisation.
 
+## Adopted Maintenance Direction
+
+`feature/soc-power-profiles-durable-candidate` is the canonical custom branch
+for ongoing work. It contains the indexed multi-inverter topology and the
+SOC-aware power-profile extension. `multi-batt` is retained as a frozen
+rollback and reference point, but is no longer an active development line.
+
+Evaluate upstream changes individually after the upstream point already
+incorporated by the candidate (`aef76a4`). Apply the following intake policy:
+
+| Upstream change | Decision |
+| --- | --- |
+| Compatible bug fix | Adapt and integrate into the SOC-aware branch. |
+| Bug fix in shared optimisation, command, utility, config, or schema code | Adapt it to the indexed-inverter and SOC-profile contracts; do not blindly cherry-pick it. |
+| Upstream flat multi-battery implementation | Do not import it as-is. It competes with this branch's indexed hybrid-inverter topology and per-block semantics. |
+| Independent new feature | Evaluate its usefulness for this deployment and integrate it separately when warranted. |
+| Documentation or tests only | Take them only when they accurately describe or exercise the forked behaviour. |
+
+This policy preserves the richer multi-inverter and SOC-aware behaviour while
+allowing selected upstream correctness and feature improvements to be
+forward-integrated directly into the canonical branch.
+
 ## References
 
 - EMHASS configuration documentation: https://emhass.readthedocs.io/en/latest/config.html

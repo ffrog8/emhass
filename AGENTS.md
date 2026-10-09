@@ -139,3 +139,17 @@ Four rules. Reduce wrong-assumption drift, scope creep, dead-code regression.
 - [`llms.txt`](https://emhass.readthedocs.io/en/latest/llms.txt) — Sphinx routing manifest. Not in source tree; built per Sphinx run, served from Read the Docs.
 - [`docs/study_cases/`](docs/study_cases/) — worked examples per persona.
 - [Project board](https://github.com/users/davidusb-geek/projects/2) — coordination + scope corridors.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Uses a single-context domain-document layout. See `docs/agents/domain.md`.
