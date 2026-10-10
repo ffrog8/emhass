@@ -45,7 +45,13 @@ from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.retrieve_hass import RetrieveHass
-from emhass.utils import add_date_features, get_days_list, set_df_index_freq
+from emhass.utils import (
+    add_date_features,
+    add_local_calendar_days,
+    describe_invalid_forecast_value,
+    get_days_list,
+    set_df_index_freq,
+)
 
 header_accept = "application/json"
 error_msg_list_not_long_enough = "Passed data from passed list is not long enough"
@@ -242,13 +248,15 @@ class Forecast:
                 "only the day component (%d) is used for the forecast horizon.",
                 _delta_days,
             )
+        # The frozen start already has zero microseconds. Calling replace() on a
+        # resolved pytz endpoint can relocalize a repeated hour to the earlier instant.
         if self.params["passed_data"].get("weather_forecast_cache", False):
-            self.end_forecast = (self.start_forecast + pd.DateOffset(days=_delta_days * 2)).replace(
-                microsecond=0
+            self.end_forecast = add_local_calendar_days(
+                self.start_forecast, _delta_days * 2, self.time_zone
             )
         else:
-            self.end_forecast = (self.start_forecast + pd.DateOffset(days=_delta_days)).replace(
-                microsecond=0
+            self.end_forecast = add_local_calendar_days(
+                self.start_forecast, _delta_days, self.time_zone
             )
         self.forecast_dates = pd.date_range(
             start=self.start_forecast,
@@ -1524,6 +1532,9 @@ class Forecast:
         r"""
         Get the date range vector of forecast dates that will be used when loading a CSV file.
 
+        The configured forecast horizon and any CSV extension are local calendar-day
+        counts resolved once from the frozen forecast start.
+
         :return: The forecast dates vector
         :rtype: pd.date_range
 
@@ -1531,12 +1542,15 @@ class Forecast:
         # Reuse the timestamp frozen during construction. A second clock read
         # can cross a rounding boundary and shift list/CSV forecasts one slot.
         start_forecast_csv = self.start_forecast
-        end_forecast_csv = (
-            start_forecast_csv + pd.DateOffset(days=self.optim_conf["delta_forecast_daily"].days)
-        ).replace(microsecond=0)
+        total_days = self.optim_conf["delta_forecast_daily"].days + int(timedelta_days or 0)
+        end_forecast_csv = add_local_calendar_days(
+            start_forecast_csv,
+            total_days,
+            self.time_zone,
+        )
         forecast_dates_csv = pd.date_range(
             start=start_forecast_csv,
-            end=end_forecast_csv + timedelta(days=timedelta_days) - self.freq,
+            end=end_forecast_csv - self.freq,
             freq=self.freq,
             tz=self.time_zone,
         )
@@ -2089,6 +2103,10 @@ class Forecast:
         # Post-processing (Mix Forecast)
         p_load_forecast = copy.deepcopy(forecast_out["yhat"])
         if set_mix_forecast:
+            # Reject values before the blend's round() can crash on infinity
+            # or a nonnumeric first forecast value.
+            if self._reject_invalid_load(p_load_forecast):
+                return False
             # Load forecasts don't need curtailment protection - always use feedback
             p_load_forecast = Forecast.get_mix_forecast(
                 df_now,
@@ -2098,8 +2116,31 @@ class Forecast:
                 self.var_load_new,
                 False,  # Never ignore feedback for load forecasts
             )
+        # The optimizer-facing load must be finite and nonnegative for every
+        # source, including after blending with current consumption. Keep raw
+        # model predictions unchanged outside this boundary (upstream #1135).
+        if self._reject_invalid_load(p_load_forecast):
+            return False
+        negative = p_load_forecast < 0
+        if negative.any():
+            self.logger.warning(
+                "Load forecast contained %d negative value(s); minimum=%g W, first at %s. "
+                "Values were clipped to 0 W before optimization.",
+                int(negative.sum()),
+                p_load_forecast.min(),
+                negative.idxmax(),
+            )
+            p_load_forecast = p_load_forecast.clip(lower=0)
         self.logger.debug("get_load_forecast returning:\n%s", p_load_forecast)
         return p_load_forecast
+
+    def _reject_invalid_load(self, p_load_forecast: pd.Series) -> bool:
+        """Log the first invalid load value before it can reach optimization."""
+        invalid = describe_invalid_forecast_value("P_Load", p_load_forecast.items())
+        if invalid is None:
+            return False
+        self.logger.error("Load forecast rejected before optimization: %s", invalid)
+        return True
 
     def get_load_cost_forecast(
         self,
@@ -2159,8 +2200,8 @@ class Forecast:
         elif method == "list":  # reading a list of values
             # Loading data from passed list
             data_list = self.params["passed_data"]["load_cost_forecast"]
-            # Check if the passed data has the correct length
-            if (
+            # None means the explicit runtime forecast was rejected.
+            if data_list is None or (
                 len(data_list) < len(self.forecast_dates)
                 and self.params["passed_data"]["prediction_horizon"] is None
             ):
@@ -2236,8 +2277,8 @@ class Forecast:
         elif method == "list":  # reading a list of values
             # Loading data from passed list
             data_list = self.params["passed_data"]["prod_price_forecast"]
-            # Check if the passed data has the correct length
-            if (
+            # None means the explicit runtime forecast was rejected.
+            if data_list is None or (
                 len(data_list) < len(self.forecast_dates)
                 and self.params["passed_data"]["prediction_horizon"] is None
             ):
@@ -2385,9 +2426,11 @@ class Forecast:
                 self.logger.info("Saved the forecast results to cache, for later reference.")
 
         # Trim cached data to match requested dates
-        end_forecast = (
-            self.start_forecast + pd.DateOffset(days=self.optim_conf["delta_forecast_daily"].days)
-        ).replace(microsecond=0)
+        end_forecast = add_local_calendar_days(
+            self.start_forecast,
+            self.optim_conf["delta_forecast_daily"].days,
+            self.time_zone,
+        )
         forecast_dates = pd.date_range(
             start=self.start_forecast,
             end=end_forecast - self.freq,

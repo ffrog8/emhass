@@ -4,6 +4,7 @@ import ast
 import copy
 import csv
 import logging
+import math
 import os
 import pathlib
 import shutil
@@ -125,6 +126,65 @@ def _get_now() -> datetime:
     return datetime.now(UTC)
 
 
+def add_local_calendar_days(
+    timestamp: pd.Timestamp | datetime,
+    days: int,
+    time_zone: pytz.tzinfo.BaseTzInfo | str | None = None,
+) -> pd.Timestamp:
+    """Add local calendar days with deterministic pytz DST endpoint handling.
+
+    EMHASS forecast horizons use local civil/calendar days, not fixed 24-hour
+    durations. Valid wall times therefore retain the existing 23/24/25-hour
+    behavior across DST. If the nominal target wall time does not exist, move
+    it forward by the timezone's actual transition gap. If it is ambiguous,
+    select the post-transition (chronologically later) occurrence.
+
+    EMHASS uses either the configured IANA timezone name or a pytz timezone,
+    depending on the calling path. IANA names are normalized with
+    pytz.timezone(). When no timezone is configured and timestamp is naive,
+    preserve the pre-existing naive calendar-day behavior.
+    """
+    ts = pd.Timestamp(timestamp)
+    days = int(days)
+
+    if time_zone is None and ts.tzinfo is None:
+        return ts if days == 0 else ts + pd.DateOffset(days=days)
+
+    tz = time_zone if time_zone is not None else ts.tz
+    if isinstance(tz, str):
+        # Some existing runtime-parameter paths carry the configured IANA
+        # timezone name until get_yaml_parse() converts it. Preserve that
+        # established contract and resolve it through EMHASS's pytz dependency.
+        tz = pytz.timezone(tz)
+    if not hasattr(tz, "localize") or not hasattr(tz, "normalize"):
+        raise TypeError("time_zone must be an IANA timezone name or pytz timezone")
+
+    if ts.tzinfo is None:
+        ts = pd.Timestamp(tz.localize(ts.to_pydatetime(), is_dst=None))
+
+    local = ts.tz_convert(tz)
+    if days == 0:
+        return local
+
+    nominal = local.tz_localize(None) + pd.DateOffset(days=days)
+    nominal_dt = pd.Timestamp(nominal).to_pydatetime()
+    try:
+        resolved = tz.localize(nominal_dt, is_dst=None)
+    except pytz.NonExistentTimeError:
+        # Attach the pre-transition offset, then normalize. This advances the
+        # nominal wall time by the timezone's real gap (e.g. 60 min in Sydney,
+        # 30 min on Lord Howe) rather than hard-coding an hour.
+        resolved = tz.normalize(tz.localize(nominal_dt, is_dst=False))
+    except pytz.AmbiguousTimeError:
+        # The is_dst flag does not encode chronology (zones such as Africa/Casablanca
+        # and Europe/Dublin use negative DST), so pick the later UTC instant instead.
+        resolved = max(
+            tz.localize(nominal_dt, is_dst=True),
+            tz.localize(nominal_dt, is_dst=False),
+        )
+    return pd.Timestamp(resolved)
+
+
 def get_forecast_dates(
     freq: int,
     delta_forecast: int,
@@ -136,9 +196,9 @@ def get_forecast_dates(
 
     :param freq: Optimization time step.
     :type freq: int
-    :param delta_forecast: Number of days to forecast in the future to be used for the optimization.
+    :param delta_forecast: Number of local calendar days to forecast in the future for the optimization.
     :type delta_forecast: int
-    :param timedelta_days: Number of truncated days needed for each optimization iteration, defaults to 0
+    :param timedelta_days: Additional local calendar days needed for the forecast range, defaults to 0
     :type timedelta_days: Optional[int], optional
     :return: A list of future forecast dates.
     :rtype: pd.core.indexes.datetimes.DatetimeIndex
@@ -153,8 +213,8 @@ def get_forecast_dates(
     start_forecast = (
         pd.Timestamp(start_time).tz_convert(time_zone).replace(microsecond=0).floor(freq=freq)
     )
-    end_forecast = start_forecast + pd.tseries.offsets.DateOffset(days=delta_forecast)
-    final_end_date = end_forecast + pd.tseries.offsets.DateOffset(days=timedelta_days) - freq
+    total_days = int(delta_forecast) + int(timedelta_days or 0)
+    final_end_date = add_local_calendar_days(start_forecast, total_days, time_zone) - freq
 
     forecast_dates = pd.date_range(
         start=start_forecast,
@@ -1311,6 +1371,30 @@ def update_params_with_ha_config(
     return params
 
 
+def describe_invalid_forecast_value(forecast_key: str, items) -> str | None:
+    """Describe the first value that is not a finite real number (upstream #1135).
+
+    ``items`` contains location/value pairs from a list, mapping or Series.
+    The sign is preserved; booleans and numeric-looking strings are rejected
+    before pandas or NumPy can coerce them into numbers.
+    """
+    for location, value in items:
+        if isinstance(value, bool | np.bool_):
+            reason = "boolean value"
+        elif not isinstance(value, int | float | np.integer | np.floating):
+            reason = "non-numeric value"
+        elif isinstance(value, float | np.floating) and not math.isfinite(value):
+            reason = "non-finite value"
+        else:
+            continue
+        where = f"position {location}" if isinstance(location, int) else location
+        return (
+            f"{forecast_key} contains {reason} {value!r} at {where}; "
+            "forecast values must be finite real numbers"
+        )
+    return None
+
+
 async def treat_runtimeparams(
     runtimeparams: str,
     params: dict[str, dict],
@@ -1710,31 +1794,32 @@ async def treat_runtimeparams(
             else:
                 prediction_horizon = runtimeparams["prediction_horizon"]
             params["passed_data"]["prediction_horizon"] = prediction_horizon
-            # Auto-extend the forecast window to cover the requested MPC horizon.
-            # forecast_dates was sized from delta_forecast_daily (default 1 day) above,
-            # before prediction_horizon was known; a longer horizon would otherwise be
-            # silently truncated by the [0:prediction_horizon] slice below, and the
-            # weather/Solcast fetch (which scales its request to the window length)
-            # would only pull 1 day. So grow the window to fit and rebuild it once.
-            steps_per_day = int(24 * 60 / optimization_time_step)
-            required_delta_forecast = max(
-                delta_forecast,
-                -(-int(prediction_horizon) // steps_per_day),  # ceil division
-            )
+            # Forecast days are local calendar days, so their timestep count is not
+            # always 24h / optimization_time_step: a DST spring-forward day is shorter
+            # and a fall-back day is longer. Compare the requested timestep horizon
+            # against the actual timezone-aware grid instead of assuming a fixed number
+            # of steps per day. Grow by whole local calendar days until the grid covers
+            # the request; downstream slicing still trims it to prediction_horizon.
+            required_delta_forecast = delta_forecast
+            extended_forecast_dates = forecast_dates
+            while len(extended_forecast_dates) < int(prediction_horizon):
+                required_delta_forecast += 1
+                extended_forecast_dates = get_forecast_dates(
+                    optimization_time_step, required_delta_forecast, time_zone
+                )
             if required_delta_forecast > delta_forecast:
                 logger.info(
-                    "naive-mpc prediction_horizon=%s exceeds the %s-day forecast window; "
-                    "extending delta_forecast_daily to %s day(s) to cover the full horizon "
-                    "and its weather forecast.",
+                    "naive-mpc prediction_horizon=%s exceeds the actual %s-day forecast "
+                    "grid (%s timestep(s)); extending delta_forecast_daily to %s day(s) "
+                    "to cover the full horizon and its weather forecast.",
                     prediction_horizon,
                     delta_forecast,
+                    len(forecast_dates),
                     required_delta_forecast,
                 )
                 delta_forecast = required_delta_forecast
                 params["optim_conf"]["delta_forecast_daily"] = pd.Timedelta(days=delta_forecast)
-                forecast_dates = get_forecast_dates(
-                    optimization_time_step, delta_forecast, time_zone
-                )
+                forecast_dates = extended_forecast_dates
             num_batteries = validate_num_batteries(params["plant_conf"])
             if num_batteries == 1:
                 # Unchanged from before #610: soc_init/soc_final stay plain
@@ -1951,12 +2036,28 @@ async def treat_runtimeparams(
             "production_price_forecast_method",
             "outdoor_temperature_forecast_method",
         ]
+        # Distinguish an omitted temperature (weather fallback is allowed) from
+        # an explicitly supplied temperature rejected by numeric validation.
+        params["passed_data"]["_outdoor_temperature_forecast_rejected"] = False
 
         # Loop forecasts, check if value is a list and greater than or equal to forecast_dates
         for method, forecast_key in enumerate(list_forecast_key):
             if forecast_key in runtimeparams.keys():
-                forecast_input = runtimeparams[forecast_key]
+                forecast_input: object = runtimeparams[forecast_key]
+                invalid = None
+                if isinstance(forecast_input, str):
+                    try:
+                        parsed = ast.literal_eval(forecast_input)
+                    except (ValueError, SyntaxError):
+                        parsed = None
+                    if isinstance(parsed, list):
+                        forecast_input = parsed
+                        runtimeparams[forecast_key] = parsed
                 if isinstance(forecast_input, dict):
+                    invalid = describe_invalid_forecast_value(
+                        forecast_key, forecast_input.items()
+                    )
+                if invalid is None and isinstance(forecast_input, dict):
                     forecast_data_df = pd.DataFrame.from_dict(
                         forecast_input, orient="index"
                     ).reset_index()
@@ -1995,33 +2096,34 @@ async def treat_runtimeparams(
                     forecast_data_df["value"] = forecast_data_df["value"].ffill().bfill()
                     forecast_data_df = forecast_data_df.reindex(target_dates)
                     forecast_input = forecast_data_df["value"].tolist()
-                if isinstance(forecast_input, list) and len(forecast_input) >= len(forecast_dates):
-                    params["passed_data"][forecast_key] = forecast_input
-                    params["optim_conf"][forecast_methods[method]] = "list"
-                else:
+                if (
+                    invalid is None
+                    and isinstance(forecast_input, list)
+                    and len(forecast_input) >= len(forecast_dates)
+                ):
+                    # Preserve the existing short-list coverage contract; only
+                    # numerically validate lists accepted by the coverage gate.
+                    invalid = describe_invalid_forecast_value(
+                        forecast_key, enumerate(forecast_input)
+                    )
+                    if invalid is None:
+                        params["passed_data"][forecast_key] = forecast_input
+                        params["optim_conf"][forecast_methods[method]] = "list"
+                elif invalid is None:
                     logger.error(
                         f"ERROR: The passed data is either the wrong type or the length is not correct, length should be {str(len(forecast_dates))}"
                     )
                     logger.error(
                         f"Passed type is {str(type(runtimeparams[forecast_key]))} and length is {str(len(runtimeparams[forecast_key]))}"
                     )
-                # Check if string contains list, if so extract
-                if isinstance(forecast_input, str) and isinstance(
-                    ast.literal_eval(forecast_input), list
-                ):
-                    forecast_input = ast.literal_eval(forecast_input)
-                    runtimeparams[forecast_key] = forecast_input
-                list_non_digits = [
-                    x for x in forecast_input if not (isinstance(x, int) or isinstance(x, float))
-                ]
-                if len(list_non_digits) > 0:
-                    logger.warning(
-                        f"There are non numeric values on the passed data for {forecast_key}, check for missing values (nans, null, etc)"
-                    )
-                    for x in list_non_digits:
-                        logger.warning(
-                            f"This value in {forecast_key} was detected as non digits: {str(x)}"
-                        )
+                if invalid is not None:
+                    logger.error("ERROR: %s", invalid)
+                    # Retain the explicit list method without data so rejected
+                    # forecasts cannot fall back to another forecasting source.
+                    params["passed_data"][forecast_key] = None
+                    params["optim_conf"][forecast_methods[method]] = "list"
+                    if forecast_key == "outdoor_temperature_forecast":
+                        params["passed_data"]["_outdoor_temperature_forecast_rejected"] = True
             else:
                 params["passed_data"][forecast_key] = None
 

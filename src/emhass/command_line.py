@@ -1266,7 +1266,8 @@ async def _get_dayahead_pv_forecast(ctx: SetupContext):
     df_weather = await ctx.fcst.get_weather_forecast(
         method=ctx.optim_conf["weather_forecast_method"]
     )
-    if isinstance(df_weather, bool) and not df_weather:
+    # A rejected explicit runtime PV forecast has no weather data.
+    if df_weather is None or (isinstance(df_weather, bool) and not df_weather):
         return None, None
     p_pv_forecast = ctx.fcst.get_power_from_weather(df_weather)
     # Adjust PV forecast if needed
@@ -1381,7 +1382,8 @@ async def _get_naive_mpc_pv_forecast(ctx: SetupContext, set_mix_forecast, df_inp
     df_weather = await ctx.fcst.get_weather_forecast(
         method=ctx.optim_conf["weather_forecast_method"]
     )
-    if isinstance(df_weather, bool) and not df_weather:
+    # A rejected explicit runtime PV forecast has no weather data.
+    if df_weather is None or (isinstance(df_weather, bool) and not df_weather):
         return None, None
     # Calculate PV power
     p_pv_forecast = ctx.fcst.get_power_from_weather(
@@ -2019,6 +2021,14 @@ def prepare_forecast_and_weather_data(
     passed_outdoor_temp = input_data_dict["params"]["passed_data"].get(
         "outdoor_temperature_forecast"
     )
+    if passed_outdoor_temp is None and input_data_dict["params"]["passed_data"].get(
+        "_outdoor_temperature_forecast_rejected", False
+    ):
+        logger.error(
+            "outdoor_temperature_forecast was supplied but rejected; "
+            "not falling back to the weather forecast temperature."
+        )
+        return False
 
     if passed_outdoor_temp is not None:
         forecast_len = len(df_input_data_dayahead)
@@ -2886,17 +2896,23 @@ async def _publish_from_saved_entities(
         logger.warning(f"No saved entity json files in path: {entity_path}")
         logger.warning("Falling back to opt_res_latest")
         return None
-    entity_path_contents = os.listdir(entity_path)
+    # Skip the metadata file and any in-flight atomic-write temp file
+    # ("<name>.json.<pid>.<uuid>.tmp") left by retrieve_hass.post_data -
+    # publishing one derives a bogus entity_id and KeyErrors on the metadata
+    # lookup, aborting the whole publish.
+    entity_path_contents = [
+        entity
+        for entity in os.listdir(entity_path)
+        if entity != default_metadata_json and not entity.endswith(".tmp")
+    ]
     matches_prefix = any(publish_prefix in entity for entity in entity_path_contents)
-    if not (matches_prefix or publish_prefix == "all"):
+    if not entity_path_contents or not (matches_prefix or publish_prefix == "all"):
         logger.warning(f"No saved entity json files that match prefix: {publish_prefix}")
         logger.warning("Falling back to opt_res_latest")
         return None
     opt_res_list = []
     opt_res_list_names = []
     for entity in entity_path_contents:
-        if entity == default_metadata_json:
-            continue
         if publish_prefix == "all" or publish_prefix in entity:
             entity_data = await publish_json(entity, input_data_dict, entity_path, logger)
             if isinstance(entity_data, bool):

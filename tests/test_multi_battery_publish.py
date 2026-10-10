@@ -27,6 +27,7 @@ from emhass.command_line import (
     _publish_battery_data,
     dayahead_forecast_optim,
     naive_mpc_optim,
+    publish_data,
     publish_json,
     set_input_data_dict,
 )
@@ -528,3 +529,112 @@ def test_entity_save_round_trip_per_battery_sensors_n2():
         assert call_kwargs["entity_id"] == "sensor.soc_batt_forecast_battery1"
         assert call_kwargs["friendly_name"] == "Battery SOC Forecast Battery 1"
         assert call_kwargs["unit_of_measurement"] == "%"
+
+
+@pytest.mark.parametrize("prefix", ["all", "sensor.completed"])
+def test_saved_publication_ignores_metadata_and_atomic_write_temporary_files(tmp_path, prefix):
+    """#19 / upstream #1147: only committed matching sensors may be published."""
+    entities_path = tmp_path / "entities"
+    entities_path.mkdir()
+    entity_name = "sensor.completed"
+    values = pd.Series(
+        [123.5, 456.25, 789.75],
+        index=pd.date_range("2026-01-01", periods=3, freq="30min", tz="UTC"),
+    )
+    entity_file = entities_path / f"{entity_name}.json"
+    entity_file.write_text(values.to_json(orient="index", date_format="iso"))
+    (entities_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                entity_name: {
+                    "name": "P_Load",
+                    "optimization_time_step": 30,
+                    "unit_of_measurement": "W",
+                    "friendly_name": "Completed load forecast",
+                    "device_class": "power",
+                    "type_var": "power",
+                }
+            }
+        )
+    )
+    temporary_files = [
+        entities_path / "sensor.completed.json.1234.deadbeef.tmp",
+        entities_path / "metadata.json.1234.deadbeef.tmp",
+    ]
+    for path in temporary_files:
+        path.write_text(entity_file.read_text())
+    rh = AsyncMock()
+    input_data_dict = {
+        "emhass_conf": {"data_path": tmp_path},
+        "retrieve_hass_conf": {"time_zone": ZoneInfo("UTC"), "method_ts_round": "nearest"},
+        "params": {"passed_data": {"publish_prefix": prefix}},
+        "rh": rh,
+    }
+
+    result = asyncio.run(publish_data(input_data_dict, logger))
+
+    assert list(result.columns) == [entity_name]
+    assert result[entity_name].tolist() == [123.5, 456.25, 789.75]
+    assert _entity_ids_posted(rh) == [entity_name]
+    pd.testing.assert_series_equal(
+        rh.post_data.call_args.kwargs["data_df"], values.rename("P_Load").rename_axis("timestamp")
+    )
+    assert all(path.exists() for path in temporary_files)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "saved_files"),
+    [
+        ("all", ["sensor.completed.json.1234.deadbeef.tmp"]),
+        ("sensor.completed", ["sensor.completed.json.1234.deadbeef.tmp"]),
+        ("all", ["metadata.json", "metadata.json.1234.deadbeef.tmp"]),
+        ("metadata", ["metadata.json", "metadata.json.1234.deadbeef.tmp"]),
+        (
+            "sensor.completed",
+            ["sensor.other.json", "sensor.completed.json.1234.deadbeef.tmp", "metadata.json"],
+        ),
+        ("sensor.completed", ["sensor.other.json", "metadata.json"]),
+    ],
+)
+def test_saved_publication_uses_csv_when_no_completed_sensor_matches(tmp_path, prefix, saved_files):
+    """#19: discarded files cannot prevent the established CSV-result recovery."""
+    entities_path = tmp_path / "entities"
+    entities_path.mkdir()
+    for filename in saved_files:
+        (entities_path / filename).write_text("{}")
+    input_data_dict = build_input_data_dict(
+        {"set_use_battery": False, "set_use_pv": False, "number_of_deferrable_loads": 0},
+        {"publish_prefix": prefix},
+        "publish-data",
+    )
+    input_data_dict["emhass_conf"] = {**input_data_dict["emhass_conf"], "data_path": tmp_path}
+    rh = AsyncMock()
+    input_data_dict["rh"] = rh
+    values = pd.DataFrame(
+        {
+            "P_Load": [811.5] * 3,
+            "P_grid": [207.25] * 3,
+            "cost_fun_profit": [0.0] * 3,
+            "optim_status": ["Optimal"] * 3,
+            "unit_load_cost": [0.2] * 3,
+            "unit_prod_price": [-0.1] * 3,
+        },
+        index=pd.date_range("2026-01-01", periods=3, freq="30min", tz="UTC", name="timestamp"),
+    )
+    values.to_csv(tmp_path / "opt_res_latest.csv")
+
+    result = asyncio.run(publish_data(input_data_dict, logger))
+
+    assert result["P_Load"].tolist() == [811.5]
+    assert result["P_grid"].tolist() == [207.25]
+    assert result["unit_prod_price"].tolist() == [-0.1]
+    assert _entity_ids_posted(rh) == [
+        "sensor.p_load_forecast",
+        "sensor.p_grid_forecast",
+        "sensor.total_cost_fun_value",
+        "sensor.optim_status",
+        "sensor.unit_load_cost",
+        "sensor.unit_prod_price",
+    ]
+    assert rh.post_data.call_args_list[0].args[0].tolist() == [811.5] * 3
+    assert all((entities_path / filename).exists() for filename in saved_files)
