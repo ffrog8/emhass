@@ -146,6 +146,71 @@ plan timestamp when deciding whether a schedule is fresh.
 `GET /api/v1/plan` exposes the latest plan and `GET /api/v1/last-run` exposes the latest run outcome. See
 [rolling MPC and failed solves](docs/mpc_solver_starts.md) for starting-hint ownership and failure behaviour.
 
+## Upstream review history
+
+This fork selectively adapts changes from [the original EMHASS project](https://github.com/davidusb-geek/emhass)
+while preserving its indexed multi-inverter topology and battery charge/discharge SOC profiles. A reviewed
+upstream commit records what was examined; it does not mean that its complete history was merged or adopted.
+See [the adopted maintenance direction](multi-batt.md#adopted-maintenance-direction) for the intake policy.
+
+Append an entry after each upstream review, recording the review date (Australia/Adelaide), exact upstream
+commit, scope examined, adoption decisions, and any resulting fork commits or deferred candidates. Preserve
+earlier entries so the latest reviewed checkpoint can be distinguished from the last merged baseline.
+
+### 2026-08-28 — Selected runtime safeguards
+
+Reviewed upstream master at `511072a`, covering 72 upstream commits after the incorporated baseline
+`aef76a4`. Selected forecast timestamp alignment and frozen-start fixes, deferrable-load array normalisation,
+and relaxed-LP fallback cache protection for adaptation to the SOC-aware multi-inverter model.
+These adaptations were implemented in fork commit `85a787f62ee7328869bc6c7443e92b70acf1e3c8`.
+The remaining upstream changes were not adopted wholesale.
+
+### 2026-09-26 — Reviewed upstream checkpoint
+
+Reviewed upstream master at
+[`0ebd7e7abb299055dd0f001867462f525889dbd6`](https://github.com/davidusb-geek/emhass/commit/0ebd7e7abb299055dd0f001867462f525889dbd6)
+(committed 2026-09-24; battery-identification sensor publishing fix). The review covered the upstream delta
+from `aef76a4`, including 63 upstream commits since the August comparison, and recognised the safeguards
+already adapted in `85a787f6`.
+
+Examined SOC-dependent charge-power derating, forecast blending with missing/NaN readings, configuration and
+results UI changes, Solcast fixes, PV bias/P10 forecasting, demand/capacity charges, battery identification,
+and conditional load, thermal, forecasting and export integrations.
+
+Decision: continue selective adoption; no full upstream merge or additional implementation resulted from
+this review. Preserve the existing indexed-inverter configuration and charge/discharge SOC-profile interface.
+Forecast blending with missing/NaN readings remained a candidate for a future fix, with no urgent upgrade
+identified for the deployment. At this review, this commit was the latest reviewed checkpoint, distinct from
+the last fully merged upstream baseline `aef76a4`.
+
+### 2026-10-10 — Latest reviewed upstream checkpoint: v0.18.5
+
+Reviewed the upstream delta from
+[`0ebd7e7abb299055dd0f001867462f525889dbd6`](https://github.com/davidusb-geek/emhass/commit/0ebd7e7abb299055dd0f001867462f525889dbd6)
+to release `v0.18.5` at
+[`2f3dc75d41bced0e008196702a91f7814ce88083`](https://github.com/davidusb-geek/emhass/commit/2f3dc75d41bced0e008196702a91f7814ce88083):
+164 commits, 59 changed files and 25 first-parent merged pull requests. The fork comparison used
+[`21877bb2ba70feb545fac826fa24c1c4f88b310a`](https://github.com/ffrog8/emhass/commit/21877bb2ba70feb545fac826fa24c1c4f88b310a).
+
+[Maintenance ticket #19](https://github.com/ffrog8/emhass/issues/19) selectively adopted the following safeguards
+in fork commit
+[`2a9d762c64bffdd8c3a40092ce1d0534199550f7`](https://github.com/ffrog8/emhass/commit/2a9d762c64bffdd8c3a40092ce1d0534199550f7):
+
+- DST endpoint resolution and complete MPC horizons across short calendar days
+  ([#1164](https://github.com/davidusb-geek/emhass/pull/1164), [#1166](https://github.com/davidusb-geek/emhass/pull/1166)).
+- Saved-publication metadata/atomic-write `.tmp` filtering and the existing CSV fallback when no completed
+  matching entity files remain ([#1147](https://github.com/davidusb-geek/emhass/pull/1147)).
+- Numeric forecast validation, optimizer-facing load validation and HTTP 400 on failed preparation
+  ([#1151](https://github.com/davidusb-geek/emhass/pull/1151)), preserving signed prices and clipping finite
+  negative load to zero with a warning.
+
+The adaptation preserves indexed split-PV ownership, battery SOC power profiles, MPC starting hints,
+solver-result provenance, last-valid-plan protection, publish IDs and existing successful-status policy. It adds no public
+configuration parameters, dependencies or result-schema changes; the upstream release was not merged wholesale.
+Terminal-SOC rewards and inverter efficiency curves remain deferred pending a separate policy or measured-benefit
+decision. Thermal expansion, internal forecasting/calibration, tariff timezones and other reviewed integrations
+remain conditional on actual use and separate adoption.
+
 ## Getting started
 
 General EMHASS documentation is [available here](https://emhass.readthedocs.io/en/latest/).
