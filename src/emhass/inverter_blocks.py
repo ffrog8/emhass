@@ -671,10 +671,33 @@ def _split_block_config(
     )
 
 
+def validate_runtime_battery_efficiencies(
+    runtimeparams: Mapping[str, object] | None,
+) -> dict[str, float]:
+    """Validate both request scalars before any flat or indexed config mutation."""
+    overrides = {}
+    for key in ("battery_charge_efficiency", "battery_discharge_efficiency"):
+        if runtimeparams is None or key not in runtimeparams:
+            continue
+        value = runtimeparams[key]
+        message = f"{key} must be a finite numeric scalar satisfying 0 < value <= 1"
+        if type(value) not in (int, float):
+            raise ValueError(message)
+        try:
+            numeric = float(value)
+        except OverflowError as err:
+            raise ValueError(message) from err
+        if not math.isfinite(numeric) or not 0 < numeric <= 1:
+            raise ValueError(message)
+        overrides[key] = numeric
+    return overrides
+
+
 def merge_inverter_block_runtime_overrides(
     input_conf: dict[str, object],
     runtimeparams: Mapping[str, object],
 ) -> dict[int, dict[str, object]]:
+    efficiency_overrides = validate_runtime_battery_efficiencies(runtimeparams)
     block_runtime_conf: dict[int, dict[str, object]] = {}
     scalar_config_overrides_by_index: dict[int, dict[str, object]] = {}
     relaxed_target_bound_indexes: set[int] = set()
@@ -759,6 +782,12 @@ def merge_inverter_block_runtime_overrides(
     for index, scalar_config_overrides in scalar_config_overrides_by_index.items():
         block_key = f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"
         input_conf[block_key].update(scalar_config_overrides)
+    # The association loop handles flat battery configuration. Indexed batteries
+    # own their efficiencies, so apply each supplied direction to them explicitly.
+    for index in configured_indexes:
+        block = input_conf[f"{HYBRID_INVERTER_CONFIG_PREFIX}{index}"]
+        if isinstance(block, dict) and block.get("set_use_battery", False):
+            block.update(efficiency_overrides)
     if isinstance(input_conf.get("plant_conf"), dict):
         if relaxed_target_bound_indexes:
             input_conf["plant_conf"][_RUNTIME_TARGET_BOUNDS_RELAXED_INDEXES_KEY] = sorted(

@@ -111,6 +111,15 @@ Here is the list of the other additional dictionary keys that can be passed at r
 
 - `battery_charge_power_max` for the maximum battery charge power.
 
+- `battery_charge_efficiency` and `battery_discharge_efficiency` to override
+  the corresponding efficiency for this request. Each is a scalar fraction,
+  not a percentage: for example, `0.995` means 99.5%. In multi-inverter mode,
+  each supplied direction applies to every active battery. If a direction is
+  omitted, each battery keeps its own configured value. This scalar override
+  does not add per-inverter runtime arrays or nested efficiency inputs. See
+  [multi-inverter configuration](config.md#multi-inverter-configuration) for the
+  separate indexed static settings.
+
 - `publish_prefix` use this key to pass a common prefix to all published data. This will add a prefix to the sensor name but also the forecast attribute keys within the sensor.
 
 - `current_period_peak` the peak grid import (in Watts) already incurred during the current billing period. Only used by `naive-mpc-optim`, and only when a capacity/demand charge (`capacity_cost_per_kw`) is configured. See the dedicated section below.
@@ -148,9 +157,15 @@ single request with:
 
 When multi-inverter mode is active, the active inverters are the one-based
 static configs `hybrid_inverter_config_1`, `hybrid_inverter_config_2`, and so
-on. The top-level battery, hybrid inverter, and PV runtime keys are not an
-active inverter in this mode. Nested runtime objects are named
-`hybrid_inverter_config_N`, where `N >= 1`. A nested runtime inverter
+on. Top-level battery, hybrid inverter, and PV runtime keys do not configure an
+active inverter in this mode, except for the scalar battery efficiency
+overrides: a supplied top-level `battery_charge_efficiency` or
+`battery_discharge_efficiency` applies to that direction for every active
+battery in the request. Each omitted direction retains the value configured
+for each battery. The indexed efficiencies in static
+`hybrid_inverter_config_N` sections remain per-inverter settings, and runtime
+overrides do not change the saved configuration. Nested runtime objects use
+the name `hybrid_inverter_config_N`, where `N >= 1`. A nested runtime inverter
 configuration is valid only when the matching static inverter configuration
 already exists; runtime payloads cannot create new inverters.
 

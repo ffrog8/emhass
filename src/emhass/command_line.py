@@ -37,6 +37,7 @@ from emhass.inverter_blocks import (
     inverter_block_structure_signature,
     is_public_safe_multi_block_model,
     project_public_inverter_config,
+    validate_runtime_battery_efficiencies,
 )
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
@@ -1568,6 +1569,11 @@ async def set_input_data_dict(
     request_params = (
         orjson.loads(runtimeparams) if isinstance(runtimeparams, str) else runtimeparams
     )
+    try:
+        validate_runtime_battery_efficiencies(request_params)
+    except ValueError as err:
+        logger.error(str(err))
+        return False
     export_threshold = None
     if request_params is not None and "grid_export_sell_price_threshold" in request_params:
         value = request_params["grid_export_sell_price_threshold"]
