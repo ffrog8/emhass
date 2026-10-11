@@ -673,6 +673,7 @@ def _split_block_config(
 
 def validate_runtime_battery_efficiencies(
     runtimeparams: Mapping[str, object] | None,
+    plant_conf: Mapping[str, object],
 ) -> dict[str, float]:
     """Validate both request scalars before any flat or indexed config mutation."""
     overrides = {}
@@ -680,6 +681,12 @@ def validate_runtime_battery_efficiencies(
         if runtimeparams is None or key not in runtimeparams:
             continue
         value = runtimeparams[key]
+        # Flat fleets already accept per-battery lists through check_batt_params.
+        # Indexed multi-inverter runtime efficiencies remain scalar-only.
+        if isinstance(value, list) and (
+            resolve_multi_inverter_mode(plant_conf, runtimeparams) == MULTI_INVERTER_MODE_SINGLE
+        ):
+            continue
         message = f"{key} must be a finite numeric scalar satisfying 0 < value <= 1"
         if type(value) not in (int, float):
             raise ValueError(message)
@@ -697,13 +704,13 @@ def merge_inverter_block_runtime_overrides(
     input_conf: dict[str, object],
     runtimeparams: Mapping[str, object],
 ) -> dict[int, dict[str, object]]:
-    efficiency_overrides = validate_runtime_battery_efficiencies(runtimeparams)
     block_runtime_conf: dict[int, dict[str, object]] = {}
     scalar_config_overrides_by_index: dict[int, dict[str, object]] = {}
     relaxed_target_bound_indexes: set[int] = set()
     plant_conf = input_conf.get("plant_conf", {})
     if not isinstance(plant_conf, Mapping):
         plant_conf = {}
+    efficiency_overrides = validate_runtime_battery_efficiencies(runtimeparams, plant_conf)
     multi_inverter_mode = resolve_multi_inverter_mode(plant_conf, runtimeparams)
     if isinstance(input_conf.get("plant_conf"), dict) and (
         MULTI_INVERTER_MODE_KEY in runtimeparams or MULTI_INVERTER_MODE_KEY in plant_conf

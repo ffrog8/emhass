@@ -1570,7 +1570,7 @@ async def set_input_data_dict(
         orjson.loads(runtimeparams) if isinstance(runtimeparams, str) else runtimeparams
     )
     try:
-        validate_runtime_battery_efficiencies(request_params)
+        validate_runtime_battery_efficiencies(request_params, params.get("plant_conf", {}))
     except ValueError as err:
         logger.error(str(err))
         return False

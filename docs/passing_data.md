@@ -112,13 +112,15 @@ Here is the list of the other additional dictionary keys that can be passed at r
 - `battery_charge_power_max` for the maximum battery charge power.
 
 - `battery_charge_efficiency` and `battery_discharge_efficiency` to override
-  the corresponding efficiency for this request. Each is a scalar fraction,
+  the corresponding efficiency for this request. Each scalar is a fraction,
   not a percentage: for example, `0.995` means 99.5%. In multi-inverter mode,
   each supplied direction applies to every active battery. If a direction is
-  omitted, each battery keeps its own configured value. This scalar override
-  does not add per-inverter runtime arrays or nested efficiency inputs. See
-  [multi-inverter configuration](config.md#multi-inverter-configuration) for the
-  separate indexed static settings.
+  omitted, each battery keeps its own configured value. This fleet-wide scalar
+  override does not add per-inverter runtime arrays or nested efficiency
+  inputs. Legacy single-inverter fleets retain the existing scalar-or-list
+  runtime inputs described in [battery configuration](config.md). See
+  [multi-inverter configuration](config.md#multi-inverter-configuration) for
+  the separate indexed static settings.
 
 - `publish_prefix` use this key to pass a common prefix to all published data. This will add a prefix to the sensor name but also the forecast attribute keys within the sensor.
 

@@ -53,6 +53,7 @@ def efficiency_site(tmp_path, monkeypatch, request):
             "num_threads": 1,
         }
     )
+    config.update(options.get("config", {}))
     efficiencies = options.get("static", [(0.85, 0.85), (0.85, 0.85)])
     if config["multi_inverter_mode"] == "multi":
         for index, (charge, discharge) in enumerate(efficiencies, 1):
@@ -75,7 +76,9 @@ def efficiency_site(tmp_path, monkeypatch, request):
                 "inverter_efficiency_ac_dc": 1.0,
             }
     config["battery_soc_power_profiles"] = [{}] * (
-        len(efficiencies) if config["multi_inverter_mode"] == "multi" else 1
+        len(efficiencies)
+        if config["multi_inverter_mode"] == "multi"
+        else config["number_of_batteries"]
     )
     conf["config_path"].write_text(json.dumps(config))
 
@@ -134,7 +137,7 @@ def assert_energy_balances(result, efficiencies, direction, mode="multi"):
     # Independent physical balance in Wh: battery discharge consumes P/eta,
     # charging stores -P*eta. SOC columns describe the end of each 30-minute step.
     for index, (charge, discharge) in enumerate(efficiencies, 1):
-        suffix = f"_{index}" if mode == "multi" else ""
+        suffix = f"_{index}" if mode == "multi" else f"_{index - 1}" if mode == "flat_fleet" else ""
         capacity = 10000 if index == 1 else 16000
         powers = result[f"P_batt{suffix}"].to_numpy()
         if direction == "charge":
@@ -448,3 +451,120 @@ def test_public_runtime_preparation_rejects_both_directions_before_efficiency_mu
     with pytest.raises(ValueError, match=key):
         asyncio.run(prepare())
     assert {name: params[name] for name in original} == original
+
+
+@pytest.mark.parametrize(
+    "efficiency_site",
+    [
+        {
+            "mode": "single",
+            "config": {
+                "number_of_batteries": 2,
+                "battery_nominal_energy_capacity": [10000, 16000],
+                "battery_charge_power_max": [3000, 3000],
+                "battery_discharge_power_max": [3000, 3000],
+            },
+        }
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("direction", ["charge", "discharge"])
+def test_rest_legacy_flat_fleet_preserves_distinct_runtime_efficiency_lists(
+    efficiency_site, direction
+):
+    post, _, _ = efficiency_site
+    payload = efficiency_payload(direction, mode="single")
+    payload.update(
+        soc_init=[0.5, 0.5],
+        soc_final=[payload["soc_final"], payload["soc_final"]],
+        battery_charge_efficiency=[0.9, 0.8],
+        battery_discharge_efficiency=[0.92, 0.82],
+    )
+    status, body, result = asyncio.run(post(payload))
+    assert status == 200, body
+    assert_energy_balances(result, [(0.9, 0.92), (0.8, 0.82)], direction, mode="flat_fleet")
+
+
+@pytest.mark.parametrize("efficiency_site", [{"mode": "single"}, {}], indirect=True)
+@pytest.mark.parametrize("direction", ["charge", "discharge"])
+def test_rest_effective_single_mode_preserves_one_battery_runtime_lists(efficiency_site, direction):
+    post, conf, _ = efficiency_site
+    saved_params = conf["data_path"] / "params.pkl"
+    original = saved_params.read_bytes()
+    payload = efficiency_payload(direction, mode="single")
+    payload.update(
+        multi_inverter_mode="single",
+        battery_soc_power_profiles=[{}],
+        battery_charge_efficiency=[0.9],
+        battery_discharge_efficiency=[0.92],
+    )
+    status, body, result = asyncio.run(post(payload))
+    assert status == 200, body
+    assert_energy_balances(result, [(0.9, 0.92)], direction, mode="single")
+    assert "P_batt_1" not in result
+    assert saved_params.read_bytes() == original
+
+
+@pytest.mark.parametrize("efficiency_site", [{"mode": "single"}], indirect=True)
+@pytest.mark.parametrize("key", ["battery_charge_efficiency", "battery_discharge_efficiency"])
+def test_rest_effective_multi_mode_rejects_legacy_list_before_model_creation(efficiency_site, key):
+    post, _, _ = efficiency_site
+    payload = efficiency_payload("charge", mode="single")
+    payload.update(multi_inverter_mode="multi", **{key: [0.9]})
+    status, body, result = asyncio.run(post(payload))
+    assert status == 400, body
+    assert key in body
+    assert result is None
+    assert not OptimizationCache.get_stats()["has_instance"]
+
+
+@pytest.mark.parametrize("efficiency_site", [{"mode": "single"}], indirect=True)
+@pytest.mark.parametrize(
+    "invalid_key", ["battery_charge_efficiency", "battery_discharge_efficiency"]
+)
+def test_rest_legacy_list_with_invalid_scalar_preserves_plan_and_model(
+    efficiency_site, invalid_key
+):
+    post, conf, _ = efficiency_site
+
+    async def run():
+        payload = efficiency_payload("charge", mode="single")
+        valid = {
+            **payload,
+            "battery_charge_efficiency": [0.9],
+            "battery_discharge_efficiency": [0.92],
+        }
+        status, body, result = await post(valid)
+        assert status == 200, body
+        assert_energy_balances(result, [(0.9, 0.92)], "charge", mode="single")
+        model = OptimizationCache._instance
+        problem = model.prob
+        previous = (
+            model.plant_conf["battery_charge_efficiency"],
+            model.plant_conf["battery_discharge_efficiency"],
+        )
+        plan_path = conf["data_path"] / "opt_res_latest.csv"
+        last_plan = plan_path.read_bytes()
+        invalid = {
+            **valid,
+            "battery_charge_efficiency": [0.8],
+            "battery_discharge_efficiency": [0.8],
+            invalid_key: False,
+        }
+        status, body, _ = await post(invalid)
+        assert status == 400, body
+        assert invalid_key in body
+        assert plan_path.read_bytes() == last_plan
+        assert OptimizationCache._instance is model
+        assert model.prob is problem
+        assert (
+            model.plant_conf["battery_charge_efficiency"],
+            model.plant_conf["battery_discharge_efficiency"],
+        ) == previous
+        status, body, result = await post(valid)
+        assert status == 200, body
+        assert_energy_balances(result, [(0.9, 0.92)], "charge", mode="single")
+        assert OptimizationCache._instance is model
+        assert model.prob is problem
+
+    asyncio.run(run())
