@@ -42,7 +42,11 @@ from emhass.inverter_blocks import (
 from emhass.machine_learning_forecaster import MLForecaster
 from emhass.machine_learning_regressor import MLRegressor
 from emhass.optimization import Optimization
-from emhass.retrieve_hass import RetrieveHass
+from emhass.retrieve_hass import (
+    RetrieveHass,
+    saved_optimizer_csv_blocked,
+    set_saved_optimizer_publication_blocked,
+)
 from emhass.soc_power_profiles import log_model_size_increase
 from emhass.utils import log_runtime_banner, stage_timer
 
@@ -1969,6 +1973,12 @@ async def perfect_forecast_optim(
             input_data_dict["emhass_conf"]["data_path"] / filename,
             index_label="timestamp",
         )
+        await set_saved_optimizer_publication_blocked(
+            input_data_dict["emhass_conf"]["data_path"],
+            csv_filenames=(filename,),
+            block_planner_entities=False,
+            blocked=False,
+        )
     if not isinstance(input_data_dict["params"], dict):
         params = orjson.loads(input_data_dict["params"])
     else:
@@ -1980,7 +1990,13 @@ async def perfect_forecast_optim(
     ].get("entity_save", False):
         with stage_timer(input_data_dict["stage_times"], "publish", logger):
             # Trigger the publish function, save entity data and not post to HA
-            await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
+            await publish_data(
+                input_data_dict,
+                logger,
+                opt_res_latest=opt_res,
+                entity_save=True,
+                dont_post=True,
+            )
 
     _log_optimization_summary(input_data_dict, logger)
     _record_optim_snapshot(input_data_dict, last_run.ACTION_PERFECT_OPTIM, opt_res, _t0, logger)
@@ -2193,6 +2209,12 @@ async def dayahead_forecast_optim(
             input_data_dict["emhass_conf"]["data_path"] / filename,
             index_label="timestamp",
         )
+        await set_saved_optimizer_publication_blocked(
+            input_data_dict["emhass_conf"]["data_path"],
+            csv_filenames=(filename,),
+            block_planner_entities=False,
+            blocked=False,
+        )
 
     if not isinstance(input_data_dict["params"], dict):
         params = orjson.loads(input_data_dict["params"])
@@ -2205,7 +2227,13 @@ async def dayahead_forecast_optim(
     ].get("entity_save", False):
         with stage_timer(input_data_dict["stage_times"], "publish", logger):
             # Trigger the publish function, save entity data and not post to HA
-            await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
+            await publish_data(
+                input_data_dict,
+                logger,
+                opt_res_latest=opt_res_dayahead,
+                entity_save=True,
+                dont_post=True,
+            )
 
     _log_optimization_summary(input_data_dict, logger)
     _record_optim_snapshot(
@@ -2284,6 +2312,50 @@ async def naive_mpc_optim(
             def_end_timestep=def_end_timestep,
             stage_times=input_data_dict["stage_times"],
         )
+    accepted = (
+        not opt_res_naive_mpc.empty
+        and {"optim_status", "P_Load", "P_grid"}.issubset(opt_res_naive_mpc.columns)
+        and opt_res_naive_mpc["optim_status"].eq("Optimal").all()
+    )
+    if not accepted:
+        # A solver failure or relaxed fallback is not a fresh original-model
+        # plan. Keep the last accepted CSV, saved entities and structured plan.
+        # A malformed frame claiming Optimal must also be recorded as a failure.
+        if (
+            opt_res_naive_mpc.empty
+            or "optim_status" not in opt_res_naive_mpc
+            or opt_res_naive_mpc["optim_status"].iloc[0] == "Optimal"
+        ):
+            failed_index = (
+                opt_res_naive_mpc.index[:1]
+                if not opt_res_naive_mpc.empty
+                else df_input_data_dayahead.index[:1]
+            )
+            opt_res_naive_mpc = pd.DataFrame({"optim_status": ["Failure"]}, index=failed_index)
+        logger.error("MPC produced no accepted fresh plan; retaining previous published results")
+        data_path = input_data_dict["emhass_conf"]["data_path"]
+        csv_filenames = tuple(
+            path.name
+            for path in data_path.glob("opt_res_*.csv")
+            if path.is_file()
+            and (
+                path.name == default_csv_filename
+                or path.name.startswith(
+                    ("opt_res_dayahead_", "opt_res_naive_mpc_", "opt_res_perfect_optim_")
+                )
+            )
+        )
+        await set_saved_optimizer_publication_blocked(
+            data_path,
+            csv_filenames=csv_filenames,
+            block_planner_entities=True,
+            blocked=True,
+        )
+        _log_optimization_summary(input_data_dict, logger)
+        _record_optim_snapshot(
+            input_data_dict, last_run.ACTION_NAIVE_MPC_OPTIM, opt_res_naive_mpc, _t0, logger
+        )
+        return opt_res_naive_mpc
     # Save CSV file for publish_data
     if save_data_to_file:
         today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2294,6 +2366,12 @@ async def naive_mpc_optim(
         opt_res_naive_mpc.to_csv(
             input_data_dict["emhass_conf"]["data_path"] / filename,
             index_label="timestamp",
+        )
+        await set_saved_optimizer_publication_blocked(
+            input_data_dict["emhass_conf"]["data_path"],
+            csv_filenames=(filename,),
+            block_planner_entities=False,
+            blocked=False,
         )
 
     if not isinstance(input_data_dict["params"], dict):
@@ -2307,7 +2385,13 @@ async def naive_mpc_optim(
     ].get("entity_save", False):
         with stage_timer(input_data_dict["stage_times"], "publish", logger):
             # Trigger the publish function, save entity data and not post to HA
-            await publish_data(input_data_dict, logger, entity_save=True, dont_post=True)
+            await publish_data(
+                input_data_dict,
+                logger,
+                opt_res_latest=opt_res_naive_mpc,
+                entity_save=True,
+                dont_post=True,
+            )
 
     _log_optimization_summary(input_data_dict, logger)
     _record_optim_snapshot(
@@ -2889,6 +2973,25 @@ def _get_params(input_data_dict: dict) -> dict:
     return {}
 
 
+def _saved_plan_blocked_by_latest_mpc(data_path: pathlib.Path, logger: logging.Logger) -> bool:
+    """Read the durable run verdict before reusing persisted optimizer output.
+
+    last_run.read() has a process-local cache, so another worker's rejected MPC
+    could otherwise leave this worker publishing the previous accepted plan.
+    """
+    try:
+        snapshot = orjson.loads((data_path / "last_run.json").read_bytes())
+    except FileNotFoundError:
+        return False  # Existing saved results may predate last_run metadata.
+    except (OSError, orjson.JSONDecodeError) as exc:
+        logger.error("Cannot verify saved optimization result: %s", exc)
+        return True
+    if not isinstance(snapshot, dict) or not {"action", "status"}.issubset(snapshot):
+        logger.error("Cannot verify saved optimization result: invalid last_run metadata")
+        return True
+    return snapshot["action"] == last_run.ACTION_NAIVE_MPC_OPTIM and snapshot["status"] != "ok"
+
+
 async def _publish_from_saved_entities(
     input_data_dict: dict, logger: logging.Logger, params: dict
 ) -> pd.DataFrame | None:
@@ -2923,8 +3026,12 @@ async def _publish_from_saved_entities(
             entity_data = await publish_json(entity, input_data_dict, entity_path, logger)
             if isinstance(entity_data, bool):
                 return None  # Error occurred
+            if entity_data is None:
+                continue  # Retained planner entity after a rejected MPC run.
             opt_res_list.append(entity_data)
             opt_res_list_names.append(entity.replace(".json", ""))
+    if not opt_res_list:
+        return None
     opt_res = pd.concat(opt_res_list, axis=1)
     opt_res.columns = opt_res_list_names
     return opt_res
@@ -2940,6 +3047,9 @@ def _load_opt_res_latest(
     else:
         filename = default_csv_filename
     file_path = input_data_dict["emhass_conf"]["data_path"] / filename
+    if saved_optimizer_csv_blocked(file_path.parent, filename):
+        logger.error("Saved optimization result %s was invalidated by a rejected MPC run", filename)
+        return None
     if not file_path.exists():
         logger.error("File not found error, run an optimization task first.")
         return None
@@ -3457,6 +3567,11 @@ async def publish_data(
             return opt_res
     # Load Optimization Results (if not passed)
     if opt_res_latest is None:
+        if _saved_plan_blocked_by_latest_mpc(input_data_dict["emhass_conf"]["data_path"], logger):
+            logger.error(
+                "Latest MPC has no accepted fresh plan; saved optimization result not published"
+            )
+            return None
         opt_res_latest = _load_opt_res_latest(input_data_dict, logger, save_data_to_file)
         if opt_res_latest is None:
             return None
@@ -3658,6 +3773,18 @@ async def publish_json(
     else:
         logger.error(f"unable to locate metadata.json in: {entity_path}")
         return False
+    entity_id = entity.replace(".json", "")
+    owner = metadata.get(entity_id) if isinstance(metadata, dict) else None
+    if isinstance(owner, dict) and owner.get("publication_blocked"):
+        logger.warning("Skipping invalidated optimizer entity: %s", entity_id)
+        return None
+    if _saved_plan_blocked_by_latest_mpc(entity_path.parent, logger):
+        if not isinstance(owner, dict) or owner.get("type_var") not in {
+            "mlforecaster",
+            "mlregressor",
+        }:
+            logger.warning("Skipping retained optimizer entity after rejected MPC: %s", entity_id)
+            return None
     # Round current timecode (now)
     now_precise = datetime.now(input_data_dict["retrieve_hass_conf"]["time_zone"]).replace(
         second=0, microsecond=0
@@ -3665,7 +3792,6 @@ async def publish_json(
     # Retrieve entity data from file
     entity_data = pd.read_json(entity_path / entity, orient="index")
     # Remove ".json" from string for entity_id
-    entity_id = entity.replace(".json", "")
     # Adjust Dataframe from received entity json file
     entity_data.columns = [metadata[entity_id]["name"]]
     entity_data.index.name = "timestamp"

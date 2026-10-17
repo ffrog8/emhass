@@ -7,15 +7,18 @@ import logging
 import os
 import pathlib
 import pickle
+import shutil
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import aiofiles
+import cvxpy as cp
 import numpy as np
 import orjson
 import pandas as pd
+from scipy import sparse
 
 from emhass import utils
 from emhass.command_line import (
@@ -5291,6 +5294,433 @@ class TestOptimizationCacheIntegration(unittest.IsolatedAsyncioTestCase):
             logger,
             get_data_from_file=True,
         )
+
+    def _isolate_mpc_test_data(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        shutil.copyfile(
+            emhass_conf["data_path"] / "test_df_final.pkl",
+            pathlib.Path(temporary.name) / "test_df_final.pkl",
+        )
+        data_path_patch = patch.dict(emhass_conf, {"data_path": pathlib.Path(temporary.name)})
+        data_path_patch.start()
+        self.addCleanup(data_path_patch.stop)
+
+    async def test_mpc_native_accuracy_settings_apply_on_cold_and_cached_replans(self):
+        self._isolate_mpc_test_data()
+        runtime = {
+            "set_use_battery": True,
+            "pv_power_forecast": [1000.0] * 10,
+            "load_power_forecast": [1500.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.5,
+            "soc_final": 0.5,
+            "lp_solver_mip_rel_gap": 0.05,
+        }
+        real_solve = cp.Problem.solve
+        native_options = []
+        native_readback = []
+
+        def observe_native_solve(problem, *args, **kwargs):
+            if kwargs.get("solver") == cp.HIGHS:
+                native_options.append(
+                    (
+                        kwargs.get("mip_rel_gap"),
+                        kwargs.get("mip_feasibility_tolerance"),
+                        kwargs.get("mip_abs_gap"),
+                    )
+                )
+            result = real_solve(problem, *args, **kwargs)
+            if kwargs.get("solver") == cp.HIGHS:
+                options = problem._solver_cache[cp.HIGHS][0].getOptions()
+                native_readback.append(
+                    (
+                        options.mip_rel_gap,
+                        options.mip_feasibility_tolerance,
+                        options.mip_abs_gap,
+                    )
+                )
+            return result
+
+        with patch.object(cp.Problem, "solve", new=observe_native_solve):
+            first_input = await self._run_set_input(runtime)
+            first_result = await naive_mpc_optim(first_input, logger, debug=True)
+            second_input = await self._run_set_input(
+                {**runtime, "load_power_forecast": [1800.0] * 10}
+            )
+            second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_input["opt"])
+        for result in (first_result, second_result):
+            self.assertEqual(result["optim_status"].unique().tolist(), ["Optimal"])
+            self.assertTrue(np.isfinite(result["P_batt"].to_numpy()).all())
+        self.assertEqual(native_options, [(0.001, 1e-8, 1e-6)] * 2)
+        self.assertEqual(native_readback, [(0.001, 1e-8, 1e-6)] * 2)
+
+    async def test_mpc_preserves_stricter_relative_gap_on_cached_replan(self):
+        self._isolate_mpc_test_data()
+        base_runtime = {
+            "set_use_battery": True,
+            "pv_power_forecast": [1000.0] * 10,
+            "load_power_forecast": [1500.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.5,
+            "soc_final": 0.5,
+        }
+        real_solve = cp.Problem.solve
+        native_readback = []
+
+        def observe_native_solve(problem, *args, **kwargs):
+            result = real_solve(problem, *args, **kwargs)
+            if kwargs.get("solver") == cp.HIGHS:
+                options = problem._solver_cache[cp.HIGHS][0].getOptions()
+                native_readback.append(
+                    (options.mip_rel_gap, options.mip_feasibility_tolerance, options.mip_abs_gap)
+                )
+            return result
+
+        with patch.object(cp.Problem, "solve", new=observe_native_solve):
+            first_input = await self._run_set_input(
+                {**base_runtime, "lp_solver_mip_rel_gap": 0.0005}
+            )
+            first_result = await naive_mpc_optim(first_input, logger, debug=True)
+            second_input = await self._run_set_input({**base_runtime, "lp_solver_mip_rel_gap": 0.0})
+            second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_input["opt"])
+        self.assertEqual(first_result["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertEqual(second_result["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertEqual(native_readback, [(0.0005, 1e-8, 1e-6), (0.0, 1e-8, 1e-6)])
+
+    async def test_mpc_cached_stale_native_result_is_rejected_then_recovers(self):
+        self._isolate_mpc_test_data()
+        runtime = {
+            "set_use_battery": True,
+            "pv_power_forecast": [1000.0] * 10,
+            "load_power_forecast": [1500.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.5,
+            "soc_final": 0.5,
+        }
+        first_input = await self._run_set_input(runtime)
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+        self.assertEqual(first_result["optim_status"].unique().tolist(), ["Optimal"])
+        primary_problem = first_input["opt"].prob
+
+        second_input = await self._run_set_input({**runtime, "load_power_forecast": [1800.0] * 10})
+        self.assertIs(second_input["opt"], first_input["opt"])
+        real_solve = cp.Problem.solve
+
+        def stale_primary_solve(problem, *args, **kwargs):
+            if problem is primary_problem:
+                return None
+            return real_solve(problem, *args, **kwargs)
+
+        with patch.object(cp.Problem, "solve", new=stale_primary_solve):
+            rejected = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertEqual(list(rejected.columns), ["optim_status"])
+        self.assertEqual(rejected["optim_status"].unique().tolist(), ["Failure"])
+
+        recovered_input = await self._run_set_input(
+            {**runtime, "load_power_forecast": [2100.0] * 10}
+        )
+        recovered = await naive_mpc_optim(recovered_input, logger, debug=True)
+        self.assertIs(recovered_input["opt"], first_input["opt"])
+        self.assertEqual(recovered["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertTrue(np.isfinite(recovered["P_batt"].to_numpy()).all())
+
+    async def test_mpc_rejects_infeasible_recovered_values_from_fresh_native_solve(self):
+        self._isolate_mpc_test_data()
+        runtime = {
+            "set_use_battery": False,
+            "set_use_pv": False,
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [1500.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.05] * 10,
+            "prediction_horizon": 10,
+        }
+        real_solve = cp.Problem.solve
+        raw_native_unchanged = []
+
+        def alter_recovered_grid_mode(problem, *args, **kwargs):
+            result = real_solve(problem, *args, **kwargs)
+            if kwargs.get("solver") == cp.HIGHS and problem.status == cp.OPTIMAL:
+                native = problem._solver_cache[cp.HIGHS][2]["solution"]
+                raw_before = np.asarray(native.col_value).copy()
+                grid_mode = next(var for var in problem.variables() if var.name() == "D")
+                self.assertEqual(float(grid_mode.value[0]), 1.0)
+                grid_mode.value = np.zeros_like(grid_mode.value)
+                raw_native_unchanged.append(
+                    np.array_equal(raw_before, np.asarray(native.col_value))
+                )
+            return result
+
+        with patch.object(cp.Problem, "solve", new=alter_recovered_grid_mode):
+            input_data = await self._run_set_input(runtime)
+            rejected = await naive_mpc_optim(input_data, logger, debug=True)
+
+        self.assertEqual(raw_native_unchanged, [True])
+        self.assertEqual(list(rejected.columns), ["optim_status"])
+        self.assertEqual(rejected["optim_status"].unique().tolist(), ["Failure"])
+
+    async def test_mpc_extra_only_curtailment_stays_usable_on_cold_and_cached_replans(self):
+        self._isolate_mpc_test_data()
+        self.params = TestCommandLineAsyncUtils._make_split_pv_hybrid_block_params(self.params)
+        self.params["plant_conf"]["maximum_power_to_grid"] = 0.0
+        self.params["plant_conf"]["battery_soc_power_profiles"] = [{}, {}]
+        self.params["hybrid_inverter_config_2"] = TestCommandLineAsyncUtils._hybrid_extra_block()
+        self.params["hybrid_inverter_config_2"]["compute_curtailment"] = True
+
+        def request(extra_pv):
+            runtime = TestCommandLineAsyncUtils._split_pv_hybrid_runtimeparams()
+            runtime["prod_price_forecast"] = [-0.05] * 10
+            runtime["hybrid_inverter_config_2"] = {
+                "soc_init": 0.5,
+                "soc_final": 0.5,
+                "pv_power_forecast": [extra_pv] * 10,
+            }
+            return runtime
+
+        first_input = await self._run_set_input(request(700.0))
+        blocks = {block.index: block for block in first_input["opt"].inverter_block_config.values()}
+        self.assertFalse(blocks[1].plant_conf["compute_curtailment"])
+        self.assertTrue(blocks[2].plant_conf["compute_curtailment"])
+        first_result = await naive_mpc_optim(first_input, logger, debug=True)
+        second_input = await self._run_set_input(request(800.0))
+        second_result = await naive_mpc_optim(second_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], first_input["opt"])
+        for result in (first_result, second_result):
+            self.assertEqual(result["optim_status"].unique().tolist(), ["Optimal"])
+            self.assertNotIn("P_PV_curtailment_1", result)
+            self.assertIn("P_PV_curtailment_2", result)
+            self.assertTrue(np.isfinite(result["P_PV_curtailment_2"]).all())
+            np.testing.assert_allclose(
+                result["P_PV_curtailment"], result["P_PV_curtailment_2"], atol=1e-7
+            )
+
+    async def test_mpc_generic_solver_rejects_combined_original_soc_violation(self):
+        self._isolate_mpc_test_data()
+        runtime = {
+            "set_use_battery": True,
+            "set_use_pv": False,
+            "number_of_batteries": 2,
+            "battery_nominal_energy_capacity": [1000.0, 1000.0],
+            "battery_charge_power_max": [1000.0, 1000.0],
+            "battery_discharge_power_max": [1000.0, 1000.0],
+            "battery_discharge_efficiency": [1.0, 1.0],
+            "battery_charge_efficiency": [1.0, 1.0],
+            "battery_minimum_state_of_charge": [0.2, 0.2],
+            "battery_maximum_state_of_charge": [1.0, 1.0],
+            "battery_target_state_of_charge": [0.2, 0.2],
+            "battery_soc_power_profiles": [{}, {}],
+            "operating_hours_of_each_deferrable_load": [0, 0],
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [0.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": [0.2, 0.2],
+            "soc_final": [0.2, 0.2],
+        }
+        input_data = await self._run_set_input(runtime)
+        opt = input_data["opt"]
+        real_solve = cp.Problem.solve
+        installed_solvers = cp.installed_solvers()
+        injected = {}
+        solve_count = 0
+
+        def cplex_boundary_with_recovered_error(problem, *args, **kwargs):
+            nonlocal solve_count
+            solve_count += 1
+            self.assertEqual(kwargs["solver"], cp.CPLEX)
+            delegated = {key: value for key, value in kwargs.items() if key != "cplex_params"}
+            delegated["solver"] = cp.HIGHS
+            result = real_solve(problem, *args, **delegated)
+            self.assertEqual(problem.status, cp.OPTIMAL)
+            if solve_count != 2:
+                return result
+            native = problem._solver_cache[cp.HIGHS][2]["solution"]
+            raw_before = np.asarray(native.col_value).copy()
+
+            discharge = opt.vars["p_sto_pos"][0]
+            self.assertLess(np.max(np.abs(discharge.value)), 1e-9)
+            discharge_values = np.asarray(discharge.value).copy()
+            discharge_values[:3] += 8e-8
+            discharge.value = discharge_values
+            stored, original = next(
+                pair
+                for pair in opt._primary_shared_energy_originals.values()
+                if pair[0].name() == "stored_energy_0"
+            )
+            self.assertAlmostEqual(float(stored.value[-1]), 200.0, delta=1e-8)
+            stored_values = np.asarray(stored.value).copy()
+            stored_values -= np.array([4e-8] + [6e-8] * 9)
+            stored.value = stored_values
+            final_under = opt.vars["soc_final_under"][0]
+            final_under.value = float(final_under.value) + 1.2e-7
+
+            injected["raw_unchanged"] = np.array_equal(raw_before, np.asarray(native.col_value))
+            injected["transformed_max"] = max(
+                float(np.max(np.asarray(constraint.violation()), initial=0))
+                for constraint in problem.constraints
+            )
+            injected["energy_difference"] = float(
+                np.max(np.abs(np.asarray(stored.value) - np.asarray(original.value)))
+            )
+            injected["original_soc_residual"] = float(
+                np.max(np.maximum(200.0 - np.asarray(original.value), 0))
+            )
+            return result
+
+        with patch.dict(os.environ, {"LP_SOLVER": "CPLEX"}):
+            with patch.object(cp, "installed_solvers", return_value=[*installed_solvers, cp.CPLEX]):
+                with patch.object(cp.Problem, "solve", new=cplex_boundary_with_recovered_error):
+                    healthy = await naive_mpc_optim(input_data, logger, debug=True)
+                    second_input = await self._run_set_input(runtime)
+                    with self.assertLogs(logger, logging.WARNING) as captured:
+                        rejected = await naive_mpc_optim(second_input, logger, debug=True)
+                    recovered_input = await self._run_set_input(runtime)
+                    recovered = await naive_mpc_optim(recovered_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], opt)
+        self.assertIs(recovered_input["opt"], opt)
+        self.assertEqual(solve_count, 3)
+        self.assertEqual(healthy["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertTrue(injected["raw_unchanged"])
+        self.assertLessEqual(injected["transformed_max"], 1e-7)
+        self.assertLessEqual(injected["energy_difference"], 1e-7)
+        self.assertGreater(injected["original_soc_residual"], 1e-7)
+        self.assertTrue(
+            any(
+                "returned original constraint residual exceeds 1e-7" in line
+                for line in captured.output
+            )
+        )
+        self.assertEqual(list(rejected.columns), ["optim_status"])
+        self.assertEqual(rejected["optim_status"].unique().tolist(), ["Failure"])
+        self.assertEqual(recovered["optim_status"].unique().tolist(), ["Optimal"])
+
+    async def test_mpc_legacy_single_battery_rejects_cumulative_soc_violation(self):
+        self._isolate_mpc_test_data()
+        runtime = {
+            "set_use_battery": True,
+            "set_use_pv": False,
+            "number_of_batteries": 1,
+            "battery_nominal_energy_capacity": 1000.0,
+            "battery_charge_power_max": 1000.0,
+            "battery_discharge_power_max": 1000.0,
+            "battery_discharge_efficiency": 1.0,
+            "battery_charge_efficiency": 1.0,
+            "battery_minimum_state_of_charge": 0.2,
+            "battery_maximum_state_of_charge": 1.0,
+            "battery_target_state_of_charge": 0.2,
+            "battery_soc_power_profiles": [{}],
+            "operating_hours_of_each_deferrable_load": [0, 0],
+            "pv_power_forecast": [0.0] * 10,
+            "load_power_forecast": [0.0] * 10,
+            "load_cost_forecast": [0.25] * 10,
+            "prod_price_forecast": [0.0] * 10,
+            "prediction_horizon": 10,
+            "soc_init": 0.2,
+            "soc_final": 0.2,
+        }
+        first_input = await self._run_set_input(runtime)
+        opt = first_input["opt"]
+        self.assertEqual(opt.time_step, 0.5)
+        real_solve = cp.Problem.solve
+        solve_count = 0
+        injected = {}
+
+        def alter_recovered_battery_flow(problem, *args, **kwargs):
+            nonlocal solve_count
+            solve_count += 1
+            result = real_solve(problem, *args, **kwargs)
+            self.assertEqual(problem.status, cp.OPTIMAL)
+            if solve_count != 2:
+                return result
+
+            native_solver, native_data, native_result = problem._solver_cache[cp.HIGHS]
+            native_raw = np.asarray(native_result["solution"].col_value).copy()
+            discharge = opt.vars["p_sto_pos"][0]
+            charge = opt.vars["p_sto_neg"][0]
+            self.assertLess(np.max(np.abs(discharge.value)), 1e-9)
+            self.assertLess(np.max(np.abs(charge.value)), 1e-9)
+            discharge_values = np.asarray(discharge.value).copy()
+            charge_values = np.asarray(charge.value).copy()
+            discharge_values[:3] += 8e-8
+            charge_values[3:6] -= 8e-8
+            discharge.value = discharge_values
+            charge.value = charge_values
+
+            returned = native_raw.copy()
+            offsets = native_data["param_prob"].var_id_to_col
+            for variable in problem.variables():
+                start = offsets[variable.id]
+                returned[start : start + variable.size] = np.asarray(variable.value).ravel(
+                    order="F"
+                )
+            lp = native_solver.getModel().lp_
+            matrix = sparse.csc_matrix(
+                (lp.a_matrix_.value_, lp.a_matrix_.index_, lp.a_matrix_.start_),
+                shape=(lp.num_row_, lp.num_col_),
+            )
+            rows = matrix @ returned
+            injected["native_residual"] = max(
+                float(np.max(np.maximum(np.asarray(lp.row_lower_) - rows, 0), initial=0)),
+                float(np.max(np.maximum(rows - np.asarray(lp.row_upper_), 0), initial=0)),
+                float(np.max(np.maximum(np.asarray(lp.col_lower_) - returned, 0), initial=0)),
+                float(np.max(np.maximum(returned - np.asarray(lp.col_upper_), 0), initial=0)),
+            )
+            original_energy = 200.0 - np.cumsum((discharge_values + charge_values) * 0.5)
+            injected["original_soc_residual"] = float(
+                np.max(np.maximum(200.0 - original_energy, 0))
+            )
+            injected["objective_difference"] = abs(
+                float(np.asarray(lp.col_cost_) @ returned + lp.offset_)
+                - float(native_result["info"].objective_function_value)
+            )
+            injected["objective_allowance"] = 1e-7 * max(
+                1.0, abs(float(native_result["info"].objective_function_value))
+            )
+            injected["raw_unchanged"] = np.array_equal(
+                native_raw, np.asarray(native_result["solution"].col_value)
+            )
+            return result
+
+        with patch.object(cp.Problem, "solve", new=alter_recovered_battery_flow):
+            healthy = await naive_mpc_optim(first_input, logger, debug=True)
+            second_input = await self._run_set_input(runtime)
+            with self.assertLogs(logger, logging.INFO) as captured:
+                rejected = await naive_mpc_optim(second_input, logger, debug=True)
+            recovered_input = await self._run_set_input(runtime)
+            recovered = await naive_mpc_optim(recovered_input, logger, debug=True)
+
+        self.assertIs(second_input["opt"], opt)
+        self.assertIs(recovered_input["opt"], opt)
+        self.assertEqual(solve_count, 3)
+        self.assertEqual(healthy["optim_status"].unique().tolist(), ["Optimal"])
+        self.assertTrue(injected["raw_unchanged"])
+        self.assertLessEqual(injected["native_residual"], 1e-7)
+        self.assertLessEqual(injected["objective_difference"], injected["objective_allowance"])
+        self.assertGreater(injected["original_soc_residual"], 1e-7)
+        self.assertEqual(list(rejected.columns), ["optim_status"])
+        self.assertEqual(rejected["optim_status"].unique().tolist(), ["Failure"])
+        self.assertTrue(
+            any(
+                "returned original constraint residual exceeds 1e-7" in line
+                for line in captured.output
+            )
+        )
+        self.assertEqual(recovered["optim_status"].unique().tolist(), ["Optimal"])
 
     async def test_mpc_cache_hit_on_repeated_calls(self):
         """Test that repeated MPC calls with same config reuse the cached Optimization object.

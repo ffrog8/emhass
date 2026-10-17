@@ -246,16 +246,28 @@ def test_threshold_survives_solver_fallback_and_next_cached_request(
         payload = battery_export_payload()
         payload["grid_export_sell_price_threshold"] = 0.2
         status, body, result = await rest_site(payload)
-        assert status == 200, body
+        assert status == 400, body
         assert len(attempts) == 2
+        assert result is None
+        response = await web_server.app.test_client().get("/api/v1/last-run")
+        last_run = json.loads(await response.get_data())
+        assert last_run["action"] == "naive-mpc-optim"
+        assert last_run["status"] == "error"
+
+        # The rejected fallback must not clear the request-scoped threshold or
+        # replace the compiled original model used by the next fresh request.
+        status, body, result = await rest_site(payload)
+        assert status == 200, body
+        assert result["optim_status"].eq("Optimal").all()
         assert result["P_grid_neg"].iloc[:2].abs().max() <= 1e-5
-        expected = "Optimal" if failure_status == cp.USER_LIMIT else "Optimal (Relaxed)"
-        assert result["optim_status"].eq(expected).all()
+        assert (result["P_grid_neg"].iloc[2:] < -100).any()
+        assert attempts[2] is attempts[0]
+
         del payload["grid_export_sell_price_threshold"]
         status, body, result = await rest_site(payload)
         assert status == 200, body
         assert (result["P_grid_neg"].iloc[:2] < -100).all()
-        assert attempts[2] is attempts[0]
+        assert attempts[3] is attempts[0]
 
     asyncio.run(run())
 
@@ -449,10 +461,19 @@ def test_existing_physical_export_limit_still_reports_genuine_infeasibility(rest
     payload["maximum_power_to_grid"] = 100
     for index in (1, 2):
         payload[f"hybrid_inverter_config_{index}"]["battery_charge_power_max"] = 1
-    status, body, result = asyncio.run(rest_site(payload))
-    assert status == 400, body
-    assert "infeasible" in body.lower()
-    assert result["optim_status"].eq("Infeasible").all()
+
+    async def run():
+        status, body, result = await rest_site(payload)
+        assert status == 400, body
+        assert "infeasible" in body.lower()
+        assert result is None
+        response = await web_server.app.test_client().get("/api/v1/last-run")
+        last_run = json.loads(await response.get_data())
+        assert last_run["action"] == "naive-mpc-optim"
+        assert last_run["status"] == "infeasible"
+        assert last_run["infeasible"] is True
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

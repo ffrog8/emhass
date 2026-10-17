@@ -8,8 +8,10 @@ from collections.abc import Mapping
 from math import ceil, isfinite
 
 import cvxpy as cp
+import highspy
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from emhass import utils
 from emhass.inverter_blocks import (
@@ -995,6 +997,7 @@ class Optimization:
     def _build_battery_soc_expressions(
         self,
         *,
+        constraints,
         block_config,
         block_runtime,
         block_variables,
@@ -1006,11 +1009,33 @@ class Optimization:
         eff_chg = block_config.plant_conf["battery_charge_efficiency"]
         power_flow = (p_sto_pos * (1 / eff_dis)) + (p_sto_neg * eff_chg)
         energy_change = power_flow * self.time_step
-        cumulative_energy = cp.cumsum(energy_change)
-        stored_energy = (block_runtime.soc_init * cap) - cumulative_energy
+        stored_energy = self._shared_stored_energy(
+            constraints,
+            energy_change,
+            block_runtime.soc_init * cap,
+            f"stored_energy_block_{block_config.index}",
+        )
         soc = stored_energy / cap
         p_batt = p_sto_pos + p_sto_neg
         return p_batt, stored_energy, soc
+
+    def _shared_stored_energy(self, constraints, energy_change, initial_energy, name):
+        """Use one end-of-slot energy state for each battery's constraints."""
+        if self.n_batt == 1 and not self._multi_block_battery_model_enabled:
+            return initial_energy - cp.cumsum(energy_change)
+        if self.num_timesteps == 1:
+            return initial_energy - energy_change
+
+        stored_energy = cp.Variable(self.num_timesteps, name=name)
+        constraints.append(stored_energy[0] == initial_energy - energy_change[0])
+        constraints.append(stored_energy[1:] - stored_energy[:-1] == -energy_change[1:])
+        # Kept outside the CVXPY problem for returned-value acceptance. The
+        # primary model owns this map even when a fallback rebuilds constraints.
+        self._shared_energy_originals[stored_energy.id] = (
+            stored_energy,
+            initial_energy - cp.cumsum(energy_change),
+        )
+        return stored_energy
 
     def _private_battery_total_power_expression(self):
         block_vars = self.inverter_block_variables[0]
@@ -3208,6 +3233,7 @@ class Optimization:
         self._battery_block_expressions = {}
         self._battery_soc_balance_deviation_vars = {}
         self._battery_soc_balance_penalty = None
+        self._shared_energy_originals = {}
         if not self.optim_conf["set_use_battery"]:
             return
 
@@ -3321,19 +3347,21 @@ class Optimization:
 
             # SOC Constraints (Vectorized Accumulation)
 
-            # Calculate Energy Change per timestep (kWh)
+            # Calculate Energy Change per timestep (Wh)
             # Energy out = p_sto_pos / eff_dis
             # Energy in  = p_sto_neg * eff_chg  (p_sto_neg is negative, so this adds negative energy)
             power_flow = (p_sto_pos[k] * (1 / eff_dis)) + (p_sto_neg[k] * eff_chg)
             energy_change = power_flow * self.time_step
 
-            # Calculate Cumulative Energy used/added
-            cumulative_energy = cp.cumsum(energy_change)
-
-            # SOC State (kWh) at every timestep t
+            # Stored-energy state (Wh) at every timestep t
             # SOC_t = SOC_init - Cumulative_Change
             # (Subtracting because positive flow is Discharge/Depletion)
-            current_stored_energy = (soc_init_k * cap) - cumulative_energy
+            current_stored_energy = self._shared_stored_energy(
+                constraints,
+                energy_change,
+                soc_init_k * cap,
+                f"stored_energy_{k}",
+            )
             current_stored_energy_list.append(current_stored_energy)
             if self._multi_block_battery_model_enabled and k == 0:
                 self._battery_block_expressions[0] = {
@@ -3600,6 +3628,7 @@ class Optimization:
             extra_runtime = self.inverter_block_runtime[index]
             extra_vars = self.inverter_block_variables[index]
             p_batt, stored_energy, soc = self._build_battery_soc_expressions(
+                constraints=constraints,
                 block_config=block_config,
                 block_runtime=extra_runtime,
                 block_variables=extra_vars,
@@ -5263,7 +5292,7 @@ class Optimization:
 
         # Battery Results (#610). This independently recomputes the SOC/P_batt
         # recursion per battery in numpy space over realized values; it must
-        # stay in lockstep with the CVXPY-expression cumsum recursion in
+        # stay in lockstep with the CVXPY battery-energy recurrence in
         # _add_battery_constraints (the per-k cap/eff_dis/eff_chg reads below
         # mirror that method exactly). ``soc_init`` is a scalar at n_batt==1
         # (unchanged from today) or a length-n_batt list at n_batt>1 (see
@@ -5592,6 +5621,268 @@ class Optimization:
             "blocks": block_diagnostics,
             "p_batt_total": p_batt_total,
         }
+
+    def _check_mpc_native_returned_values(self, solver_opts: dict) -> None:
+        """Check the current HiGHS result using the values CVXPY will publish."""
+        cache = self.prob._solver_cache.get(cp.HIGHS)
+        if not isinstance(cache, tuple) or len(cache) != 3:
+            raise ValueError("missing current HiGHS adapter result")
+        solver, data, result = cache
+        if result.get("model_status") != "kOptimal" or solver.getModelStatus().name != "kOptimal":
+            raise ValueError("native primary status is not Optimal")
+        options = solver.getOptions()
+        for name in ("mip_rel_gap", "mip_abs_gap", "mip_feasibility_tolerance"):
+            if not np.isclose(getattr(options, name), solver_opts[name], rtol=1e-12, atol=0):
+                raise ValueError(f"native {name} differs from current MPC setting")
+        info = result["info"]
+        solution = result["solution"]
+        if (
+            not info.valid
+            or not solution.value_valid
+            or int(info.primal_solution_status)
+            != int(highspy.SolutionStatus.kSolutionStatusFeasible)
+            or info.num_primal_infeasibilities != 0
+        ):
+            raise ValueError("native primary has no valid feasible solution")
+
+        lp = solver.getModel().lp_
+        if lp.sense_ != highspy.ObjSense.kMinimize:
+            raise ValueError("unsupported native objective sense")
+        raw = np.asarray(solution.col_value, dtype=float)
+        if raw.shape != (lp.num_col_,) or not np.isfinite(raw).all():
+            raise ValueError("native solution has missing or nonfinite columns")
+        if lp.a_matrix_.format_ != highspy.MatrixFormat.kColwise:
+            raise ValueError("unsupported native matrix layout")
+        matrix = sparse.csc_matrix(
+            (lp.a_matrix_.value_, lp.a_matrix_.index_, lp.a_matrix_.start_),
+            shape=(lp.num_row_, lp.num_col_),
+        )
+        if not np.isfinite(matrix.data).all():
+            raise ValueError("native matrix has nonfinite coefficients")
+        if data.get("param_prob") is not self.prob._cache.param_prog:
+            raise ValueError("native adapter map does not belong to current problem")
+
+        # CVXPY may recover a Boolean leaf differently from the raw MIP vector.
+        # Copy the vector and substitute every actual returned leaf. For shared
+        # battery states, substitute the original cumulative energy calculated
+        # from those same leaves; all original SOC/profile rows are then checked.
+        returned = raw.copy()
+        offsets = data["param_prob"].var_id_to_col
+        for variable in self.prob.variables():
+            if variable.id not in offsets or variable.value is None:
+                raise ValueError(f"missing returned variable {variable.name()}")
+            values = np.asarray(variable.value, dtype=float)
+            start = offsets[variable.id]
+            if values.shape != variable.shape or not np.isfinite(values).all():
+                raise ValueError(f"invalid returned variable {variable.name()}")
+            if start < 0 or start + variable.size > returned.size:
+                raise ValueError(f"invalid native column map for {variable.name()}")
+            returned[start : start + variable.size] = values.ravel(order="F")
+        for stored, original in self._primary_shared_energy_originals.values():
+            if stored.id not in offsets or original.value is None:
+                raise ValueError(f"missing original energy for {stored.name()}")
+            values = np.asarray(original.value, dtype=float)
+            if values.shape != stored.shape or not np.isfinite(values).all():
+                raise ValueError(f"invalid original energy for {stored.name()}")
+            start = offsets[stored.id]
+            returned[start : start + stored.size] = values.ravel(order="F")
+
+        lower = np.asarray(lp.row_lower_, dtype=float)
+        upper = np.asarray(lp.row_upper_, dtype=float)
+        col_lower = np.asarray(lp.col_lower_, dtype=float)
+        col_upper = np.asarray(lp.col_upper_, dtype=float)
+        if any(np.isnan(bounds).any() for bounds in (lower, upper, col_lower, col_upper)):
+            raise ValueError("native model has NaN bounds")
+        row_values = matrix @ returned
+        if not np.isfinite(row_values).all():
+            raise ValueError("returned values yield nonfinite constraints")
+        residual = max(
+            float(np.max(np.maximum(lower - row_values, 0), initial=0)),
+            float(np.max(np.maximum(row_values - upper, 0), initial=0)),
+            float(np.max(np.maximum(col_lower - returned, 0), initial=0)),
+            float(np.max(np.maximum(returned - col_upper, 0), initial=0)),
+        )
+        if residual > 1e-7:
+            raise ValueError(
+                f"returned original-model constraint residual {residual:.3g} exceeds 1e-7"
+            )
+        if (
+            self.optim_conf["set_use_battery"]
+            and self.n_batt == 1
+            and not self._multi_block_battery_model_enabled
+        ):
+            for constraint in self.prob.constraints:
+                violation = np.asarray(constraint.violation(), dtype=float)
+                if not np.isfinite(violation).all() or np.max(violation, initial=0) > 1e-7:
+                    raise ValueError("returned original constraint residual exceeds 1e-7")
+        integers = [
+            index
+            for index, kind in enumerate(lp.integrality_)
+            if kind != highspy.HighsVarType.kContinuous
+        ]
+        if integers and np.max(np.abs(returned[integers] - np.rint(returned[integers]))) > 1e-8:
+            raise ValueError("returned integer residual exceeds 1e-8")
+
+        native_objective = float(info.objective_function_value)
+        returned_objective = float(np.asarray(lp.col_cost_) @ returned + lp.offset_)
+        if not np.isfinite([native_objective, returned_objective]).all():
+            raise ValueError("nonfinite current objective")
+        if abs(returned_objective - native_objective) > 1e-7 * max(1.0, abs(native_objective)):
+            raise ValueError("returned objective differs from current native objective")
+        if integers:
+            bound = float(info.mip_dual_bound)
+            relative_gap = float(info.mip_gap)
+            if not np.isfinite(bound):
+                raise ValueError("missing native MIP bound")
+            if bound > native_objective + 1e-7 * max(1.0, abs(native_objective)):
+                raise ValueError("native lower bound exceeds current objective")
+            if not (
+                (np.isfinite(relative_gap) and relative_gap <= solver_opts["mip_rel_gap"] + 1e-12)
+                or native_objective - bound <= solver_opts["mip_abs_gap"] + 1e-12
+            ):
+                raise ValueError("native MIP gap exceeds relative and absolute limits")
+
+    def _check_mpc_generic_returned_values(self) -> None:
+        """Check recovered leaves when the selected solver has no HiGHS adapter."""
+        for variable in self.prob.variables():
+            if variable.value is None or not np.isfinite(variable.value).all():
+                raise ValueError(f"missing or nonfinite returned variable {variable.name()}")
+            for constraint in variable.domain:
+                violation = np.asarray(constraint.violation(), dtype=float)
+                if not np.isfinite(violation).all() or np.max(violation, initial=0) > 1e-7:
+                    raise ValueError(f"returned domain invalid for {variable.name()}")
+            values = np.asarray(variable.value, dtype=float)
+            for attribute in ("boolean", "integer"):
+                if variable.attributes.get(attribute):
+                    selected = np.atleast_1d(values)[getattr(variable, attribute + "_idx")]
+                    if np.max(np.abs(selected - np.rint(selected)), initial=0) > 1e-8:
+                        raise ValueError(
+                            f"returned {attribute} domain invalid for {variable.name()}"
+                        )
+                    if attribute == "boolean" and (
+                        np.max(np.maximum(-selected, selected - 1), initial=0) > 1e-7
+                    ):
+                        raise ValueError(f"returned Boolean bounds invalid for {variable.name()}")
+        for constraint in self.prob.constraints:
+            violation = np.asarray(constraint.violation(), dtype=float)
+            if not np.isfinite(violation).all() or np.max(violation, initial=0) > 1e-7:
+                raise ValueError("returned constraint residual exceeds 1e-7")
+        for stored, original in self._primary_shared_energy_originals.values():
+            if original.value is None or np.max(np.abs(stored.value - original.value)) > 1e-7:
+                raise ValueError(f"returned original energy differs for {stored.name()}")
+        if not self._primary_shared_energy_originals:
+            return
+        originals = {
+            id(stored): original
+            for stored, original in self._primary_shared_energy_originals.values()
+        }
+        for leaf in self.prob.variables() + self.prob.parameters() + self.prob.constants():
+            originals.setdefault(id(leaf), leaf)
+        for constraint in self.prob.constraints:
+            violation = np.asarray(constraint.tree_copy(originals).violation(), dtype=float)
+            if not np.isfinite(violation).all() or np.max(violation, initial=0) > 1e-7:
+                raise ValueError("returned original constraint residual exceeds 1e-7")
+
+    def _check_mpc_result_columns(self, result: pd.DataFrame) -> None:
+        """Require published controls and SOC to match the accepted leaves."""
+
+        def require(column, expected, scale=1.0):
+            if column not in result:
+                raise ValueError(f"missing MPC result column {column}")
+            actual = np.asarray(result[column], dtype=float)
+            expected = np.asarray(expected, dtype=float)
+            if (
+                actual.shape != (self.num_timesteps,)
+                or expected.shape != actual.shape
+                or not np.isfinite(actual).all()
+                or not np.isfinite(expected).all()
+                or np.max(np.abs(actual - expected) * scale, initial=0) > 1e-7
+            ):
+                raise ValueError(f"MPC result column {column} differs from returned solution")
+
+        grid_pos = np.asarray(self.vars["p_grid_pos"].value, dtype=float)
+        grid_neg = np.asarray(self.vars["p_grid_neg"].value, dtype=float)
+        require("P_grid_pos", grid_pos)
+        require("P_grid_neg", grid_neg)
+        require("P_grid", grid_pos + grid_neg)
+        for index, variable in enumerate(self.vars["p_deferrable"]):
+            require(f"P_deferrable{index}", variable.value)
+
+        if self.optim_conf["set_use_battery"]:
+            battery_conf = self._battery_conf_as_lists()
+            fleet_power = np.zeros(self.num_timesteps)
+            for index in range(self.n_batt):
+                discharge = np.asarray(self.vars["p_sto_pos"][index].value, dtype=float)
+                charge = np.asarray(self.vars["p_sto_neg"][index].value, dtype=float)
+                power = discharge + charge
+                fleet_power += power
+                capacity = battery_conf["cap"][index]
+                energy = float(self.param_soc_init[index].value) * capacity - np.cumsum(
+                    (
+                        discharge / battery_conf["eff_dis"][index]
+                        + charge * battery_conf["eff_chg"][index]
+                    )
+                    * self.time_step
+                )
+                if self.n_batt > 1:
+                    require(f"P_batt_{index}", power)
+                    require(f"SOC_opt_{index}", energy / capacity, scale=capacity)
+                elif not self._multi_block_battery_model_enabled:
+                    require("SOC_opt", energy / capacity, scale=capacity)
+            if not self._multi_block_battery_model_enabled:
+                require("P_batt", fleet_power)
+
+        if self._multi_block_battery_model_enabled:
+            site_power = np.zeros(self.num_timesteps)
+            site_energy = np.zeros(self.num_timesteps)
+            site_capacity = 0.0
+            for index, block in sorted(self.inverter_block_config.items()):
+                variables = self.inverter_block_variables[index]
+                runtime = self.inverter_block_runtime[index]
+                discharge = np.asarray(variables.p_sto_pos.value, dtype=float)
+                charge = np.asarray(variables.p_sto_neg.value, dtype=float)
+                capacity = block.plant_conf["battery_nominal_energy_capacity"]
+                power = discharge + charge
+                energy = self._solver_value_scalar(runtime.soc_init) * capacity - np.cumsum(
+                    (
+                        discharge / block.plant_conf["battery_discharge_efficiency"]
+                        + charge * block.plant_conf["battery_charge_efficiency"]
+                    )
+                    * self.time_step
+                )
+                suffix = self._block_result_suffix(block.index)
+                require(f"P_batt{suffix}", power)
+                require(f"SOC_opt{suffix}", energy / capacity, scale=capacity)
+                site_power += power
+                site_energy += energy
+                site_capacity += capacity
+            require("P_batt", site_power)
+            require("SOC_opt", site_energy / site_capacity, scale=site_capacity)
+
+        if "P_PV_curtailment" in result:
+            if self._public_multi_block_result_columns_enabled():
+                curtailment = np.zeros(self.num_timesteps)
+                for index, block in self.inverter_block_config.items():
+                    if not block.plant_conf.get("compute_curtailment", False):
+                        continue
+                    variable = self.inverter_block_variables[index].p_pv_curtailment
+                    values = np.asarray(variable.value, dtype=float)
+                    curtailment += values
+                    require(f"P_PV_curtailment_{block.index}", values)
+                require("P_PV_curtailment", curtailment)
+            else:
+                require("P_PV_curtailment", self.vars["p_pv_curtailment"].value)
+        if "P_hybrid_inverter" in result:
+            if self._public_multi_block_result_columns_enabled():
+                total = np.zeros(self.num_timesteps)
+                for index, block in self.inverter_block_config.items():
+                    if block.plant_conf.get("inverter_is_hybrid", False):
+                        values = self.inverter_block_variables[index].p_hybrid_inverter.value
+                        require(f"P_hybrid_inverter_{block.index}", values)
+                        total += values
+                require("P_hybrid_inverter", total)
+            else:
+                require("P_hybrid_inverter", self.vars["p_hybrid_inverter"].value)
 
     def perform_optimization(
         self,
@@ -6562,6 +6853,7 @@ class Optimization:
                 objective_expr.args[0] += penalty_terms_total
 
             self.prob = cp.Problem(objective_expr, constraints)
+            self._primary_shared_energy_originals = self._shared_energy_originals.copy()
 
         # Extraction artifacts stay paired with the cached problem. A fallback
         # may rebuild alternatives for this run, but must not replace these
@@ -6631,15 +6923,18 @@ class Optimization:
             # param_definitions.json, which keeps deep-horizon MILPs from timing
             # out before any plan is published (see issue #986). The 0.0 fallback
             # below only applies when the key is absent entirely from a hand-built
-            # optim_conf that bypassed the config system; exact optimal is the safe
-            # choice there. Set lp_solver_mip_rel_gap: 0 to opt back in to exact
-            # optimal. Higher values solve faster still: benchmarks show 5% gap
+            # optim_conf that bypassed the config system; zero relative gap is the
+            # safe choice there. Set lp_solver_mip_rel_gap: 0 to request zero relative
+            # gap; the native absolute gap can still stop the solve. Higher values
+            # solve faster still: benchmarks show 5% gap
             # ~1.75x, 10% ~1.86x, 20% ~2.89x speedup.
             mip_gap = self.optim_conf.get("lp_solver_mip_rel_gap", 0.0)
+            if mpc_start and not isfinite(mip_gap):
+                raise ValueError("lp_solver_mip_rel_gap must be finite for MPC")
             # Validate MIP gap is within sensible bounds [0, 1]
             if mip_gap < 0:
                 self.logger.warning(
-                    f"lp_solver_mip_rel_gap={mip_gap} is negative, using 0 (exact optimal)"
+                    f"lp_solver_mip_rel_gap={mip_gap} is negative, using 0 (zero relative gap)"
                 )
                 mip_gap = 0.0
             elif mip_gap > 1:
@@ -6647,7 +6942,18 @@ class Optimization:
                     f"lp_solver_mip_rel_gap={mip_gap} exceeds 1.0 (100%), clamping to 1.0"
                 )
                 mip_gap = 1.0
-            if mip_gap > 0:
+            if mpc_start:
+                if mip_gap > 0.001:
+                    self.logger.info(
+                        "MPC caps configured lp_solver_mip_rel_gap=%s to 0.001; "
+                        "saved and per-request values may tighten but not loosen this limit",
+                        mip_gap,
+                    )
+                    mip_gap = 0.001
+                solver_opts["mip_rel_gap"] = float(mip_gap)
+                solver_opts["mip_abs_gap"] = 1e-6
+                solver_opts["mip_feasibility_tolerance"] = 1e-8
+            elif mip_gap > 0:
                 solver_opts["mip_rel_gap"] = float(mip_gap)
                 self.logger.debug(f"MIP gap tolerance set to {mip_gap:.1%}")
             else:
@@ -6690,6 +6996,15 @@ class Optimization:
         # Only a solve that returns normally can supply this request's result.
         # A cached CVXPY problem can retain its previous status and values when
         # solve() raises; those must not be mistaken for a new successful plan.
+        # Snapshot after prepare_start, which may replace the cached native result.
+        previous_solver_stats = None
+        previous_native_result = None
+        if mpc_start:
+            previous_solver_stats = self.prob.solver_stats
+            if selected_solver == cp.HIGHS:
+                previous_native_cache = self.prob._solver_cache.get(cp.HIGHS)
+                if previous_native_cache is not None:
+                    previous_native_result = previous_native_cache[2]
         result_problem = None
         try:
             self.prob.solve(solver=selected_solver, warm_start=True, **solver_opts)
@@ -6700,9 +7015,17 @@ class Optimization:
             )
 
         primary_status = result_problem.status if result_problem is not None else None
-        if use_mpc_start and result_problem is not None and primary_status == cp.OPTIMAL:
-            self._mpc_start_problem = self.prob
-            self._mpc_start_dates = data_opt.index.copy()
+        primary_fresh = result_problem is self.prob and primary_status == cp.OPTIMAL
+        if mpc_start and primary_fresh:
+            if selected_solver == cp.HIGHS:
+                current_native_cache = self.prob._solver_cache.get(cp.HIGHS)
+                primary_fresh = bool(
+                    current_native_cache is not None
+                    and current_native_cache[2] is not previous_native_result
+                    and current_native_cache[2].get("model_status") == "kOptimal"
+                )
+            else:
+                primary_fresh = self.prob.solver_stats is not previous_solver_stats
         if has_soc_power_profiles:
             self.soc_profile_fallback_diagnostics["profile_status"] = primary_status
 
@@ -6850,13 +7173,32 @@ class Optimization:
                 else:
                     params.pop("q_input_var", None)
 
+        # A normally returned terminal solver status is still this request's
+        # diagnostic, even though neither the primary nor its retry supplied
+        # an acceptable MPC plan. A solve exception leaves result_problem None.
+        terminal_failure_status = (
+            result_problem.status
+            if mpc_start
+            and result_problem is not None
+            and result_problem.status
+            not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE, "Optimal (Relaxed)")
+            else None
+        )
+        if mpc_start:
+            if not primary_fresh or result_problem is not self.prob:
+                self.logger.warning("MPC rejected plan without a fresh Optimal primary solve")
+                result_problem = None
+                self.prob._solver_cache.pop(selected_solver, None)
+
         # Stage-timer breadcrumb: end of solve phase, start of extract phase.
         _extract_start_perf = time.perf_counter() if stage_times is not None else 0.0
         if stage_times is not None:
             stage_times["optim_solve.solve"] = _extract_start_perf - _solve_start_perf
 
         # Fix for Status Case: Map "optimal" -> "Optimal"
-        status_raw = result_problem.status if result_problem is not None else None
+        status_raw = (
+            result_problem.status if result_problem is not None else terminal_failure_status
+        )
         self.optim_status = status_raw.title() if status_raw else "Failure"
 
         # Accept the established downstream fallback marker retained for the
@@ -6908,6 +7250,26 @@ class Optimization:
             debug,
             q_inputs=q_inputs,
         )
+        if mpc_start:
+            try:
+                if selected_solver == cp.HIGHS:
+                    self._check_mpc_native_returned_values(solver_opts)
+                else:
+                    self._check_mpc_generic_returned_values()
+                self._check_mpc_result_columns(results_df)
+            except Exception as error:
+                self.logger.warning(
+                    "MPC rejected returned plan: %s: %s", type(error).__name__, error
+                )
+                self.optim_status = "Failure"
+                self._mpc_start_problem = None
+                self._mpc_start_dates = None
+                self.prob._solver_cache.pop(selected_solver, None)
+                results_df = pd.DataFrame({"optim_status": "Failure"}, index=data_opt.index)
+            else:
+                if use_mpc_start:
+                    self._mpc_start_problem = self.prob
+                    self._mpc_start_dates = data_opt.index.copy()
         if stage_times is not None:
             stage_times["optim_solve.extract"] = time.perf_counter() - _extract_start_perf
         return results_df

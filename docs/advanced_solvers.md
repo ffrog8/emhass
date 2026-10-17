@@ -118,6 +118,10 @@ For home energy optimization, a 5% gap is typically imperceptible in practice—
 
 **Note:** This parameter only affects problems with binary variables. Pure linear problems (continuous loads only, no battery) are unaffected.
 
+For HiGHS `naive-mpc-optim`, EMHASS caps the effective relative gap at `0.001` (0.1%) on each primary solve, including cached replans. The configured `lp_solver_mip_rel_gap` may tighten this limit, including `0`, but a saved configuration or per-request value cannot loosen it. MPC also sets HiGHS `mip_feasibility_tolerance` to `1e-8` and retains `mip_abs_gap` at `1e-6` before solving. HiGHS may stop when **either** the relative or absolute gap rule is met; a zero relative gap does not remove the absolute-gap rule. Day-ahead and perfect-forecast solver settings keep their existing behaviour.
+
+The relative gap compares the configured whole-plan objective with the solver's bound. It does not promise 0.1% accuracy for the first action or 0.1% of an electricity bill. MPC uses one full-horizon primary solve on the normal path; it does not run an online reference or refinement solve.
+
 ## Tuning for Low-Power Hardware (Raspberry Pi, low-end NUC, etc.)
 
 When EMHASS runs on a Raspberry Pi 4 / 5, an Intel NUC, or similar low-power

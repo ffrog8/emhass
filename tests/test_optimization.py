@@ -2822,7 +2822,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             return real_solve(problem, *args, **solve_kwargs)
 
         with mock.patch.object(cp.Problem, "solve", new=fail_first_solve):
-            self.opt.perform_naive_mpc_optim(
+            rejected = self.opt.perform_naive_mpc_optim(
                 self.df_input_data_dayahead,
                 self.p_pv_forecast,
                 self.p_load_forecast,
@@ -2830,14 +2830,16 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
                 **kwargs,
             )
 
-        self.assertEqual(self.opt.optim_status, "Optimal (Relaxed)")
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(self.opt.optim_status, "Failure")
+        self.assertEqual(list(rejected.columns), ["optim_status"])
+        self.assertEqual(rejected["optim_status"].unique().tolist(), ["Failure"])
         self.assertIs(
             self.opt.prob,
             cached_problem,
             "The one-run relaxed rescue must not replace the cached optimization model",
         )
-
-        self.opt.perform_naive_mpc_optim(
+        recovered = self.opt.perform_naive_mpc_optim(
             self.df_input_data_dayahead,
             self.p_pv_forecast,
             self.p_load_forecast,
@@ -2845,6 +2847,7 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
         self.assertEqual(self.opt.optim_status, "Optimal")
+        self.assertEqual(recovered["optim_status"].unique().tolist(), ["Optimal"])
         self.assertIs(self.opt.prob, cached_problem)
 
     def test_multi_block_extra_profile_rebuilds_selector_shape_after_horizon_resize(self):
@@ -8685,10 +8688,10 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             "to_grid values should be integers",
         )
 
-    def test_perform_naive_mpc_optim_complex_case(self):
+    def test_perform_optimization_complex_configured_gap_and_relaxed_physics(self):
         """
-        Test a complex case with 7 deferrable loads, including thermal and sequence loads,
-        over a long horizon (288 steps) to verify performance fixes (Dynamic Big-M).
+        Exercise generic configured-gap/relaxed physics for 7 deferrable loads,
+        including thermal and sequence loads, over 288 steps (Dynamic Big-M).
         """
 
         # Reuse existing helper to get base data structure
@@ -8810,11 +8813,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
 
         # Run Optimization
         try:
-            opt_res = opt.perform_naive_mpc_optim(
+            opt_res = opt.perform_optimization(
                 df_extended,
-                P_PV,
-                P_Load,
-                prediction_horizon=n_steps,
+                P_PV.values.ravel(),
+                P_Load.values.ravel(),
+                df_extended[opt.var_load_cost].values,
+                df_extended[opt.var_prod_price].values,
                 def_total_timestep=def_total_timestep,
                 def_start_timestep=def_start_timestep,
                 def_end_timestep=def_end_timestep,
@@ -8862,9 +8866,9 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         except Exception as e:
             self.fail(f"Complex optimization failed with error: {e}")
 
-    def test_perform_naive_mpc_optim_complex_case_with_inactive_loads(self):
+    def test_perform_optimization_complex_inactive_loads_configured_gap(self):
         """
-        Test the complex 7-load case with loads 2, 3, 5 set to 0 operating timesteps
+        Test generic configured-gap/relaxed physics with loads 2, 3, 5 inactive
         (matching a real user scenario: dishwasher, wallbox, mock load inactive).
 
         Compares solve time and results between all-active vs partially-inactive
@@ -9005,11 +9009,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # All non-thermal loads have operating timesteps > 0
         def_total_timestep_all = [16, 8, 12, 5, 0, 18, 0]
         t_start_all = time.perf_counter()
-        opt_res_all = opt_all_active.perform_naive_mpc_optim(
+        opt_res_all = opt_all_active.perform_optimization(
             df_extended.copy(),
-            P_PV,
-            P_Load,
-            prediction_horizon=n_steps,
+            P_PV.values.ravel(),
+            P_Load.values.ravel(),
+            df_extended[opt_all_active.var_load_cost].values,
+            df_extended[opt_all_active.var_prod_price].values,
             def_total_timestep=def_total_timestep_all,
             def_start_timestep=[0] * 7,
             def_end_timestep=[n_steps] * 7,
@@ -9042,11 +9047,12 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
         # Loads 2, 3, 5 have 0 operating timesteps (dishwasher, wallbox, mock off)
         def_total_timestep_partial = [16, 8, 0, 0, 0, 0, 0]
         t_start_partial = time.perf_counter()
-        opt_res_partial = opt_partial.perform_naive_mpc_optim(
+        opt_res_partial = opt_partial.perform_optimization(
             df_extended.copy(),
-            P_PV,
-            P_Load,
-            prediction_horizon=n_steps,
+            P_PV.values.ravel(),
+            P_Load.values.ravel(),
+            df_extended[opt_partial.var_load_cost].values,
+            df_extended[opt_partial.var_prod_price].values,
             def_total_timestep=def_total_timestep_partial,
             def_start_timestep=[0] * 7,
             def_end_timestep=[n_steps] * 7,

@@ -98,6 +98,21 @@ Do not assume `/action/dayahead-optim`, `/action/naive-mpc-optim`, or other
 optimization endpoints return a JSON plan suitable for direct control. The
 command bridge should consume published sensors or saved optimization output.
 
+When MPC rejects an optimisation result, EMHASS retains the last valid CSV and plan snapshot but stops
+republishing their planner values. Check `/api/v1/last-run` for the latest action and status; the older
+`/api/v1/plan` `generated_at` remains the time of the last accepted plan. A successful HTTP response from a later
+`publish-data` request alone does not establish a new accepted MPC plan. Separately saved machine-learning forecast
+entities can continue publishing. Saved CSV and planner-entity publication blocks remain on the old artifacts if a
+different optimisation later succeeds; each block clears only when that specific artifact is refreshed.
+These publication blocks apply after the optimisation step returns a rejected result; input-preparation failures
+retain their existing error handling.
+
+Retaining an old CSV does not release a battery command already forced by a Home Assistant automation or device.
+The external control owner must handle a rejected or missing plan and verify the equipment's actual state before
+release. That control-owner handoff and physical verification are a release blocker for any deployment that relies
+on forced battery commands; see [release blocker R1](mpc_accuracy_verification.md#r1-control-owner-release-blocker).
+EMHASS does not implement a device-control policy here.
+
 ## Computed variables and published data
 
 Below you can find a list of the variables resulting from EMHASS computation, shown in the charts and published to Home Assistant through the ```publish_data``` command:

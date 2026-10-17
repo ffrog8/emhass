@@ -35,10 +35,30 @@ This does not erase an already published HA schedule or command equipment. Exist
 publication rejection apply to the failed new result. `tests/test_solver_exception_results.py` covers primary and
 fallback exceptions, recovery, preservation of the last valid API plan, and refusal to publish a failed result.
 
+## Accepted plan and publication
+
+Only a current MPC result with an exact `Optimal` status and usable plan columns replaces the latest CSV, saved
+planner entities and `/api/v1/plan` snapshot. A failed solve, rejected numerical result or relaxed fallback records
+the failed run in `/api/v1/last-run` while retaining the last accepted plan for inspection. Retention does not make
+that plan a fresh answer to the rejected request.
+
+Later `publish-data` calls read the latest run verdict from `last_run.json` before reusing a saved CSV. A rejected
+MPC run also marks existing optimiser CSVs and saved planner entities as blocked in `entities/metadata.json`; it
+does not change their data values. This keeps old MPC artifacts blocked even if a later day-ahead run succeeds.
+Saving a new CSV clears only that filename's block, and saving a new entity clears only that entity's block.
+`continual_publish` applies the same entity check. Independently saved `mlforecaster` and `mlregressor` entities
+can continue publishing.
+
+The run-verdict check reads the file directly because each web worker has its own in-memory cache. If that verdict
+or saved-artifact metadata cannot be read, saved plan publication stops. A disk failure that prevents the rejected
+verdict or artifact flags from being written cannot be communicated reliably to another worker. The metadata
+read-modify-write lock covers tasks in one worker; simultaneous updates from separate workers can race. Those
+storage failures and concurrent writes remain operational limitations.
+
 ## Verification scope
 
-The combined source passed all seven solver-exception tests and ten partial-start contract cases. The full isolated
-suite executed before style-only integration reported 1,289 passed, 3 failed, 0 skipped and 32 expected failures. Its
+Earlier solver-exception integration, before this MPC change, passed all seven solver-exception tests and ten
+partial-start contract cases. Its full isolated suite reported 1,289 passed, 3 failed, 0 skipped and 32 expected failures. Its
 three weather-test failures reproduce without the solver-exception fix: two tests depend on an unmocked Open-Meteo
 request, and one mocks an outdated URL. They remain separate from these solver changes.
 

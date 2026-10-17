@@ -28,6 +28,92 @@ logger = logging.getLogger(__name__)
 # and corrupt the single shared index. Module-level so it is shared by all
 # instances; binds to the running loop on first use (Python >= 3.10).
 _metadata_lock = asyncio.Lock()
+_OPTIMIZER_CSV_BLOCKS_KEY = "_optimizer_csv_publication_blocked"
+
+
+async def set_saved_optimizer_publication_blocked(
+    data_path: pathlib.Path,
+    csv_filenames: tuple[str, ...],
+    block_planner_entities: bool,
+    blocked: bool,
+) -> bool:
+    """Mark existing saved optimizer artifacts without changing their values.
+
+    A fresh post_data save replaces its entity metadata record, clearing that
+    entity's block. CSV blocks are cleared only for the filename actually saved.
+    """
+    metadata_path = pathlib.Path(data_path) / "entities" / "metadata.json"
+    async with _metadata_lock:
+        try:
+            if metadata_path.exists():
+                async with aiofiles.open(metadata_path) as file:
+                    metadata = orjson.loads(await file.read())
+            elif blocked and csv_filenames:
+                metadata = {}
+            else:
+                return True
+            if not isinstance(metadata, dict):
+                raise ValueError("invalid entity metadata")
+            csv_blocks = metadata.get(_OPTIMIZER_CSV_BLOCKS_KEY, {})
+            if not isinstance(csv_blocks, dict):
+                raise ValueError("invalid optimizer CSV publication metadata")
+            changed = False
+            for filename in csv_filenames:
+                if blocked:
+                    if csv_blocks.get(filename) is not True:
+                        csv_blocks[filename] = True
+                        changed = True
+                elif filename in csv_blocks:
+                    del csv_blocks[filename]
+                    changed = True
+            if csv_blocks:
+                metadata[_OPTIMIZER_CSV_BLOCKS_KEY] = csv_blocks
+            elif _OPTIMIZER_CSV_BLOCKS_KEY in metadata:
+                del metadata[_OPTIMIZER_CSV_BLOCKS_KEY]
+                changed = True
+            if block_planner_entities and blocked:
+                for entity_id, entry in metadata.items():
+                    if (
+                        entity_id != _OPTIMIZER_CSV_BLOCKS_KEY
+                        and isinstance(entry, dict)
+                        and entry.get("type_var") not in {"mlforecaster", "mlregressor"}
+                        and entry.get("publication_blocked") is not True
+                    ):
+                        entry["publication_blocked"] = True
+                        changed = True
+            if not changed:
+                return True
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = metadata_path.with_name(
+                f"metadata.json.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            async with aiofiles.open(temp_path, "w") as file:
+                await file.write(orjson.dumps(metadata, option=orjson.OPT_INDENT_2).decode())
+            os.replace(temp_path, metadata_path)
+            return True
+        except (OSError, orjson.JSONDecodeError, ValueError) as exc:
+            logger.error("Could not update saved optimizer publication metadata: %s", exc)
+            return False
+
+
+def saved_optimizer_csv_blocked(data_path: pathlib.Path, filename: str) -> bool:
+    """Return whether a retained optimizer CSV was invalidated by a later MPC run."""
+    metadata_path = pathlib.Path(data_path) / "entities" / "metadata.json"
+    try:
+        metadata = orjson.loads(metadata_path.read_bytes())
+    except FileNotFoundError:
+        return False
+    except (OSError, orjson.JSONDecodeError) as exc:
+        logger.error("Cannot verify saved optimizer CSV metadata: %s", exc)
+        return True
+    if not isinstance(metadata, dict):
+        return True
+    csv_blocks = metadata.get(_OPTIMIZER_CSV_BLOCKS_KEY, {})
+    if not isinstance(csv_blocks, dict):
+        return True
+    flag = csv_blocks.get(filename, False)
+    return flag if isinstance(flag, bool) else True
+
 
 header_accept = "application/json"
 header_auth = "Bearer"
